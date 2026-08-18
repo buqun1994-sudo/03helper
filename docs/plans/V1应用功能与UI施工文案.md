@@ -5,6 +5,8 @@
 1. 本文是 Android V1 的产品、界面和施工基线；F0 Android 工程、视觉令牌、状态投影和确定性 Debug 场景已经建立，但真实安装会话、ADB 通道、下载服务、正式签名和 Cloud 发布链仍未完成。
 2. 当前真实锚点为单 `app` 模块、`applicationId/namespace=com.tcrrry.helper`、`app/src/main/kotlin/com/tcrrry/helper/` 源码根与 `Theme.ThreeHelper`；完整 owner 与文件边界以 `docs/architecture/项目长期总纲.md` 第 2 节为准，不得从本文另建包名、状态机或动效参数。
 3. 本文复用 Cloud 最新 iCAR 03 官网的视觉语言，不复制官网页面。Cloud 接线能力与边界见 `docs/architecture/Cloud项目能力接线.md`。
+4. F0 已完成并通过本机与指定手机 smoke；F0 基座首笔提交为 `948f51d`。本条只证明手机工程、视觉壳、状态投影和确定性演示可运行，不代表真实车机安装能力已经开放。
+5. 后续施工必须从 F0 已落地的 `InstallationSessionSnapshot`、`InstallUiStateMapper` 和 `InstallApp` 继续，禁止在页面、Debug 场景或脚本中另建生产状态机。
 
 ## 2. V1 交付目标
 
@@ -144,11 +146,31 @@
 4. F0 已按长期总纲的真实锚点落地；Debug 变体用 `DebugScenarioActivity` 提供搜索、发现、选择、进度、成功、暂停、失败和维护场景，生产 `MainActivity` 不借用该夹具推进业务状态。
 5. F0 验证只能证明手机工程、状态投影、视觉壳和基础动效可运行，不得据此宣称设备发现、组件下载、车机安装、授权或维护动作已经实现。
 
-### F1：首次安装状态与页面
+### F1：首次安装会话与页面接线
 
-1. 按 `IDLE`、`DISCOVERING`、`CONNECTED`、`SELECTION_CONFIRMED`、`RESOLVING_SOURCE`、`DOWNLOADING_ARCHIVE`、`VERIFYING_ARCHIVE`、`EXTRACTING_APK`、`VERIFYING_ARTIFACTS`、`INSTALLING`、`AUTHORIZING`、`VERIFYING_DEVICE`、`SUCCEEDED`、`PAUSED`、`FAILED` 映射页面、按钮可用性和恢复入口；这些内部状态在 UI 中合并为五个用户阶段。
-2. 完成设备列表、组件选择、自动进度、成功、暂停和失败页面；每个页面只能发送用户意图，状态转换只由 `InstallationSession` owner 决定，所有可见状态变更复用第 `3.3` 节动效令牌。
-3. 先为窄屏截图和无网络 / 无设备状态建立确定性测试夹具，再接真实设备。
+施工目标：把 F0 的静态快照契约变成唯一可推进、可取消、可恢复的 `InstallationSession`，让生产 `MainActivity` 和 Debug 演示都通过同一会话状态驱动；本阶段不接真实网络、WebView、ADB 或车机。
+
+物理锚点与边界：
+
+1. 新增 `app/src/main/kotlin/com/tcrrry/helper/domain/session/InstallationSession.kt` 与同目录的 `InstallationSessionCommand.kt`；文件头、包名和编码从现有 `InstallationSessionSnapshot.kt` 直接复制，owner 固定为 `com.tcrrry.helper.domain.session`。
+2. `InstallationSession` 唯一持有 `MutableStateFlow<InstallationSessionSnapshot>`，只接受结构化 command / adapter result；UI 不得直接写快照，适配器不得直接改 Compose 状态。
+3. 修改 `app/src/main/kotlin/com/tcrrry/helper/MainActivity.kt`：创建一个会话实例，用生命周期感知方式收集快照，并将 `InstallUiIntent` 映射为会话 command；删除当前固定 `IDLE` 快照入口，但保留 `InstallApp` 和 `InstallUiStateMapper` 作为唯一呈现主链。
+4. Debug 场景只提供确定性 fake port / 事件序列，改为驱动同一个 `InstallationSession`；禁止在 `DebugScenarioActivity` 内复制一套状态转换逻辑。
+
+微观状态规则：
+
+1. `IDLE -> DISCOVERING` 只由开始查找触发；发现列表必须去重，未确认的设备不能进入 `CONNECTED`。
+2. `CONNECTED -> SELECTION_CONFIRMED` 只接受必装组件齐全且可选组件元数据完整的选择；`03歌词`、`03桌面` 永远不能被取消。
+3. `SELECTION_CONFIRMED` 之后按 `RESOLVING_SOURCE`、`DOWNLOADING_ARCHIVE`、`VERIFYING_ARCHIVE`、`EXTRACTING_APK`、`VERIFYING_ARTIFACTS`、`INSTALLING`、`AUTHORIZING`、`VERIFYING_DEVICE` 顺序推进；任何前置结果缺失都停在 `FAILED`，不得猜测跳过。
+4. 取消、断线和可恢复错误进入 `PAUSED` 并保存会话检查点；重复事件、旧会话事件和未知事件不得覆盖更新后的快照。
+5. 只有安装、配置和可用性三类结构化结果同时成立时，才允许 `SUCCEEDED`；成功动作进入维护态的意图仍由同一会话接收。
+
+执行与验证：
+
+1. 新增 `InstallationSessionTest`，至少覆盖正常全路径、必装锁定、可选项切换、取消 / 恢复、断线、重复事件、旧事件、前置校验失败和成功证据不足。
+2. 保留并扩展 `InstallUiStateMapperTest`，验证所有内部状态到五类页面、按钮可用性、进度边界和恢复入口的唯一映射。
+3. 先用 fake port 完成 Debug `flow` 的真实状态推进和手机运行 smoke，再进入 F2 的下载 / WebView，或 F3 的 LAN / ADB；本阶段不新增业务权限，不安装车机组件。
+4. F1 完成标准是：生产入口不再硬编码快照；所有页面动作都能经由会话产生可观察状态变化；Debug 与生产共用同一 reducer / session owner；编译、直接单测和手机运行 smoke 全部通过。
 
 ### F2：下载与发布清单
 
