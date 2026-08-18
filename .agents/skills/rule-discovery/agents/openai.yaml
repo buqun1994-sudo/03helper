@@ -1,0 +1,4 @@
+interface:
+  display_name: "规则发现"
+  short_description: "沉淀跨任务可复用规则并识别需要回流模板源的能力候选"
+  default_prompt: "Use $rule-discovery to classify and preserve reusable rules discovered during this task."

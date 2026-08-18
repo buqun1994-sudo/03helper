@@ -1,0 +1,4 @@
+# Project-level Codex configuration.
+# Do not commit secrets, personal tokens, device addresses, or private paths.
+
+project_doc_max_bytes = 65536

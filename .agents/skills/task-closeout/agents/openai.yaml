@@ -1,0 +1,4 @@
+interface:
+  display_name: "任务收尾"
+  short_description: "完成安装助手收尾、设备 smoke、交接与提交门禁"
+  default_prompt: "Use $task-closeout to run the minimum isolated device smoke, hand off user testing, and enforce the commit gate."

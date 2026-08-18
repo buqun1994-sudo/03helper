@@ -1,0 +1,4 @@
+interface:
+  display_name: "模板回流"
+  short_description: "将已验证的通用能力去除项目专有信息后回流到新项目模板源"
+  default_prompt: "Use $template-feedback to turn a reusable project capability into a de-specialized template update."

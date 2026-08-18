@@ -1,0 +1,4 @@
+interface:
+  display_name: "Skill 维护"
+  short_description: "创建、更新、路由并校验仓库内可复用的项目级工作流 Skill"
+  default_prompt: "Use $skill-authoring to create or update a project skill with valid routing and metadata."

@@ -1,0 +1,11 @@
+# Copy to local-context.properties and fill in machine-local values.
+# The real file is ignored by Git. Do not put passwords, tokens, or private keys here.
+
+JDK17_HOME=/path/to/jdk-17
+ANDROID_SDK_ROOT=/path/to/Android/sdk
+PRIMARY_ADB=/path/to/Android/sdk/platform-tools/adb
+FALLBACK_ADB=
+INSTALLER_TEST_ADB_SERIAL=
+INSTALLER_TEST_DEVICE_ROLE=
+SHARED_TOOLCHAIN_DOC=
+ARTIFACT_MANIFEST_URL=
