@@ -67,12 +67,19 @@ object InstallUiStateMapper {
             .mapNotNull { it.sizeLabel }
             .joinToString(" + ")
             .ifBlank { "待准备" }
+        val selectedRows = rows.filter { it.required || it.selected }
         return InstallUiState.Selection(
             deviceName = snapshot.device?.displayName ?: "车机未连接",
             components = rows,
             summaryCount = selected,
             summarySizeLabel = sizeLabel,
-            canStart = rows.any { it.required } && rows.all { !it.selected || it.sizeLabel != null },
+            canStart = snapshot.device?.connectionStatus == DeviceConnectionStatus.CONFIRMED &&
+                selectedRows.isNotEmpty() &&
+                selectedRows.all {
+                    !it.versionLabel.isNullOrBlank() &&
+                        !it.sizeLabel.isNullOrBlank() &&
+                        !it.compatibilityLabel.isNullOrBlank()
+                },
         )
     }
 

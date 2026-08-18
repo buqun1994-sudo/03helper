@@ -100,6 +100,56 @@ class InstallUiStateMapperTest {
         assertEquals("iCAR 03", maintenance.deviceName)
     }
 
+    @Test
+    fun `every internal state maps to one of the five stable screens`() {
+        val installingStates = listOf(
+            InstallationSessionState.SELECTION_CONFIRMED,
+            InstallationSessionState.RESOLVING_SOURCE,
+            InstallationSessionState.DOWNLOADING_ARCHIVE,
+            InstallationSessionState.VERIFYING_ARCHIVE,
+            InstallationSessionState.EXTRACTING_APK,
+            InstallationSessionState.VERIFYING_ARTIFACTS,
+            InstallationSessionState.INSTALLING,
+            InstallationSessionState.AUTHORIZING,
+            InstallationSessionState.VERIFYING_DEVICE,
+        )
+        installingStates.forEach { state ->
+            assertTrue(
+                "Expected installing projection for $state",
+                InstallUiStateMapper.map(
+                    InstallationSessionSnapshot(state = state, device = device),
+                ) is InstallUiState.Installing,
+            )
+        }
+        assertTrue(InstallUiStateMapper.map(InstallationSessionSnapshot(InstallationSessionState.SUCCEEDED)) is InstallUiState.Result)
+        assertTrue(InstallUiStateMapper.map(InstallationSessionSnapshot(InstallationSessionState.PAUSED)) is InstallUiState.Result)
+        assertTrue(InstallUiStateMapper.map(InstallationSessionSnapshot(InstallationSessionState.FAILED)) is InstallUiState.Result)
+        assertTrue(InstallUiStateMapper.map(InstallationSessionSnapshot(InstallationSessionState.MAINTENANCE)) is InstallUiState.Maintenance)
+    }
+
+    @Test
+    fun `selection start requires confirmed device and complete metadata`() {
+        val unconfirmed = InstallUiStateMapper.map(
+            selectionSnapshot(
+                components = listOf(
+                    component("lyrics", required = true, size = "18 MB"),
+                    component("desktop", required = true, size = "12 MB"),
+                ).map { it.copy(compatibilityLabel = null) },
+            ).copy(device = device.copy(connectionStatus = DeviceConnectionStatus.CONNECTING)),
+        ) as InstallUiState.Selection
+        assertFalse(unconfirmed.canStart)
+
+        val incomplete = InstallUiStateMapper.map(
+            selectionSnapshot(
+                components = listOf(
+                    component("lyrics", required = true, size = "18 MB"),
+                    component("desktop", required = true, size = "12 MB"),
+                ).map { it.copy(versionLabel = null) },
+            ),
+        ) as InstallUiState.Selection
+        assertFalse(incomplete.canStart)
+    }
+
     private fun selectionSnapshot(
         components: List<ComponentDescriptor>,
         selectedOptionalIds: Set<String> = emptySet(),
@@ -114,7 +164,9 @@ class InstallUiStateMapperTest {
         id = id,
         displayName = id,
         required = required,
+        versionLabel = "1.0",
         sizeLabel = size,
+        compatibilityLabel = "适用于当前车机",
     )
 
     private companion object {

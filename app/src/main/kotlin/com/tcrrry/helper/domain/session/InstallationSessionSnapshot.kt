@@ -10,6 +10,11 @@ data class InstallationSessionSnapshot(
     val progress: SessionProgress? = null,
     val failure: SessionFailure? = null,
     val componentResults: List<ComponentResult> = emptyList(),
+    val sessionId: Long = 0L,
+    val revision: Long = 0L,
+    val lastEventSequence: Long = 0L,
+    val checkpoint: SessionCheckpoint? = null,
+    val evidence: SessionEvidence = SessionEvidence(),
 )
 
 data class DeviceSummary(
@@ -39,6 +44,7 @@ data class SessionFailure(
     val category: FailureCategory,
     val componentName: String? = null,
     val retryable: Boolean = true,
+    val reasonCode: String? = null,
 )
 
 data class ComponentResult(
@@ -46,4 +52,24 @@ data class ComponentResult(
     val installed: Boolean,
     val configured: Boolean,
     val available: Boolean,
+    val componentId: String? = null,
+)
+
+/** Structured proof collected by the session before it can report success. */
+data class SessionEvidence(
+    val artifactsVerified: Set<String> = emptySet(),
+    val installed: Set<String> = emptySet(),
+    val configured: Set<String> = emptySet(),
+    val available: Set<String> = emptySet(),
+)
+
+/** The last reliable point from which a paused installation can resume. */
+data class SessionCheckpoint(
+    val sessionId: Long,
+    val state: InstallationSessionState,
+    val deviceId: String?,
+    val selectedOptionalComponentIds: Set<String>,
+    val currentComponentName: String?,
+    val progress: SessionProgress?,
+    val evidence: SessionEvidence,
 )

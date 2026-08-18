@@ -2,11 +2,11 @@
 
 ## 1. 文档状态
 
-1. 本文是 Android V1 的产品、界面和施工基线；F0 Android 工程、视觉令牌、状态投影和确定性 Debug 场景已经建立，但真实安装会话、ADB 通道、下载服务、正式签名和 Cloud 发布链仍未完成。
+1. 本文是 Android V1 的产品、界面和施工基线；F0 Android 工程、视觉令牌、状态投影和确定性 Debug 场景已经建立，F1 唯一安装会话与页面接线已完成，但真实 ADB 通道、下载服务、正式签名和 Cloud 发布链仍未完成。
 2. 当前真实锚点为单 `app` 模块、`applicationId/namespace=com.tcrrry.helper`、`app/src/main/kotlin/com/tcrrry/helper/` 源码根与 `Theme.ThreeHelper`；完整 owner 与文件边界以 `docs/architecture/项目长期总纲.md` 第 2 节为准，不得从本文另建包名、状态机或动效参数。
 3. 本文复用 Cloud 最新 iCAR 03 官网的视觉语言，不复制官网页面。Cloud 接线能力与边界见 `docs/architecture/Cloud项目能力接线.md`。
 4. F0 已完成并通过本机与指定手机 smoke；F0 基座首笔提交为 `948f51d`。本条只证明手机工程、视觉壳、状态投影和确定性演示可运行，不代表真实车机安装能力已经开放。
-5. 后续施工必须从 F0 已落地的 `InstallationSessionSnapshot`、`InstallUiStateMapper` 和 `InstallApp` 继续，禁止在页面、Debug 场景或脚本中另建生产状态机。
+5. 后续施工必须从 F0/F1 已落地的 `InstallationSessionSnapshot`、`InstallationSession`、`InstallUiStateMapper` 和 `InstallApp` 继续，禁止在页面、Debug 场景或脚本中另建生产状态机。
 
 ## 2. V1 交付目标
 
@@ -172,13 +172,29 @@
 3. 先用 fake port 完成 Debug `flow` 的真实状态推进和手机运行 smoke，再进入 F2 的下载 / WebView，或 F3 的 LAN / ADB；本阶段不新增业务权限，不安装车机组件。
 4. F1 完成标准是：生产入口不再硬编码快照；所有页面动作都能经由会话产生可观察状态变化；Debug 与生产共用同一 reducer / session owner；编译、直接单测和手机运行 smoke 全部通过。
 
+5. F1 已完成：`InstallationSession` 以会话代次、事件序号和结构化检查点隔离旧事件；发现去重、设备确认、必装锁定、元数据门禁、严格阶段顺序、暂停 / 断线恢复、失败闭环和安装 / 配置 / 可用性证据门禁均由同一 owner 执行。F1 fake 只替代尚未施工的外部端口，不替代生产状态机。
+
+6. F1 人工验收由用户明确跳过；该决定只表示暂不执行 Debug / 页面主测，不表示真实下载、设备安装或 F1 之外的外部能力已经验证。后续真实能力验收统一在对应下载、设备和安装链路完成后执行。
+
 ### F2：下载与发布清单
 
-1. 接入组件清单、三个单组件 ZIP 蓝奏云分享页、`LanzouWebSourceAdapter`、应用自有普通 HTTPS 下载器、`ArtifactArchiveExtractor` 和完整性验证。
-2. 实现固定顺序：蓝奏云 ZIP 分享页 -> Cloud R2 ZIP 对象 -> GitHub Releases ZIP 对象；密码文件夹和三应用合并 ZIP 不进入自动会话。
-3. 隐藏 WebView 使用 Android 默认手机端标识，接收正常下载回调后立即交给原生下载器；不使用外部浏览器、第三方直链服务或桌面 User-Agent。
-4. WebView 必须保持挂载在当前安装页面中，由不透明的安装进度层完整遮挡；它不进入无障碍树、不接收用户触摸和焦点、不暴露 JavaScript bridge。取得当次下载请求或失败后立即停止加载并销毁，不能以 `GONE` 的假后台页面依赖侥幸执行。
-5. Cloud release index / R2 接线遵循 `docs/architecture/Cloud项目能力接线.md`，但在 Android profile、单组件 ZIP 和真实对象未建立前保持待实施状态。
+施工目标：把 F1 已有的 `RESOLVING_SOURCE`、`DOWNLOADING_ARCHIVE`、`VERIFYING_ARCHIVE`、`EXTRACTING_APK` 和 `VERIFYING_ARTIFACTS` 接上真实的受控下载与发布物完整性链路；本阶段不接 LAN、ADB、车机安装、授权或可用性验证。
+
+物理边界与入口：
+
+1. 先冻结 `ArtifactManifest`、`ResolvedDownloadRequest`、来源切换结果和结构化错误的最小 schema；清单只能声明签名发布物、哈希、包身份、版本和兼容范围，不能携带任意 shell、动态权限或运行时任意 URL。
+2. 按长期总纲的 owner 建立 `ReleaseSourcePolicy`、`CloudReleaseCatalogAdapter`、`LanzouWebSourceAdapter`、`ArtifactDownloader`、`ArchiveIdentityVerifier`、`ArtifactArchiveExtractor` 和 `ArtifactIdentityVerifier`；它们通过端口把结构化结果送入 `InstallationSession`，不直接操作 Compose 状态。
+3. 来源固定为“蓝奏云单组件 ZIP 分享页 -> Cloudflare R2 同字节 ZIP -> GitHub Releases 同字节 ZIP”；密码文件夹、三应用合并 ZIP、夸克和第三方直链转换器不进入自动会话。
+4. 隐藏 WebView 使用 Android 默认手机端标识，挂载在当前安装页面背后并由不透明进度层遮挡；不启动外部浏览器、不接收用户触摸 / 焦点、不暴露 JavaScript bridge。取得下载回调或失败后立即停止加载并销毁。
+5. 下载器只写入应用私有缓存的 `.zip.part`；ZIP 大小与 SHA-256 通过后才允许受控解压。唯一 APK 的 entry 名称、大小、SHA-256、包名、版本和签名证书全部通过后，才向会话发送产物校验成功，并立即删除 ZIP。
+
+F2 验证门槛：
+
+1. 先用确定性 fixture 覆盖清单签名 / 字段缺失、来源切换、HTML 假响应、解析超时、断点 / 重试、ZIP 哈希不符、ZIP 结构异常、路径穿越、多个 APK、APK 哈希 / 包身份 / 证书不符和缓存清理；任何失败都必须 fail closed，并把结构化原因送入现有会话。
+2. 在真实 Android System WebView 和真实单组件 ZIP 证据具备前，不把模拟 User-Agent、桌面浏览器或 Debug fixture 记录为真实主源通过。
+3. F2 完成后，F1 的页面仍只消费 `InstallUiStateMapper`；下载与校验进度、失败原因和备用源切换不得通过页面内特判表达。
+
+当前施工起点：先读取 `docs/architecture/项目长期总纲.md` 第 2、5、7 节、`docs/plans/03helper首版安装流程计划.md` 的 ZIP 自动处理契约、`docs/architecture/Cloud项目能力接线.md` 和 `docs/testing/验证矩阵.md`，再给出文件级物理锚点；未冻结清单 schema 前禁止自由创建外部协议。
 
 ### F3：设备与安装会话
 

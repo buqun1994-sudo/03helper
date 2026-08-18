@@ -43,14 +43,35 @@
 10. F0 只证明手机工程、状态投影、视觉壳、动效和启动可运行；真实局域网发现、组件下载 / 解压 / 哈希、ADB 上传安装、授权回读、车机可用性验证、Cloud 发布链和正式签名仍未施工。
 11. F0 基座已在提交 `948f51d` 固化；提交前完成暂存区差异检查，未包含本机上下文、设备地址、截图或构建产物。
 
+## 2026-08-18 F1 安装会话与页面接线
+
+1. 已新增 `app/src/main/kotlin/com/tcrrry/helper/domain/session/InstallationSession.kt` 与 `InstallationSessionCommand.kt`；文件头、包名和编码沿用 `InstallationSessionSnapshot.kt`，没有新增外部依赖或业务权限。
+2. `InstallationSession` 现在是唯一可变状态 owner，暴露 `StateFlow<InstallationSessionSnapshot>`；快照新增会话代次、修订号、事件序号、可恢复检查点和结构化证据，旧会话事件、重复事件和未知事件均不能覆盖较新状态。
+3. 已实现并由单测覆盖：显式开始发现、设备去重、未确认设备阻断、03 歌词 / 03桌面必装锁定、可选组件切换、元数据完整性门禁，以及 `SELECTION_CONFIRMED` 后严格经过获取 / 下载 / 归档校验 / 解压 / 产物校验 / 安装 / 配置 / 设备验证阶段。
+4. 取消、断线和可恢复错误进入 `PAUSED` 并保存检查点；断线恢复必须接收带 `CONFIRMED` 设备身份的结构化重连事件。前置结果缺失、校验失败、未知事件和成功证据不足均 fail closed。
+5. 只有安装、配置、可用性三类证据以及前置产物校验全部成立时才进入 `SUCCEEDED`；成功后的维护入口仍由同一会话接收，不建立第二套 Debug 或 UI 状态机。
+6. `MainActivity` 已改为创建会话并用生命周期感知方式收集快照；`InstallUiStateMapper` 仍是唯一领域到 UI 投影，并同步补齐元数据 / 设备确认的启动按钮门禁。
+7. `DebugScenarioActivity` 已改为只发送 fake command / adapter event；`flow`、暂停、失败、成功和维护场景均通过生产 `InstallationSession` 推进，不再在 Debug 内复制 `snapshot.copy` reducer。
+8. 本轮本机验证通过：`./gradlew :app:lintDebug :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest`；lint 无错误，仅保留 F0 已锁定依赖的版本提示。
+9. 指定手机 `SM-F946B` 上完成 Debug / AndroidTest APK 保留数据覆盖安装；`InstallAppActivitySmokeTest` instrumentation `2/2` 通过。真实运行检查确认生产入口点击“重新查找”进入“正在查找车机”，Debug `flow` 到达成功结果，暂停 / 失败场景显示对应恢复文案；未执行车机安装、网络下载或 ADB 业务动作。
+10. 本轮未推送、未发布；F1 代码、测试和文档改动已由本次交接提交统一固化，未写入本机上下文、设备地址、截图或构建产物。
+
+## 2026-08-18 F1 验收决策与 F2 启动
+
+1. 用户明确跳过 F1 的 Debug 场景与页面人工验收；该项记录为“用户主动不测”，不计作人工通过，也不回退或降低 F1 已有的自动化断言。
+2. F1 已完成本机低成本验证和指定手机基础 smoke：领域单测、UI 映射单测、Lint、Debug / AndroidTest 构建、instrumentation `2/2` 以及生产入口 / Debug 场景运行检查均已通过；真实网络、WebView、局域网、ADB 业务操作、车机安装和授权仍未执行。
+3. 当前施工阶段切换为 F2“下载与发布清单”。F2 只负责把可信组件清单、隐藏 Android System WebView 下载回调、应用内 ZIP 下载、归档 / APK 完整性验证和固定备用源策略接入现有 `InstallationSession`，不施工 LAN、ADB、车机安装或授权。
+4. F2 的外部结果必须通过结构化端口 / adapter event 注入 `InstallationSession`；不得把 URL 解析、下载协议、ZIP 文件路径或错误分支写进 Compose 页面，也不得另建状态机。
+5. F2 交接时必须保留真实能力的待验证标记：在用户进行真实网络 / ZIP / WebView 验收前，不把 Debug fixture、单元测试或模拟下载写成真实源可用。
+
 ## 未完成事项
 
-1. 完成真实 `InstallationSession` 状态机、首次安装应用流程，以及局域网发现 / ADB 端口适配。
+1. 接入真实局域网发现、设备连接和 ADB 端口适配；沿用 F1 会话的结构化 command / event，不在适配器内复制状态机。
 2. 建立隐藏 Android System WebView 蓝奏云 ZIP 适配器、应用内下载器、`ArtifactArchiveExtractor`、签名版本清单、R2 / GitHub Releases ZIP 自动备用和回滚链；确认客户端不会打开外部浏览器或把夸克页面当自动协议。
 3. 为 03 歌词、03桌面和文件管理器取得可验证的包身份、兼容范围、发布签名和合规材料。
 4. 用真实 `S56_HQX` 设备完成定向安装、授权回读、启动可用性和断线恢复 smoke；用独立设备验证异常和破坏性动作门禁。
 5. 完成维护态的检查更新、保留数据重装、修复授权、重启服务、缓存清理、受控安装 / 卸载和脱敏诊断。
 
-## F1 交接入口
+## F2 交接入口
 
-下一轮从 `docs/plans/V1应用功能与UI施工文案.md` 的 F1 小节开始：先实现唯一 `InstallationSession` 与结构化 command / fake port，接通生产 `MainActivity` 和 Debug `flow`，再以状态转移单测和手机运行 smoke 验证；真实下载、WebView、LAN、ADB、授权和车机安装保持在 F2 / F3，不得提前把外部协议写进 UI 或领域状态机。
+下一轮从 `docs/plans/V1应用功能与UI施工文案.md` 的 F2 小节开始：先冻结 `ArtifactManifest`、来源策略和结构化下载结果，再实现隐藏 WebView、私有缓存下载、ZIP / APK 校验与固定源切换；完成后把结果接入现有 `InstallationSession` 的 `RESOLVING_SOURCE` 至 `VERIFYING_ARTIFACTS` 阶段。F3 的 LAN / ADB、安装、授权和车机可用性验证暂不提前施工。

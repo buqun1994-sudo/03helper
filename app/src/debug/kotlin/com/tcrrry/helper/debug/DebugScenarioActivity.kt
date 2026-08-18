@@ -5,22 +5,20 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.collectAsState
+import com.tcrrry.helper.domain.session.ComponentCheck
 import com.tcrrry.helper.domain.session.ComponentDescriptor
-import com.tcrrry.helper.domain.session.ComponentResult
 import com.tcrrry.helper.domain.session.DeviceConnectionStatus
 import com.tcrrry.helper.domain.session.DeviceSummary
-import com.tcrrry.helper.domain.session.FailureCategory
-import com.tcrrry.helper.domain.session.InstallationSessionSnapshot
-import com.tcrrry.helper.domain.session.InstallationSessionState
-import com.tcrrry.helper.domain.session.SessionFailure
-import com.tcrrry.helper.domain.session.SessionProgress
+import com.tcrrry.helper.domain.session.InstallationSession
+import com.tcrrry.helper.domain.session.InstallationSessionCommand
+import com.tcrrry.helper.domain.session.InstallationSessionEvent
 import com.tcrrry.helper.ui.InstallApp
-import com.tcrrry.helper.ui.state.InstallUiIntent
+import com.tcrrry.helper.toInstallationSessionCommand
 import kotlinx.coroutines.delay
 
 class DebugScenarioActivity : ComponentActivity() {
@@ -40,38 +38,29 @@ class DebugScenarioActivity : ComponentActivity() {
 
 @Composable
 private fun DebugScenarioRoot(scenario: String) {
-    val autoAdvance = scenario == DebugScenarioFixtures.FLOW
-    var snapshot by remember(scenario) {
-        mutableStateOf(DebugScenarioFixtures.snapshot(scenario))
+    val session = remember(scenario) {
+        InstallationSession(componentCatalog = DebugScenarioFixtures.components)
     }
+    val snapshot by session.snapshots.collectAsState()
 
-    LaunchedEffect(autoAdvance, snapshot.state, snapshot.discoveredDevices, snapshot.progress) {
-        if (autoAdvance) {
-            DebugScenarioFixtures.nextAutomaticSnapshot(snapshot)?.let { next ->
-                delay(DebugScenarioFixtures.AUTO_STEP_DELAY_MILLIS)
-                snapshot = next
-            }
-        }
+    LaunchedEffect(session, scenario) {
+        DebugScenarioFixtures.play(session, scenario)
+    }
+    DisposableEffect(session) {
+        onDispose { session.close() }
     }
 
     InstallApp(
         snapshot = snapshot,
-        onIntent = { intent -> snapshot = DebugScenarioFixtures.reduce(snapshot, intent) },
+        onIntent = { intent -> session.dispatch(intent.toInstallationSessionCommand()) },
     )
 }
 
 internal object DebugScenarioFixtures {
     const val FLOW = "flow"
-    const val AUTO_STEP_DELAY_MILLIS = 900L
+    const val AUTO_STEP_DELAY_MILLIS = 300L
 
-    private val connectedDevice = DeviceSummary(
-        id = "icar-03-demo",
-        displayName = "iCAR 03",
-        connectionStatus = DeviceConnectionStatus.CONFIRMED,
-        lastConfirmedLabel = "刚刚确认",
-    )
-
-    private val components = listOf(
+    val components = listOf(
         ComponentDescriptor(
             id = "lyrics",
             displayName = "03歌词",
@@ -98,158 +87,110 @@ internal object DebugScenarioFixtures {
         ),
     )
 
-    private val successResults = components.map { component ->
-        ComponentResult(
-            componentName = component.displayName,
-            installed = true,
-            configured = true,
-            available = true,
-        )
-    }
+    internal val connectedDevice = DeviceSummary(
+        id = "icar-03-demo",
+        displayName = "iCAR 03",
+        connectionStatus = DeviceConnectionStatus.CONFIRMED,
+        lastConfirmedLabel = "刚刚确认",
+    )
 
-    fun snapshot(scenario: String): InstallationSessionSnapshot = when (scenario) {
-        FLOW,
-        "searching",
-        -> base(InstallationSessionState.DISCOVERING)
+    suspend fun play(session: InstallationSession, scenario: String) {
+        val driver = FakeSessionDriver(session)
+        when (scenario) {
+            FLOW -> install(driver, includeOptional = true, animated = true)
+            "searching" -> driver.command(InstallationSessionCommand.StartDiscovery)
+            "found" -> driver.discover()
+            "selection" -> driver.connect(selectOptional = false)
+            "progress" -> {
+                driver.connect(selectOptional = false)
+                driver.beginInstallation()
+                driver.event(InstallationSessionEvent.SourceResolved("debug-source"))
+            }
 
-        "found" -> base(
-            state = InstallationSessionState.DISCOVERING,
-            discoveredDevices = listOf(connectedDevice),
-        )
+            "success" -> install(driver, includeOptional = true, animated = false)
+            "paused" -> {
+                driver.connect(selectOptional = false)
+                driver.beginInstallation()
+                driver.event(InstallationSessionEvent.SourceResolved("debug-source"))
+                driver.command(InstallationSessionCommand.CancelInstallation)
+            }
 
-        "selection" -> base(InstallationSessionState.CONNECTED)
-        "progress" -> base(
-            state = InstallationSessionState.DOWNLOADING_ARCHIVE,
-            currentComponentName = "03歌词",
-            progress = SessionProgress(completedCount = 0, totalCount = 3, fraction = 0.42f),
-        )
+            "failed" -> {
+                driver.connect(selectOptional = false)
+                driver.beginInstallation()
+                driver.event(InstallationSessionEvent.SourceResolved("debug-source"))
+                driver.event(InstallationSessionEvent.ArchiveDownloaded(1024L, "debug-archive-sha"))
+                driver.event(InstallationSessionEvent.ArchiveVerified(verified = false))
+            }
 
-        "success" -> base(
-            state = InstallationSessionState.SUCCEEDED,
-            componentResults = successResults,
-        )
+            "maintenance" -> {
+                install(driver, includeOptional = true, animated = false)
+                driver.command(InstallationSessionCommand.EnterMaintenance)
+            }
 
-        "paused" -> base(
-            state = InstallationSessionState.PAUSED,
-            currentComponentName = "03桌面",
-        )
-
-        "failed" -> base(
-            state = InstallationSessionState.FAILED,
-            currentComponentName = "03歌词",
-            failure = SessionFailure(FailureCategory.DOWNLOAD, componentName = "03歌词"),
-        )
-
-        "maintenance" -> base(InstallationSessionState.MAINTENANCE)
-        "maintenance-disconnected" -> base(
-            state = InstallationSessionState.MAINTENANCE,
-            device = connectedDevice.copy(connectionStatus = DeviceConnectionStatus.DISCONNECTED),
-        )
-
-        else -> InstallationSessionSnapshot(state = InstallationSessionState.IDLE)
-    }
-
-    fun reduce(
-        snapshot: InstallationSessionSnapshot,
-        intent: InstallUiIntent,
-    ): InstallationSessionSnapshot = when (intent) {
-        InstallUiIntent.StopDiscovery -> InstallationSessionSnapshot(state = InstallationSessionState.IDLE)
-        InstallUiIntent.RetryDiscovery -> base(InstallationSessionState.DISCOVERING)
-        InstallUiIntent.Reconnect -> base(
-            state = InstallationSessionState.DISCOVERING,
-            discoveredDevices = listOf(connectedDevice),
-        )
-
-        is InstallUiIntent.SelectDevice -> base(InstallationSessionState.CONNECTED)
-        is InstallUiIntent.ToggleOptionalComponent -> snapshot.copy(
-            selectedOptionalComponentIds = if (intent.selected) {
-                snapshot.selectedOptionalComponentIds + intent.componentId
-            } else {
-                snapshot.selectedOptionalComponentIds - intent.componentId
-            },
-        )
-
-        InstallUiIntent.StartInstallation -> snapshot.copy(
-            state = InstallationSessionState.SELECTION_CONFIRMED,
-            currentComponentName = "03歌词",
-            progress = SessionProgress(completedCount = 0, totalCount = 3, indeterminate = true),
-        )
-
-        InstallUiIntent.CancelInstallation -> snapshot.copy(state = InstallationSessionState.PAUSED)
-        InstallUiIntent.ContinueInstallation,
-        InstallUiIntent.RetryInstallation,
-        InstallUiIntent.Reconfigure,
-        -> base(
-            state = InstallationSessionState.RESOLVING_SOURCE,
-            currentComponentName = snapshot.currentComponentName ?: "03歌词",
-            progress = SessionProgress(completedCount = 0, totalCount = 3, indeterminate = true),
-        )
-
-        InstallUiIntent.EnterMaintenance -> base(InstallationSessionState.MAINTENANCE)
-        is InstallUiIntent.MaintenanceAction -> snapshot
-    }
-
-    fun nextAutomaticSnapshot(snapshot: InstallationSessionSnapshot): InstallationSessionSnapshot? = when (snapshot.state) {
-        InstallationSessionState.DISCOVERING -> if (snapshot.discoveredDevices.isEmpty()) {
-            snapshot.copy(discoveredDevices = listOf(connectedDevice))
-        } else {
-            snapshot.copy(state = InstallationSessionState.CONNECTED)
+            "maintenance-disconnected" -> {
+                install(driver, includeOptional = true, animated = false)
+                driver.command(InstallationSessionCommand.EnterMaintenance)
+                driver.event(InstallationSessionEvent.DeviceDisconnected(deviceId = connectedDevice.id))
+            }
         }
+    }
 
-        InstallationSessionState.CONNECTED -> snapshot.copy(
-            state = InstallationSessionState.SELECTION_CONFIRMED,
-            currentComponentName = "03歌词",
-            progress = SessionProgress(completedCount = 0, totalCount = 3, indeterminate = true),
-        )
+    private suspend fun install(
+        driver: FakeSessionDriver,
+        includeOptional: Boolean,
+        animated: Boolean,
+    ) {
+        driver.connect(selectOptional = includeOptional, animated = animated)
+        driver.beginInstallation(animated)
+        driver.event(InstallationSessionEvent.SourceResolved("debug-source"), animated)
+        driver.event(InstallationSessionEvent.ArchiveDownloaded(1024L, "debug-archive-sha"), animated)
+        driver.event(InstallationSessionEvent.ArchiveVerified(verified = true), animated)
+        driver.event(InstallationSessionEvent.ApkExtracted("component.apk", 512L, "debug-apk-sha"), animated)
+        driver.event(InstallationSessionEvent.ArtifactsVerified(driver.checks()), animated)
+        driver.event(InstallationSessionEvent.InstallationCompleted(driver.checks()), animated)
+        driver.event(InstallationSessionEvent.AuthorizationCompleted(driver.checks()), animated)
+        driver.event(InstallationSessionEvent.DeviceVerified(driver.checks()), animated)
+    }
+}
 
-        InstallationSessionState.SELECTION_CONFIRMED -> snapshot.copy(
-            state = InstallationSessionState.RESOLVING_SOURCE,
-            progress = SessionProgress(completedCount = 0, totalCount = 3, indeterminate = true),
-        )
+private class FakeSessionDriver(
+    private val session: InstallationSession,
+) {
+    suspend fun command(command: InstallationSessionCommand, animated: Boolean = false) {
+        session.dispatch(command)
+        if (animated) delay(DebugScenarioFixtures.AUTO_STEP_DELAY_MILLIS)
+    }
 
-        InstallationSessionState.RESOLVING_SOURCE -> snapshot.copy(
-            state = InstallationSessionState.DOWNLOADING_ARCHIVE,
-            progress = SessionProgress(completedCount = 0, totalCount = 3, fraction = 0.28f),
-        )
+    suspend fun event(event: InstallationSessionEvent, animated: Boolean = false) {
+        session.dispatchEvent(event)
+        if (animated) delay(DebugScenarioFixtures.AUTO_STEP_DELAY_MILLIS)
+    }
 
-        InstallationSessionState.DOWNLOADING_ARCHIVE -> if ((snapshot.progress?.fraction ?: 0f) < 0.75f) {
-            snapshot.copy(progress = snapshot.progress?.copy(fraction = 0.78f))
-        } else {
-            snapshot.copy(
-                state = InstallationSessionState.VERIFYING_ARCHIVE,
-                progress = SessionProgress(completedCount = 1, totalCount = 3, indeterminate = true),
+    suspend fun discover(animated: Boolean = false) {
+        command(InstallationSessionCommand.StartDiscovery, animated)
+        event(InstallationSessionEvent.DeviceDiscovered(DebugScenarioFixtures.connectedDevice), animated)
+    }
+
+    suspend fun connect(selectOptional: Boolean, animated: Boolean = false) {
+        discover(animated)
+        command(InstallationSessionCommand.SelectDevice(DebugScenarioFixtures.connectedDevice.id), animated)
+        if (selectOptional) {
+            command(
+                InstallationSessionCommand.ToggleOptionalComponent("file-manager", selected = true),
+                animated,
             )
         }
-
-        InstallationSessionState.VERIFYING_ARCHIVE -> snapshot.copy(state = InstallationSessionState.INSTALLING)
-        InstallationSessionState.INSTALLING -> snapshot.copy(state = InstallationSessionState.AUTHORIZING)
-        InstallationSessionState.AUTHORIZING -> snapshot.copy(state = InstallationSessionState.VERIFYING_DEVICE)
-        InstallationSessionState.VERIFYING_DEVICE -> snapshot.copy(
-            state = InstallationSessionState.SUCCEEDED,
-            progress = SessionProgress(completedCount = 3, totalCount = 3, fraction = 1f),
-            componentResults = successResults,
-        )
-
-        else -> null
     }
 
-    private fun base(
-        state: InstallationSessionState,
-        device: DeviceSummary? = connectedDevice,
-        discoveredDevices: List<DeviceSummary> = emptyList(),
-        currentComponentName: String? = null,
-        progress: SessionProgress? = null,
-        failure: SessionFailure? = null,
-        componentResults: List<ComponentResult> = emptyList(),
-    ): InstallationSessionSnapshot = InstallationSessionSnapshot(
-        state = state,
-        device = device,
-        discoveredDevices = discoveredDevices,
-        components = components,
-        selectedOptionalComponentIds = setOf("file-manager"),
-        currentComponentName = currentComponentName,
-        progress = progress,
-        failure = failure,
-        componentResults = componentResults,
-    )
+    suspend fun beginInstallation(animated: Boolean = false) {
+        command(InstallationSessionCommand.StartInstallation, animated)
+        command(InstallationSessionCommand.BeginPipeline, animated)
+    }
+
+    fun checks(): List<ComponentCheck> = session.currentSnapshot().components
+        .filter {
+            it.required || it.id in session.currentSnapshot().selectedOptionalComponentIds
+        }
+        .map { ComponentCheck(componentId = it.id, passed = true) }
 }
