@@ -4,6 +4,7 @@ package com.tcrrry.helper.domain.session
 enum class InstallationSessionState {
     IDLE,
     DISCOVERING,
+    CONNECTING,
     CONNECTED,
     SELECTION_CONFIRMED,
     RESOLVING_SOURCE,

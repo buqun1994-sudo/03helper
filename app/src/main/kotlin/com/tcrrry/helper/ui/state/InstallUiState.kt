@@ -69,6 +69,7 @@ enum class InstallScreen {
 
 enum class ConnectionVariant {
     SEARCHING,
+    CONNECTING,
     FOUND,
     NOT_FOUND,
     FAILED,
@@ -76,6 +77,7 @@ enum class ConnectionVariant {
 
 enum class ConnectionAction {
     STOP,
+    CANCEL_CONNECTION,
     RETRY,
     RECONNECT,
 }
@@ -113,8 +115,10 @@ data class ComponentResultRow(
 
 sealed interface InstallUiIntent {
     data object StopDiscovery : InstallUiIntent
+    data object CancelConnection : InstallUiIntent
     data object RetryDiscovery : InstallUiIntent
     data object Reconnect : InstallUiIntent
+    data object DisconnectDevice : InstallUiIntent
     data class SelectDevice(val deviceId: String) : InstallUiIntent
     data class ToggleOptionalComponent(val componentId: String, val selected: Boolean) : InstallUiIntent
     data object StartInstallation : InstallUiIntent

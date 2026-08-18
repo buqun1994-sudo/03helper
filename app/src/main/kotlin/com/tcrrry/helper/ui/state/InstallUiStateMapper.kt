@@ -15,6 +15,7 @@ object InstallUiStateMapper {
             if (snapshot.discoveredDevices.isEmpty()) ConnectionVariant.SEARCHING else ConnectionVariant.FOUND,
             snapshot,
         )
+        InstallationSessionState.CONNECTING -> connectionState(ConnectionVariant.CONNECTING, snapshot)
 
         InstallationSessionState.CONNECTED -> selectionState(snapshot)
         InstallationSessionState.SELECTION_CONFIRMED,
@@ -30,7 +31,13 @@ object InstallUiStateMapper {
 
         InstallationSessionState.SUCCEEDED -> resultState(ResultKind.SUCCESS, snapshot)
         InstallationSessionState.PAUSED -> resultState(ResultKind.PAUSED, snapshot)
-        InstallationSessionState.FAILED -> resultState(snapshot.failure.toResultKind(), snapshot)
+        InstallationSessionState.FAILED -> if (
+            snapshot.failure?.category == FailureCategory.CONNECTION && snapshot.checkpoint == null
+        ) {
+            connectionState(ConnectionVariant.FAILED, snapshot)
+        } else {
+            resultState(snapshot.failure.toResultKind(), snapshot)
+        }
         InstallationSessionState.MAINTENANCE -> InstallUiState.Maintenance(
             deviceName = snapshot.device?.displayName,
             connected = snapshot.device?.connectionStatus == DeviceConnectionStatus.CONFIRMED,
@@ -52,6 +59,7 @@ object InstallUiStateMapper {
         },
         primaryAction = when (variant) {
             ConnectionVariant.SEARCHING -> ConnectionAction.STOP
+            ConnectionVariant.CONNECTING -> ConnectionAction.CANCEL_CONNECTION
             ConnectionVariant.FAILED -> ConnectionAction.RECONNECT
             ConnectionVariant.FOUND,
             ConnectionVariant.NOT_FOUND,

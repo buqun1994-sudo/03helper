@@ -82,17 +82,17 @@
 14. 进一步核对生产接线：`MainActivity` 当前只创建 `InstallationSession`，`ArtifactCatalogSessionAdapter` 与 `ArtifactPreparationCoordinator` 尚未在生产入口组装；在 Cloud Android profile / 公钥和组件映射具备前，当前 APK 不能从主界面触发真实蓝奏云下载。该阻断独立于 R2 / GitHub 尚未上传对象。
 15. 用户实测反馈：手机安装助手查找不到车机，但电脑上的既有 ADB 助手可以找到并连接。源码与运行边界确认这不是两个工具争抢连接；电脑 ADB 会话不会被手机应用复用，当前安装助手也没有发起 LAN / ADB discovery 请求，因此 F2 后续真实来源测试会在生产入口前置处停止。
 
-## 未完成事项
+## 当前未完成事项
 
-1. 接入真实局域网发现、设备连接和 ADB 端口适配；沿用 F1 会话的结构化 command / event，不在适配器内复制状态机。
-2. 用用户提供的人工用例验证真实 Android System WebView 蓝奏云回调、真实 ZIP、切网 / Range 续传和主源失败清理；R2 / GitHub Releases 对象与回滚链待对象上传后再开，Cloud Android profile 与生产公钥具备前保持阻断。
-3. 为 03 歌词、03桌面和文件管理器取得可验证的包身份、兼容范围、发布签名和合规材料。
-4. 用真实 `S56_HQX` 设备完成定向安装、授权回读、启动可用性和断线恢复 smoke；用独立设备验证异常和破坏性动作门禁。
-5. 完成维护态的检查更新、保留数据重装、修复授权、重启服务、缓存清理、受控安装 / 卸载和脱敏诊断。
+1. 由项目 / Cloud 发布方提供并接入可验证的 Android profile、公钥、组件映射、ZIP / APK 身份和正式签名资料；资料缺失时客户端继续保持 fail closed。
+2. 用用户提供的人工用例验证真实 Android System WebView 蓝奏云回调、真实 ZIP、切网 / Range 续传和主源失败清理；R2 / GitHub Releases 对象与回滚链待对象上传后再开。
+3. 用真实 `S56_HQX` 设备完成定向 APK 安装、授权回读、启动可用性和断线恢复 smoke；用独立设备验证异常和破坏性动作门禁。
+4. 完成维护态的检查更新、保留数据重装、修复授权、重启服务、缓存清理、受控安装 / 卸载和脱敏诊断。
+5. 为 03 歌词、03桌面和文件管理器取得可审计的包身份、兼容范围、发布签名和合规材料。
 
-## F2 交接入口
+## F2 交接入口（历史记录，已由 F3 接线取代）
 
-F2 Debug APK 已按用户授权安装到指定手机。当前真实手测范围为蓝奏云主源；但生产入口尚未组装清单 / 产物协调器，且 Cloud Android profile、公钥和组件映射仍未具备，因此暂不能宣称主界面可触发真实蓝奏云链路。R2 / GitHub Releases 对象尚未具备，不纳入本轮测试；F3 的 LAN / ADB、安装、授权和车机可用性验证暂不提前施工。
+F2 Debug APK 已按用户授权安装到指定手机。该段记录的是 F2 交接当时的状态：生产入口尚未组装清单 / 产物协调器，且 Cloud Android profile、公钥和组件映射仍未具备。随后 F3 已完成生产 LAN / ADB、清单和产物协调器接线；当前真实手测仍只在发布资料具备后验证蓝奏云主源，R2 / GitHub Releases 对象尚未具备，不纳入本轮测试。
 
 ## 2026-08-19 F2 收尾与下轮交接
 
@@ -100,4 +100,65 @@ F2 Debug APK 已按用户授权安装到指定手机。当前真实手测范围�
 2. F2 已提交的本地能力包括：签名清单 schema / 验签、固定来源策略、隐藏 Android System WebView 适配器、私有 `.zip.part` 下载与同源恢复、ZIP / APK 完整性校验、受控解压、失败清理和结构化 `InstallationSession` 事件。
 3. 下轮施工开始前必须先补齐生产可测入口：接入真实 `DeviceDiscovery` / `DeviceTransport`（F3 owner），在生产入口组装 `ArtifactCatalogSessionAdapter` 与 `ArtifactPreparationCoordinator`，并接入项目 / Cloud 提供的 Android profile、公钥和组件映射。不得把三个蓝奏云 fixture 地址按顺序猜成产品身份。
 4. 在 R2 / GitHub Releases 对象上传前，下轮真实来源仍只测蓝奏云主源；备用源只保留自动化 fixture，不要求用户准备或验证不存在的对象。
-5. 验证口径保持“最简自动化 + 用户人工主测”：优先运行语法 / 编译、直接相关单测和文档护栏；不自动启动设备、浏览器或真实网络。生产入口和清单具备后，再把蓝奏云主源的人工动作、预期结果和停止条件交给用户。
+5. 当时的验证口径保持“最简自动化 + 用户人工主测”：优先运行语法 / 编译、直接相关单测和文档护栏；F2 未追加设备、浏览器或真实网络 smoke。该口径不应被解释为跳过 Debug 产物交付或覆盖安装。
+
+## 2026-08-19 验证工作流纠偏
+
+1. 用户明确补充交付要求：复杂真实流程由用户主测，但施工完成后必须先构建并保留数据覆盖安装最新 Debug APK，提供可测试前置；不能因“最简自动化”连 APK 都不安装。
+2. 工作流已统一为：本机语法 / 编译与直接单测 -> Debug 构建 -> 显式测试设备保留数据覆盖安装 -> 仅执行已有、稳定、单条不超过 5 分钟且无破坏性动作 / 未具备外部前置的最小 smoke -> 复杂链路精确人工用例。
+3. 本次纠偏只调整验证、收尾和交付规则，不改变 F2 已完成能力、Cloud 发布阻断或“R2 / GitHub 对象未上传”的事实；更新后的规则由根 `AGENTS.md`、`task-closeout`、验证规则、验证矩阵和本机开发环境文档共同承载。
+
+## 2026-08-19 F3 设备发现与生产接线施工
+
+1. 已复用 Apache-2.0 `dev.mobile:dadb:1.2.9` 作为 TCP ADB 协议客户端；项目侧只保留固定身份读取、LAN 范围 / 并发 / 超时 / 取消和结构化能力映射，不暴露库的任意 shell、安装、推送或 root API。
+2. 已落地 `DeviceDiscovery` / `DeviceTransport`、IPv4 子网枚举、LAN ADB 发现、身份连接适配和 `DeviceDiscoverySessionAdapter`；设备候选经过会话去重，广播地址不进入扫描。真实目标车机发现仍待人工运行验证。
+3. 已落地 `InstallerRuntime` 与 `ProductionInstallerRuntimeFactory`：生产 `MainActivity` 现在通过同一个 `InstallationSession` 组装发现、Cloud 清单适配和 F2 产物协调器；清单加载与产物事件共享同一会话代次和单调事件端口。
+4. 当前生产 Cloud transport 仍明确使用 `UnavailableReleaseCatalogTransport`，因为 Cloud Android profile、公钥、组件映射和 ZIP / APK 身份资料尚未具备；选择车机后保持 `CONNECTED`，清单资料不可用并提供重新获取入口，不生成伪造生产清单，也不伪装成“安装未完成、已保留进度”。安装、授权、可用性验证仍未施工。
+5. 已修正设备选择后的迟到发现事件隔离，并将清单声明的 Android 兼容范围与已确认设备 SDK / ADB 身份能力纳入开始安装前门禁。
+6. 本轮直接相关自动化共 54 条单测全部通过（0 failures、0 errors）；新增运行时、前台入口、会话与 UI 投影回归共同锁定“资料不可用不伪装成可继续安装失败”及“连接页前台自动发现”；`lintDebug`、`assembleDebug`、`assembleDebugAndroidTest`、项目文档检查、Skill 检查、差异空白检查和本机环境检查全部通过。
+7. 已生成 `app/build/outputs/apk/debug/app-debug.apk`，并使用本机配置中的显式手机 serial 保留数据覆盖安装；生产 APK 与 AndroidTest APK 安装均返回 `Success`。包身份为 `com.tcrrry.helper`、Debug、`0.1.0 (1)`，本地签名证书摘要为 `2990047fddf6d6ec1eb7f83731fcc1398616e5fb83aec97542a4f132c35a1a27`。
+8. 覆盖安装后执行现有 `InstallAppActivitySmokeTest`，生产入口和 Debug 维护场景 `2/2` 通过；未启动真实车机扫描、蓝奏云 WebView、真实网络下载、车机安装、授权或可用性验证。
+9. 当前用户可主测前置：手机已安装上述 Debug 包；若要验证 F3 发现，把手机与目标车机放在同一局域网，车机保持现有 TCP `5555` 可达，然后在助手首屏点击“重新查找”。若发现设备，选择车机后因 Cloud Android profile 仍缺失而保持已连接并显示“暂时无法准备安装应用”，点击“重新获取”只重试清单加载；不应继续尝试组件安装。
+
+## 2026-08-19 现场状态语义纠偏
+
+1. 用户现场选择到车机后看到“安装未完成，已保留可继续的进度”。根因不是旧 APK 数据、缓存或电脑上的 ADB 助手抢连接，而是生产清单资料缺失事件被错误映射为通用 `FAILED`。
+2. `InstallationSession` 现将 `CONNECTED` 阶段的 `CatalogFailed` 保持在 `CONNECTED`，保留结构化清单失败原因并清除安装检查点；页面使用既有“暂时无法准备安装应用 / 重新获取”入口，不再制造可继续安装的假象。
+3. 其它阶段收到越序清单失败仍 fail closed；Cloud Android profile、公钥、组件映射和 ZIP / APK 身份资料仍是外部发布阻断，未由客户端伪造。
+
+## 2026-08-19 前台自动发现修正
+
+1. F3 当前真实人工边界已确认：本轮只验证手机能否发现并连接车机；连接成功后因 Cloud Android profile、公钥、组件映射和真实 ZIP / APK 身份缺失，第二步清单准备停止，不为制造测试路径伪造兼容资料或扩展临时分支。
+2. 现场发现生产入口初始快照停在 `IDLE`，冷启动和回到前台都不会自动发起发现，用户只能手动点击“重新查找”。
+3. `InstallerRuntime.onForeground()` 现由 `MainActivity.onStart()` 调用：连接页首次进入或从后台回前台时自动启动一次有界发现；发现进行中、已连接选择页、结果页和维护态不重复扫描，当前前台主动停止后不立即重启。
+4. 新增应用层前台入口回归测试；本次代码变更后需重新构建并保留数据覆盖安装 Debug APK，再运行现有最小 instrumentation smoke。真实车机安装、蓝奏云、WebView 和清单资料仍不纳入本轮自动验证。
+
+5. 指定测试手机恢复无线调试后，使用用户提供的配对端点和配对码完成 ADB 配对，再通过 mDNS 连接服务恢复为独立手机 serial；加入首帧预启动后的最新 Debug APK 与 AndroidTest APK 均已保留数据覆盖安装并返回 `Success`，安装后现有 instrumentation smoke `2/2` 通过。车机 serial 未用于手机测试。
+
+## 2026-08-19 F3 连接语义与持久在线修正
+
+1. 用户明确确认：点击设备行必须在该动作中完成真实车机连接；初始化、清单加载、下载和后续成功进入维护态期间继续持有同一连接，只有维护页主动断开、重新发起发现、进程结束或客观掉线时释放。
+2. 已将原先“发现时短连接、点击后直接进入 `CONNECTED`”修正为两阶段主链：发现阶段仍使用 `DadbDeviceTransport` 做短探测；点击后进入 `CONNECTING`，由 `DadbDeviceConnectionFactory` 建立第二次真实 TCP ADB 握手并返回 `DeviceConnectionLease`；`DeviceConnectionConfirmed` 到达后才进入 `CONNECTED`。
+3. `InstallerRuntime` 现在是连接租约唯一 owner：清单缺失仍保留 `CONNECTED` 和租约；回到前台只做一次固定身份健康检查，不做常驻高频轮询；维护页新增用户主动“断开车机”入口。
+4. UI 已增加“正在连接车机”真实等待态和“已连接到 <车机名称>”证据文案；连接失败回到可重试连接态，不再用立即跳页掩盖握手结果。电脑上的其它 ADB 助手不作为连接证据，各客户端连接彼此独立。
+5. 已补充领域、运行时、租约关闭、连接失败、健康检查边界和 UI 投影单测；当前直接相关单测共 `61` 条通过，`compileDebugKotlin`、`testDebugUnitTest`、`lintDebug`、`assembleDebug` 与 `assembleDebugAndroidTest` 均已通过。最新 Debug 构建、保留数据覆盖安装和 instrumentation smoke 已在本节后续收尾记录中完成。
+
+## 2026-08-19 F3 连接语义收尾与可测试交付
+
+1. 当前工作区重新通过 `:app:compileDebugKotlin`、`:app:testDebugUnitTest`、`:app:lintDebug`、`:app:assembleDebug` 和 `:app:assembleDebugAndroidTest`；直接相关单测共 `61` 条，0 failures、0 errors。
+2. 最新 Debug APK 与 AndroidTest APK 已生成并核对 SHA-256：主包为 `fb22c9ba660d0e8a1ce0654b44c1a8978638210259d181f67c5521e847a2c763`，测试包为 `f56066697ff7dd1a435b77c30e8559d61744f3c4f9704fa6f87f4a5e21cef3a1`；包身份为 `com.tcrrry.helper`、Debug、`versionName=0.1.0`、`versionCode=1`。
+3. 已使用显式测试手机 serial 对主包和 AndroidTest 包执行保留数据覆盖安装，系统均返回 `Success`；未清数据、卸载、降级、重启或对车机执行安装 / 写入。
+4. 覆盖安装后运行既有 `:app:connectedDebugAndroidTest`，目标为 `SM-F946B` 测试手机，`InstallAppActivitySmokeTest` 共 `2/2` 通过，覆盖生产入口 resumed 与 Debug maintenance resumed。
+5. 本轮真实车机扫描、第二次 ADB 握手、连接租约持续性、蓝奏云 Android System WebView、真实 ZIP / APK、安装、授权和可用性验证仍交给用户最小人工主测；Cloud Android profile、公钥、组件映射及真实 ZIP / APK 身份资料缺失仍是继续安装的外部阻断，详见 `docs/testing/验证矩阵.md`。
+
+## 2026-08-19 instrumentation 收尾后的最终交付安装
+
+1. 现场复核发现，`connectedDebugAndroidTest` 收尾会移除主包和测试包；因此“先覆盖安装、再运行 smoke”不能作为最终设备状态，测试手机在 smoke 后不再显示 `com.tcrrry.helper`。
+2. 已将收尾规则统一修正为：允许先安装并运行短 smoke，但所有自动化结束后必须再次使用显式 serial 保留数据覆盖安装最新 Debug APK，并核对包身份、版本和 launcher activity。
+3. 已在测试手机完成最终主包覆盖安装，系统返回 `Success`；核对结果为 `com.tcrrry.helper`、Debug、`0.1.0 (1)`、`android.permission.INTERNET` 已授予，`MainActivity` 可被 `MAIN` / `LAUNCHER` 解析。当前交付设备状态以这次最终安装为准，未再次运行会清理包的 instrumentation。
+
+## 2026-08-19 手机应用 ADB 连接实证
+
+1. 通过测试手机的无线 ADB 进行只读核对：点击发现的 `S56_HQX` 后，`com.tcrrry.helper` 进程所属 UID 的网络表出现到车机 TCP `5555` 的 `ESTABLISHED` 会话，车机端同时出现匹配的反向会话。
+2. 手机界面同步显示“已连接到 S56_HQX”，随后因 Cloud Android profile 缺失停在“暂时无法准备安装应用”。这次证据证明的是手机应用自己的 Dadb ADB 租约，不是电脑上的另一个 ADB 助手连接；普通 `adb devices` 列表不能替代这项判断。
+3. 该证据是当前时刻的连接快照；应用后续仍通过前台健康检查和客观断线事件更新状态，真实安装流程继续受 Cloud profile、公钥、组件映射和 ZIP / APK 身份资料阻断。

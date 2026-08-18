@@ -10,7 +10,10 @@
     <string name="connection_searching_description">请让手机和车机保持在同一网络。</string>
     <string name="connection_stop">停止查找</string>
     <string name="connection_found_title">选择要连接的车机</string>
-    <string name="connection_found_description">选择后将自动检查连接状态。</string>
+    <string name="connection_found_description">点击后将建立并保持车机连接。</string>
+    <string name="connection_connecting_title">正在连接车机</string>
+    <string name="connection_connecting_description">正在建立稳定的车机连接，请稍候。</string>
+    <string name="connection_cancel">取消连接</string>
     <string name="connection_empty_title">暂未找到车机</string>
     <string name="connection_empty_description">确认手机和车机已连接同一网络后，再试一次。</string>
     <string name="connection_retry">重新查找</string>
@@ -19,6 +22,7 @@
     <string name="connection_reconnect">重新连接</string>
     <string name="selection_title">选择要安装的应用</string>
     <string name="selection_description">03歌词和03桌面会一并安装。</string>
+    <string name="selection_connected_device">已连接到 %1$s</string>
     <string name="required_label">必装</string>
     <string name="optional_label">可选</string>
     <string name="selection_summary">本次安装：%1$d 个应用 · %2$s</string>
@@ -55,6 +59,7 @@
     <string name="result_status_not_available">不可用</string>
     <string name="maintenance_disconnected">车机未连接</string>
     <string name="maintenance_reconnect">重新连接</string>
+    <string name="maintenance_disconnect">断开车机</string>
     <string name="maintenance_common">常用</string>
     <string name="maintenance_apps">应用</string>
     <string name="maintenance_storage">存储与诊断</string>

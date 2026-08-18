@@ -7,6 +7,7 @@ import com.tcrrry.helper.domain.artifact.ArtifactManifest
 import com.tcrrry.helper.domain.artifact.ArtifactSourceKind
 import com.tcrrry.helper.domain.artifact.ArtifactVerification
 import com.tcrrry.helper.domain.artifact.SourceFailureRecord
+import com.tcrrry.helper.domain.device.DeviceCapability
 
 data class InstallationSessionSnapshot(
     val state: InstallationSessionState,
@@ -39,6 +40,8 @@ data class DeviceSummary(
     val displayName: String,
     val connectionStatus: DeviceConnectionStatus,
     val lastConfirmedLabel: String? = null,
+    val androidSdk: Int? = null,
+    val capabilities: Set<DeviceCapability> = emptySet(),
 )
 
 data class ComponentDescriptor(

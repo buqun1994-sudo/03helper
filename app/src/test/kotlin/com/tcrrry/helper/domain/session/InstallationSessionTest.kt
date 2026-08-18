@@ -70,6 +70,41 @@ class InstallationSessionTest {
     }
 
     @Test
+    fun `selecting a device starts a new generation and rejects late discovery events`() {
+        val session = InstallationSession(components)
+        session.dispatch(InstallationSessionCommand.StartDiscovery)
+        val discoveryGeneration = session.currentSnapshot().sessionId
+        session.dispatch(
+            InstallationSessionCommand.AdapterEvent(
+                event = InstallationSessionEvent.DeviceDiscovered(confirmedDevice),
+                sessionId = discoveryGeneration,
+                sequence = 1L,
+            ),
+        )
+
+        session.dispatch(InstallationSessionCommand.SelectDevice(confirmedDevice.id))
+        val connecting = session.currentSnapshot()
+        assertEquals(InstallationSessionState.CONNECTING, connecting.state)
+        session.dispatchEvent(
+            InstallationSessionEvent.DeviceConnectionConfirmed(confirmedDevice),
+            sessionId = connecting.sessionId,
+            sequence = connecting.lastEventSequence + 1L,
+        )
+        val connected = session.currentSnapshot()
+        assertEquals(InstallationSessionState.CONNECTED, connected.state)
+        assertNotEquals(discoveryGeneration, connected.sessionId)
+
+        session.dispatch(
+            InstallationSessionCommand.AdapterEvent(
+                event = InstallationSessionEvent.DiscoveryFinished(1, 1),
+                sessionId = discoveryGeneration,
+                sequence = 2L,
+            ),
+        )
+        assertEquals(connected, session.currentSnapshot())
+    }
+
+    @Test
     fun `unconfirmed device cannot become connected`() {
         val session = InstallationSession(components)
         session.dispatch(InstallationSessionCommand.StartDiscovery)
@@ -83,6 +118,43 @@ class InstallationSessionTest {
         assertEquals(InstallationSessionState.FAILED, session.currentSnapshot().state)
         assertEquals("device_not_confirmed", session.currentSnapshot().failure?.reasonCode)
         assertTrue(session.currentSnapshot().device == null)
+    }
+
+    @Test
+    fun `connection failure stays outside the selection page and is retryable`() {
+        val session = InstallationSession(components)
+        session.dispatch(InstallationSessionCommand.StartDiscovery)
+        session.dispatchEvent(InstallationSessionEvent.DeviceDiscovered(confirmedDevice))
+        session.dispatch(InstallationSessionCommand.SelectDevice(confirmedDevice.id))
+        val connecting = session.currentSnapshot()
+
+        assertEquals(InstallationSessionState.CONNECTING, connecting.state)
+        session.dispatchEvent(
+            InstallationSessionEvent.DeviceConnectionFailed(
+                deviceId = confirmedDevice.id,
+                reasonCode = "adb_connect_failed",
+            ),
+            sessionId = connecting.sessionId,
+            sequence = connecting.lastEventSequence + 1L,
+        )
+
+        assertEquals(InstallationSessionState.FAILED, session.currentSnapshot().state)
+        assertEquals(FailureCategory.CONNECTION, session.currentSnapshot().failure?.category)
+        assertEquals(DeviceConnectionStatus.DISCONNECTED, session.currentSnapshot().device?.connectionStatus)
+    }
+
+    @Test
+    fun `only maintenance user action releases the connection state`() {
+        val session = connectedSession(includeOptional = false)
+        complete(session)
+        session.dispatch(InstallationSessionCommand.EnterMaintenance)
+        session.dispatch(InstallationSessionCommand.DisconnectDevice)
+
+        assertEquals(InstallationSessionState.MAINTENANCE, session.currentSnapshot().state)
+        assertEquals(DeviceConnectionStatus.DISCONNECTED, session.currentSnapshot().device?.connectionStatus)
+
+        session.dispatch(InstallationSessionCommand.DisconnectDevice)
+        assertEquals(InstallationSessionState.MAINTENANCE, session.currentSnapshot().state)
     }
 
     @Test
@@ -296,6 +368,12 @@ class InstallationSessionTest {
         session.dispatch(InstallationSessionCommand.StartDiscovery)
         session.dispatchEvent(InstallationSessionEvent.DeviceDiscovered(confirmedDevice))
         session.dispatch(InstallationSessionCommand.SelectDevice(confirmedDevice.id))
+        val connecting = session.currentSnapshot()
+        session.dispatchEvent(
+            InstallationSessionEvent.DeviceConnectionConfirmed(confirmedDevice),
+            sessionId = connecting.sessionId,
+            sequence = connecting.lastEventSequence + 1L,
+        )
         if (includeOptional) {
             session.dispatch(
                 InstallationSessionCommand.ToggleOptionalComponent("file-manager", selected = true),

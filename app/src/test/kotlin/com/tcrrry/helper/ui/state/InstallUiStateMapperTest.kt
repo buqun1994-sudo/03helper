@@ -26,10 +26,18 @@ class InstallUiStateMapperTest {
                 discoveredDevices = listOf(device),
             ),
         )
+        val connecting = InstallUiStateMapper.map(
+            InstallationSessionSnapshot(
+                state = InstallationSessionState.CONNECTING,
+                device = device.copy(connectionStatus = DeviceConnectionStatus.CONNECTING),
+                discoveredDevices = listOf(device.copy(connectionStatus = DeviceConnectionStatus.CONNECTING)),
+            ),
+        )
 
         assertEquals(ConnectionVariant.NOT_FOUND, (idle as InstallUiState.Connection).variant)
         assertEquals(ConnectionVariant.SEARCHING, (searching as InstallUiState.Connection).variant)
         assertEquals(ConnectionVariant.FOUND, (found as InstallUiState.Connection).variant)
+        assertEquals(ConnectionVariant.CONNECTING, (connecting as InstallUiState.Connection).variant)
         assertEquals("icar-03", found.devices.single().id)
     }
 
@@ -98,6 +106,24 @@ class InstallUiStateMapperTest {
         assertEquals(ResultKind.CONFIGURATION_FAILED, failed.kind)
         assertTrue(maintenance.connected)
         assertEquals("iCAR 03", maintenance.deviceName)
+    }
+
+    @Test
+    fun `connected catalog failure remains an unavailable selection state`() {
+        val state = InstallUiStateMapper.map(
+            InstallationSessionSnapshot(
+                state = InstallationSessionState.CONNECTED,
+                device = device,
+                failure = SessionFailure(
+                    category = FailureCategory.VERIFICATION,
+                    retryable = false,
+                    reasonCode = "catalog_android_profile_missing",
+                ),
+            ),
+        ) as InstallUiState.Selection
+
+        assertTrue(state.components.isEmpty())
+        assertFalse(state.canStart)
     }
 
     @Test

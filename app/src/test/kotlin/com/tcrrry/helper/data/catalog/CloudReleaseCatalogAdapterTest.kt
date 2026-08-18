@@ -14,6 +14,19 @@ import org.junit.Test
 
 class CloudReleaseCatalogAdapterTest {
     @Test
+    fun `missing production Android profile stays explicitly unavailable`() = runBlocking {
+        val adapter = CloudReleaseCatalogAdapter(
+            transport = UnavailableReleaseCatalogTransport(),
+            signatureVerifier = CatalogSignatureVerifier { _, _, _, _ -> true },
+        )
+
+        val result = adapter.load() as CatalogLoadResult.Failure
+
+        assertEquals("catalog_android_profile_missing", result.reasonCode)
+        assertEquals(false, result.retryable)
+    }
+
+    @Test
     fun `invalid detached signature blocks catalog before session injection`() = runBlocking {
         val payload = validPayload()
         val envelope = envelope(payload, signature = byteArrayOf(1, 2, 3))

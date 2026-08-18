@@ -1,4 +1,4 @@
 interface:
   display_name: "任务收尾"
-  short_description: "完成安装助手收尾、授权验证、人工主测与提交门禁"
-  default_prompt: "Use $task-closeout to run only user-authorized smoke, otherwise prepare exact manual tests, then enforce the commit gate."
+  short_description: "构建覆盖安装 Debug、执行快速 smoke、交付人工主测与提交门禁"
+  default_prompt: "Use $task-closeout to build and preserve-data install the latest Debug APK, run only the bounded quick smoke, hand off complex manual tests, then enforce the commit gate."

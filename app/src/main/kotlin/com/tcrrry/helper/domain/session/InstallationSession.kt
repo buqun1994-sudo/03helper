@@ -51,6 +51,7 @@ class InstallationSession(
         when (command) {
             InstallationSessionCommand.StartDiscovery -> startDiscovery()
             InstallationSessionCommand.StopDiscovery -> stopDiscovery()
+            InstallationSessionCommand.CancelConnection -> cancelConnection()
             is InstallationSessionCommand.SelectDevice -> selectDevice(command.deviceId)
             is InstallationSessionCommand.ToggleOptionalComponent -> toggleOptional(command)
             InstallationSessionCommand.StartInstallation,
@@ -66,6 +67,7 @@ class InstallationSession(
             -> resumeFromCheckpoint()
 
             InstallationSessionCommand.Reconnect -> startDiscovery()
+            InstallationSessionCommand.DisconnectDevice -> disconnectDevice()
             InstallationSessionCommand.EnterMaintenance -> enterMaintenance()
             is InstallationSessionCommand.MaintenanceAction -> handleMaintenanceAction(command)
             is InstallationSessionCommand.AdapterEvent -> applyAdapterEvent(command)
@@ -176,19 +178,52 @@ class InstallationSession(
 
             else -> {
                 val components = current.components.ifEmpty { catalog }
-                publish(
-                    withCheckpoint(
-                        current.copy(
-                            state = InstallationSessionState.CONNECTED,
-                            device = device,
-                            components = components,
-                            failure = null,
-                            checkpoint = null,
-                        ),
+                val connectingDevice = device.copy(
+                    connectionStatus = DeviceConnectionStatus.CONNECTING,
+                    lastConfirmedLabel = null,
+                )
+                // Selecting a device starts a new generation; late discovery events cannot
+                // overwrite the connection attempt.
+                startNewGeneration(
+                    current.copy(
+                        state = InstallationSessionState.CONNECTING,
+                        device = connectingDevice,
+                        discoveredDevices = current.discoveredDevices.map { candidate ->
+                            if (candidate.id == connectingDevice.id) connectingDevice else candidate
+                        },
+                        components = components,
+                        failure = null,
+                        checkpoint = null,
                     ),
                 )
             }
         }
+    }
+
+    private fun cancelConnection() {
+        val current = _snapshot.value
+        if (current.state != InstallationSessionState.CONNECTING) {
+            return
+        }
+        startNewGeneration(
+            current.copy(
+                state = InstallationSessionState.IDLE,
+                device = null,
+                discoveredDevices = emptyList(),
+                selectedOptionalComponentIds = emptySet(),
+                currentComponentName = null,
+                progress = null,
+                failure = null,
+                checkpoint = null,
+                evidence = SessionEvidence(),
+                componentResults = emptyList(),
+                selectedSources = emptyMap(),
+                sourceFailures = emptyList(),
+                archiveDownloads = emptyMap(),
+                archiveVerifications = emptyMap(),
+                apkExtractions = emptyMap(),
+            ),
+        )
     }
 
     private fun toggleOptional(command: InstallationSessionCommand.ToggleOptionalComponent) {
@@ -347,6 +382,18 @@ class InstallationSession(
         publish(current.copy(state = InstallationSessionState.MAINTENANCE, checkpoint = null))
     }
 
+    private fun disconnectDevice() {
+        val current = _snapshot.value
+        if (current.state != InstallationSessionState.MAINTENANCE) {
+            return
+        }
+        publish(
+            current.copy(
+                device = current.device?.copy(connectionStatus = DeviceConnectionStatus.DISCONNECTED),
+            ),
+        )
+    }
+
     @Suppress("UNUSED_PARAMETER")
     private fun handleMaintenanceAction(command: InstallationSessionCommand.MaintenanceAction) {
         if (_snapshot.value.state != InstallationSessionState.MAINTENANCE) {
@@ -368,12 +415,11 @@ class InstallationSession(
         when (val event = command.event) {
             is InstallationSessionEvent.DeviceDiscovered -> handleDeviceDiscovered(event.device)
             is InstallationSessionEvent.DiscoverySnapshot -> handleDiscoverySnapshot(event.devices)
+            is InstallationSessionEvent.DiscoveryFinished -> handleDiscoveryFinished(event)
+            is InstallationSessionEvent.DeviceConnectionConfirmed -> handleDeviceConnectionConfirmed(event.device)
+            is InstallationSessionEvent.DeviceConnectionFailed -> handleDeviceConnectionFailed(event)
             is InstallationSessionEvent.CatalogResolved -> handleCatalogResolved(event)
-            is InstallationSessionEvent.CatalogFailed -> fail(
-                category = FailureCategory.VERIFICATION,
-                retryable = false,
-                reasonCode = event.reasonCode,
-            )
+            is InstallationSessionEvent.CatalogFailed -> handleCatalogFailed(event.reasonCode)
 
             is InstallationSessionEvent.SourceResolved -> handleSourceResolved(event)
             is InstallationSessionEvent.SourceFailed -> handleSourceFailed(event)
@@ -434,6 +480,81 @@ class InstallationSession(
         publish(current.copy(discoveredDevices = mergeDevices(current.discoveredDevices, devices)), acceptedEventSequence)
     }
 
+    private fun handleDiscoveryFinished(event: InstallationSessionEvent.DiscoveryFinished) {
+        if (!requireState(InstallationSessionState.DISCOVERING, "discovery_finished_out_of_order")) return
+        if (event.scannedCount < 0 || event.confirmedCount < 0 || event.confirmedCount > event.scannedCount) {
+            fail(FailureCategory.CONNECTION, reasonCode = "discovery_result_invalid")
+            return
+        }
+        val current = _snapshot.value
+        if (current.discoveredDevices.isNotEmpty() || event.confirmedCount > 0) {
+            publish(current, acceptedEventSequence)
+            return
+        }
+        startNewGeneration(
+            current.copy(
+                state = InstallationSessionState.IDLE,
+                failure = SessionFailure(
+                    category = FailureCategory.CONNECTION,
+                    retryable = true,
+                    reasonCode = event.reasonCode ?: "no_devices_found",
+                ),
+                checkpoint = null,
+            ),
+        )
+    }
+
+    private fun handleDeviceConnectionConfirmed(device: DeviceSummary) {
+        val current = _snapshot.value
+        if (current.state != InstallationSessionState.CONNECTING) {
+            fail(FailureCategory.CONNECTION, reasonCode = "device_connection_event_out_of_order")
+            return
+        }
+        val pending = current.device
+        when {
+            pending == null -> fail(FailureCategory.CONNECTION, reasonCode = "device_connection_target_missing")
+            pending.id != device.id -> fail(FailureCategory.CONNECTION, reasonCode = "device_connection_mismatch")
+            device.connectionStatus != DeviceConnectionStatus.CONFIRMED -> fail(
+                FailureCategory.CONNECTION,
+                reasonCode = "device_connection_confirmation_invalid",
+            )
+
+            else -> publish(
+                withCheckpoint(
+                    current.copy(
+                        state = InstallationSessionState.CONNECTED,
+                        device = device,
+                        discoveredDevices = mergeDevices(current.discoveredDevices, listOf(device)),
+                        failure = null,
+                    ),
+                ),
+                acceptedEventSequence,
+            )
+        }
+    }
+
+    private fun handleDeviceConnectionFailed(event: InstallationSessionEvent.DeviceConnectionFailed) {
+        val current = _snapshot.value
+        if (current.state != InstallationSessionState.CONNECTING) {
+            fail(FailureCategory.CONNECTION, reasonCode = "device_connection_failure_out_of_order")
+            return
+        }
+        if (event.deviceId.isBlank() || event.reasonCode.isBlank()) {
+            fail(FailureCategory.CONNECTION, reasonCode = "device_connection_failure_invalid")
+            return
+        }
+        if (current.device?.id != event.deviceId) {
+            fail(FailureCategory.CONNECTION, reasonCode = "device_connection_failure_mismatch")
+            return
+        }
+        fail(
+            category = FailureCategory.CONNECTION,
+            retryable = event.retryable,
+            reasonCode = event.reasonCode,
+            deviceOverride = current.device?.copy(connectionStatus = DeviceConnectionStatus.DISCONNECTED),
+        )
+    }
+
     private fun handleCatalogResolved(event: InstallationSessionEvent.CatalogResolved) {
         val current = _snapshot.value
         if (current.state !in CATALOG_ACCEPTING_STATES) {
@@ -492,6 +613,31 @@ class InstallationSession(
                 failure = null,
             ),
             acceptedEventSequence,
+        )
+    }
+
+    private fun handleCatalogFailed(reasonCode: String) {
+        val current = _snapshot.value
+        if (current.state == InstallationSessionState.CONNECTED) {
+            // A connected device is still usable; only the remote installation data is unavailable.
+            // Clear the connected checkpoint so this cannot be presented as resumable installation work.
+            publish(
+                current.copy(
+                    failure = SessionFailure(
+                        category = FailureCategory.VERIFICATION,
+                        retryable = false,
+                        reasonCode = reasonCode,
+                    ),
+                    checkpoint = null,
+                ),
+                acceptedEventSequence,
+            )
+            return
+        }
+        fail(
+            category = FailureCategory.VERIFICATION,
+            retryable = false,
+            reasonCode = reasonCode,
         )
     }
 
@@ -917,6 +1063,14 @@ class InstallationSession(
             }
             return
         }
+        if (current.state == InstallationSessionState.CONNECTING) {
+            fail(
+                category = FailureCategory.CONNECTION,
+                reasonCode = event.reasonCode,
+                deviceOverride = current.device?.copy(connectionStatus = DeviceConnectionStatus.DISCONNECTED),
+            )
+            return
+        }
         if (current.state == InstallationSessionState.DISCOVERING ||
             current.state == InstallationSessionState.CONNECTED ||
             current.state in ACTIVE_INSTALL_STATES
@@ -1028,12 +1182,14 @@ class InstallationSession(
         componentName: String? = null,
         retryable: Boolean = true,
         reasonCode: String,
+        deviceOverride: DeviceSummary? = _snapshot.value.device,
     ) {
         val current = _snapshot.value
         val checkpoint = if (current.state in CHECKPOINT_STATES) checkpointOf(current) else current.checkpoint
         publish(
             current.copy(
                 state = InstallationSessionState.FAILED,
+                device = deviceOverride,
                 failure = SessionFailure(
                     category = category,
                     componentName = componentName,
@@ -1060,6 +1216,22 @@ class InstallationSession(
             if (snapshot.artifactManifests.map { it.componentId }.toSet() != components.map { it.id }.toSet()) {
                 return "catalog_component_mapping_invalid"
             }
+            val device = snapshot.device ?: return "device_not_confirmed"
+            val androidSdk = device.androidSdk ?: return "device_android_sdk_missing"
+            val requiredCapabilities = setOf(
+                com.tcrrry.helper.domain.device.DeviceCapability.ADB_TCP,
+                com.tcrrry.helper.domain.device.DeviceCapability.IDENTITY_READ,
+            )
+            if (!device.capabilities.containsAll(requiredCapabilities)) {
+                return "device_capability_missing"
+            }
+            val selectedIds = selectedComponents(snapshot).map { it.id }.toSet()
+            val incompatible = snapshot.artifactManifests.any { manifest ->
+                manifest.componentId in selectedIds &&
+                    (androidSdk < manifest.compatibility.minAndroidSdk ||
+                        manifest.compatibility.maxAndroidSdk?.let { androidSdk > it } == true)
+            }
+            if (incompatible) return "component_incompatible"
         }
         if (components.any { it.id.isBlank() || it.displayName.isBlank() }) return "component_identity_missing"
         if (components.map { it.id }.toSet().size != components.size) return "component_identity_duplicate"

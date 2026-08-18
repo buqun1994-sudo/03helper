@@ -59,6 +59,10 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.8.1")
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
+    implementation("dev.mobile:dadb:1.2.9") {
+        // dadb publishes its JUnit platform helper as runtime metadata; it is not needed in the APK.
+        exclude(group = "org.graalvm.buildtools", module = "junit-platform-native")
+    }
 
     implementation(platform("androidx.compose:compose-bom:2024.12.01"))
     implementation("androidx.compose.animation:animation")

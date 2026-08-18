@@ -7,43 +7,55 @@ import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import com.tcrrry.helper.domain.session.InstallationSession
+import com.tcrrry.helper.application.InstallerRuntime
+import com.tcrrry.helper.application.ProductionInstallerRuntimeFactory
 import com.tcrrry.helper.domain.session.InstallationSessionCommand
 import com.tcrrry.helper.ui.InstallApp
 import com.tcrrry.helper.ui.state.InstallUiIntent
 
 class MainActivity : ComponentActivity() {
-    private lateinit var installationSession: InstallationSession
+    private lateinit var installerRuntime: InstallerRuntime
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        installationSession = InstallationSession()
+        installerRuntime = ProductionInstallerRuntimeFactory.create(applicationContext)
+        // Seed the first frame with the same bounded discovery used on foreground re-entry.
+        installerRuntime.onForeground()
         setContent {
-            InstallerRoot(installationSession)
+            InstallerRoot(installerRuntime)
+        }
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (::installerRuntime.isInitialized) {
+            installerRuntime.onForeground()
         }
     }
 
     override fun onDestroy() {
-        installationSession.close()
+        installerRuntime.close()
         super.onDestroy()
     }
 }
 
 @Composable
-private fun InstallerRoot(session: InstallationSession) {
-    val snapshot by session.snapshots.collectAsStateWithLifecycle()
+private fun InstallerRoot(runtime: InstallerRuntime) {
+    val snapshot by runtime.session.snapshots.collectAsStateWithLifecycle()
     InstallApp(
         snapshot = snapshot,
-        onIntent = { intent -> session.dispatch(intent.toInstallationSessionCommand()) },
+        onIntent = { intent -> runtime.dispatch(intent.toInstallationSessionCommand()) },
     )
 }
 
 /** Application-layer mapping; the domain session never depends on Compose UI types. */
 internal fun InstallUiIntent.toInstallationSessionCommand(): InstallationSessionCommand = when (this) {
     InstallUiIntent.StopDiscovery -> InstallationSessionCommand.StopDiscovery
+    InstallUiIntent.CancelConnection -> InstallationSessionCommand.CancelConnection
     InstallUiIntent.RetryDiscovery -> InstallationSessionCommand.StartDiscovery
     InstallUiIntent.Reconnect -> InstallationSessionCommand.Reconnect
+    InstallUiIntent.DisconnectDevice -> InstallationSessionCommand.DisconnectDevice
     is InstallUiIntent.SelectDevice -> InstallationSessionCommand.SelectDevice(deviceId)
     is InstallUiIntent.ToggleOptionalComponent -> InstallationSessionCommand.ToggleOptionalComponent(componentId, selected)
     InstallUiIntent.StartInstallation -> InstallationSessionCommand.StartInstallation

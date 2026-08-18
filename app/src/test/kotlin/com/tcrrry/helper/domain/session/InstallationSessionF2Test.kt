@@ -10,6 +10,7 @@ import com.tcrrry.helper.domain.artifact.ArtifactVerification
 import com.tcrrry.helper.domain.artifact.ArtifactVersion
 import com.tcrrry.helper.domain.artifact.CompatibilityRange
 import com.tcrrry.helper.domain.artifact.SourceSelectionEvidence
+import com.tcrrry.helper.domain.device.DeviceCapability
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -33,6 +34,7 @@ class InstallationSessionF2Test {
         session.dispatch(InstallationSessionCommand.StartDiscovery)
         session.dispatchEvent(InstallationSessionEvent.DeviceDiscovered(confirmedDevice))
         session.dispatch(InstallationSessionCommand.SelectDevice(confirmedDevice.id))
+        confirmConnection(session, confirmedDevice)
         session.dispatch(InstallationSessionCommand.StartInstallation)
         session.dispatch(InstallationSessionCommand.BeginPipeline)
         session.dispatchEvent(
@@ -108,6 +110,7 @@ class InstallationSessionF2Test {
         session.dispatch(InstallationSessionCommand.StartDiscovery)
         session.dispatchEvent(InstallationSessionEvent.DeviceDiscovered(confirmedDevice))
         session.dispatch(InstallationSessionCommand.SelectDevice(confirmedDevice.id))
+        confirmConnection(session, confirmedDevice)
         session.dispatch(InstallationSessionCommand.StartInstallation)
         session.dispatch(InstallationSessionCommand.BeginPipeline)
         session.dispatchEvent(
@@ -173,6 +176,45 @@ class InstallationSessionF2Test {
         assertEquals("catalog_signature_invalid", session.currentSnapshot().failure?.reasonCode)
     }
 
+    @Test
+    fun `catalog unavailable after connection keeps connection without resumable installation`() {
+        val session = connectedSession()
+
+        session.dispatchEvent(
+            InstallationSessionEvent.CatalogFailed("catalog_android_profile_missing"),
+        )
+
+        val snapshot = session.currentSnapshot()
+        assertEquals(InstallationSessionState.CONNECTED, snapshot.state)
+        assertEquals("catalog_android_profile_missing", snapshot.failure?.reasonCode)
+        assertEquals(FailureCategory.VERIFICATION, snapshot.failure?.category)
+        assertEquals(null, snapshot.checkpoint)
+        assertTrue(snapshot.artifactManifests.isEmpty())
+        assertTrue(snapshot.evidence.artifactsVerified.isEmpty())
+    }
+
+    @Test
+    fun `trusted catalog cannot start on an incompatible confirmed device`() {
+        val manifests = listOf(
+            manifest().copy(compatibility = CompatibilityRange(minAndroidSdk = 29)),
+            desktopManifest().copy(compatibility = CompatibilityRange(minAndroidSdk = 29)),
+        )
+        val session = InstallationSession()
+        session.dispatchEvent(
+            InstallationSessionEvent.CatalogResolved("android-v1", "key-1", "SHA256withECDSA", manifests),
+            sequence = 1L,
+        )
+        session.dispatch(InstallationSessionCommand.StartDiscovery)
+        session.dispatchEvent(InstallationSessionEvent.DeviceDiscovered(confirmedDevice.copy(androidSdk = 28)))
+        session.dispatch(InstallationSessionCommand.SelectDevice(confirmedDevice.id))
+        confirmConnection(session, confirmedDevice.copy(androidSdk = 28))
+
+        session.dispatch(InstallationSessionCommand.StartInstallation)
+
+        assertEquals(InstallationSessionState.FAILED, session.currentSnapshot().state)
+        assertEquals("component_incompatible", session.currentSnapshot().failure?.reasonCode)
+    }
+
     private fun connectedSession(): InstallationSession {
         val session = InstallationSession(componentCatalog = listOf(
             ComponentDescriptor(
@@ -195,7 +237,22 @@ class InstallationSessionF2Test {
         session.dispatch(InstallationSessionCommand.StartDiscovery)
         session.dispatchEvent(InstallationSessionEvent.DeviceDiscovered(confirmedDevice))
         session.dispatch(InstallationSessionCommand.SelectDevice(confirmedDevice.id))
+        val connecting = session.currentSnapshot()
+        session.dispatchEvent(
+            InstallationSessionEvent.DeviceConnectionConfirmed(confirmedDevice),
+            sessionId = connecting.sessionId,
+            sequence = connecting.lastEventSequence + 1L,
+        )
         return session
+    }
+
+    private fun confirmConnection(session: InstallationSession, device: DeviceSummary) {
+        val connecting = session.currentSnapshot()
+        session.dispatchEvent(
+            InstallationSessionEvent.DeviceConnectionConfirmed(device),
+            sessionId = connecting.sessionId,
+            sequence = connecting.lastEventSequence + 1L,
+        )
     }
 
     private fun manifest(): ArtifactManifest = ArtifactManifest(
@@ -234,6 +291,8 @@ class InstallationSessionF2Test {
             id = "phone",
             displayName = "Phone",
             connectionStatus = DeviceConnectionStatus.CONFIRMED,
+            androidSdk = 28,
+            capabilities = setOf(DeviceCapability.ADB_TCP, DeviceCapability.IDENTITY_READ),
         )
     }
 }

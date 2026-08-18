@@ -46,7 +46,11 @@ fun MaintenanceHome(
                 .padding(horizontal = InstallerDimensions.PageHorizontalPadding),
         ) {
             TaskTopBar(title = stringResource(R.string.task_maintenance))
-            DeviceStatusHeader(state = state, onReconnect = { onIntent(InstallUiIntent.Reconnect) })
+            DeviceStatusHeader(
+                state = state,
+                onReconnect = { onIntent(InstallUiIntent.Reconnect) },
+                onDisconnect = { onIntent(InstallUiIntent.DisconnectDevice) },
+            )
             Spacer(modifier = Modifier.height(InstallerDimensions.SectionVerticalSpacing))
             LazyColumn(
                 modifier = Modifier
@@ -68,7 +72,11 @@ fun MaintenanceHome(
 }
 
 @Composable
-private fun DeviceStatusHeader(state: InstallUiState.Maintenance, onReconnect: () -> Unit) {
+private fun DeviceStatusHeader(
+    state: InstallUiState.Maintenance,
+    onReconnect: () -> Unit,
+    onDisconnect: () -> Unit,
+) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -90,7 +98,20 @@ private fun DeviceStatusHeader(state: InstallUiState.Maintenance, onReconnect: (
                 Text(text = stringResource(R.string.maintenance_disconnected), style = MaterialTheme.typography.bodySmall, color = InstallerColors.AuxiliaryWhite)
             }
         }
-        if (!state.connected) {
+        if (state.connected) {
+            PressableSurface(
+                onClick = onDisconnect,
+                modifier = Modifier.width(112.dp),
+                minHeight = 48.dp,
+                containerColor = InstallerColors.PageBlue,
+                pressedColor = InstallerColors.PressedBlue,
+                borderColor = InstallerColors.White,
+            ) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                    Text(text = stringResource(R.string.maintenance_disconnect), style = MaterialTheme.typography.bodySmall, color = InstallerColors.White)
+                }
+            }
+        } else {
             PressableSurface(
                 onClick = onReconnect,
                 modifier = Modifier.width(112.dp),

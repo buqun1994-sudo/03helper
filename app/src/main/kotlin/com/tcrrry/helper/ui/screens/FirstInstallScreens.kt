@@ -110,6 +110,28 @@ private fun ConnectionScreen(
                 )
             }
 
+            ConnectionVariant.CONNECTING -> {
+                StatusIcon(
+                    name = "loader_circle",
+                    contentDescription = stringResource(R.string.connection_connecting_title),
+                    tint = InstallerColors.White,
+                    modifier = Modifier.align(Alignment.CenterHorizontally),
+                )
+                Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
+                ConnectionCopy(
+                    title = stringResource(R.string.connection_connecting_title),
+                    description = stringResource(R.string.connection_connecting_description),
+                )
+                Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
+                CircularProgressIndicator(
+                    color = InstallerColors.White,
+                    strokeWidth = 2.dp,
+                    modifier = Modifier
+                        .size(28.dp)
+                        .align(Alignment.CenterHorizontally),
+                )
+            }
+
             ConnectionVariant.FOUND -> {
                 ConnectionCopy(
                     title = stringResource(R.string.connection_found_title),
@@ -183,6 +205,14 @@ private fun ConnectionScreen(
                 modifier = Modifier.fillMaxWidth(),
             )
             Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
+        } else if (state.variant == ConnectionVariant.CONNECTING) {
+            Spacer(modifier = Modifier.weight(1f))
+            PrimaryActionButton(
+                text = stringResource(R.string.connection_cancel),
+                onClick = { onIntent(InstallUiIntent.CancelConnection) },
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
         }
     }
 }
@@ -211,7 +241,11 @@ private fun DeviceChoiceRow(device: DeviceRow, onClick: () -> Unit) {
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
             StatusIcon(
-                name = if (device.status == DeviceConnectionStatus.CONFIRMED) "circle_check" else "car_front",
+                name = when (device.status) {
+                    DeviceConnectionStatus.CONFIRMED -> "circle_check"
+                    DeviceConnectionStatus.CONNECTING -> "loader_circle"
+                    DeviceConnectionStatus.DISCONNECTED -> "car_front"
+                },
                 contentDescription = device.displayName,
                 tint = InstallerColors.Success,
                 size = InstallerDimensions.SmallIconSize,
@@ -255,6 +289,24 @@ private fun SelectionScreen(
         Text(text = stringResource(R.string.selection_title), style = MaterialTheme.typography.headlineSmall, color = InstallerColors.White)
         Spacer(modifier = Modifier.height(8.dp))
         Text(text = stringResource(R.string.selection_description), style = MaterialTheme.typography.bodyLarge, color = InstallerColors.AuxiliaryWhite)
+        Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            StatusIcon(
+                name = "circle_check",
+                contentDescription = stringResource(R.string.selection_connected_device, state.deviceName),
+                tint = InstallerColors.Success,
+                size = InstallerDimensions.SmallIconSize,
+            )
+            Text(
+                text = stringResource(R.string.selection_connected_device, state.deviceName),
+                style = MaterialTheme.typography.bodyMedium,
+                color = InstallerColors.AuxiliaryWhite,
+            )
+        }
         Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
 
         if (state.components.isEmpty()) {

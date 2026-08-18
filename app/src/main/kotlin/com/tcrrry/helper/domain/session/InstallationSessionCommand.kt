@@ -12,6 +12,7 @@ import com.tcrrry.helper.domain.artifact.SourceSelectionEvidence
 sealed interface InstallationSessionCommand {
     data object StartDiscovery : InstallationSessionCommand
     data object StopDiscovery : InstallationSessionCommand
+    data object CancelConnection : InstallationSessionCommand
     data class SelectDevice(val deviceId: String) : InstallationSessionCommand
     data class ToggleOptionalComponent(
         val componentId: String,
@@ -27,6 +28,7 @@ sealed interface InstallationSessionCommand {
     data object RetryInstallation : InstallationSessionCommand
     data object ReconfigureInstallation : InstallationSessionCommand
     data object Reconnect : InstallationSessionCommand
+    data object DisconnectDevice : InstallationSessionCommand
     data object EnterMaintenance : InstallationSessionCommand
     data class MaintenanceAction(val actionId: MaintenanceActionId) : InstallationSessionCommand
 
@@ -44,6 +46,20 @@ sealed interface InstallationSessionEvent {
     data class DeviceDiscovered(val device: DeviceSummary) : InstallationSessionEvent
 
     data class DiscoverySnapshot(val devices: List<DeviceSummary>) : InstallationSessionEvent
+
+    data class DiscoveryFinished(
+        val scannedCount: Int,
+        val confirmedCount: Int,
+        val reasonCode: String? = null,
+    ) : InstallationSessionEvent
+
+    data class DeviceConnectionConfirmed(val device: DeviceSummary) : InstallationSessionEvent
+
+    data class DeviceConnectionFailed(
+        val deviceId: String,
+        val reasonCode: String,
+        val retryable: Boolean = true,
+    ) : InstallationSessionEvent
 
     data class CatalogResolved(
         val catalogVersion: String,

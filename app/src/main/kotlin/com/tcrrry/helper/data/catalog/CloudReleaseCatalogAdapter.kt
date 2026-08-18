@@ -11,6 +11,7 @@ import java.security.spec.X509EncodedKeySpec
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
 import java.util.Base64
+import java.io.IOException
 import kotlinx.coroutines.CancellationException
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.json.Json
@@ -24,6 +25,11 @@ data class CatalogHttpResponse(
 fun interface ReleaseCatalogTransport {
     suspend fun fetch(): CatalogHttpResponse
 }
+
+class CatalogTransportFailure(
+    val reasonCode: String,
+    val retryable: Boolean,
+) : IOException(reasonCode)
 
 fun interface TrustedCatalogKeyResolver {
     /** Returns an X.509 SubjectPublicKeyInfo DER key, or null when unknown. */
@@ -67,6 +73,8 @@ class CloudReleaseCatalogAdapter(
             transport.fetch()
         } catch (cancelled: CancellationException) {
             throw cancelled
+        } catch (failure: CatalogTransportFailure) {
+            return CatalogLoadResult.Failure(failure.reasonCode, failure.retryable)
         } catch (_: Exception) {
             return CatalogLoadResult.Failure("catalog_transport_failed", retryable = true)
         }
