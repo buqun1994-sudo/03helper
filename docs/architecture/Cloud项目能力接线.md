@@ -29,16 +29,15 @@
 
 ### 3.2 Android 清单适配边界
 
-后续 M0 需要确认独立的 Android artifact schema。建议最小字段如下，名称在代码施工前仍需冻结：
+F2 已冻结独立的 Android artifact schema；Cloud Android profile 仍需按此契约在 Cloud 侧落地。领域对象和签名 envelope 的本地实现位于 `com.tcrrry.helper.domain.artifact` 与 `data/catalog`，不代表 Cloud 生产清单已经发布：
 
 ```text
+schemaVersion
 componentId
 displayName
 required
-version
-versionCode
-packageName
-minSdk
+version { name, code }
+compatibility { minAndroidSdk, maxAndroidSdk?, minInstallerVersion?, maxInstallerVersion? }
 archiveFormat=zip
 archiveFileName
 archiveSizeBytes
@@ -46,10 +45,14 @@ archiveSha256
 apkEntryName
 apkSizeBytes
 apkSha256
+packageName
+apkVersion { name, code }
 certificateSha256
 sources[]
 rollbackId
 ```
+
+清单由 `SignedCatalogEnvelope` 包裹，固定包含 `schemaVersion`、`catalogVersion`、`keyId`、`signatureAlgorithm`、`payloadBase64` 和 `signatureBase64`；客户端先用受信公钥验证 payload 的 detached signature，再严格解码字段。当前实现支持 `SHA256withECDSA` 和运行环境可用时的 `Ed25519`，未知算法、未知 key、字段缺失或摘要 / 版本不合法均 fail closed。
 
 `sources[]` 只允许固定的三类来源：
 
@@ -64,7 +67,7 @@ rollbackId
 1. 各产品仓库先生成已签名 APK，分别由 03 歌词、03桌面和文件管理器仓库负责包身份、版本和证书；03helper 不复制产品源码，也不重新签名。
 2. Cloud release 流程为每个组件生成一个单组件 ZIP，归档根目录只放一个预期 APK；生成后计算 ZIP 大小 / SHA-256 和 APK 大小 / SHA-256，写入 Android profile 的签名清单。
 3. 同一 ZIP 字节复制到蓝奏云、R2 和 GitHub Releases，不能分别重新压缩，否则外层 ZIP 摘要会变化。蓝奏云分享页 URL 只作为主源页面地址写入 `sources[]`，不把短时最终地址写入清单。
-4. 只有 staging 下载、解压、APK 包身份 / 证书校验、ADB 安装 smoke 和回滚指针全部通过，才允许把清单候选切到公开状态。当前三个测试分享页先作为 fixture，组件映射冻结前不得发布为正式组件。
+4. 只有 staging 下载、解压、APK 包身份 / 证书校验、ADB 安装验证和回滚指针全部通过，才允许把清单候选切到公开状态。当前三个测试分享页先作为 fixture，组件映射冻结前不得发布为正式组件；本轮真实 WebView / 网络验证由用户人工主测，未执行项不计为生产通过。
 5. Cloud 不向客户端下发压缩包密码、网盘账号、R2 密钥、GitHub PAT 或任意命令；蓝奏云密码聚合文件夹和三应用合并 ZIP 不进入 Android 自动清单。
 
 ### 3.4 当前蓝奏云 ZIP fixture
@@ -73,6 +76,7 @@ rollbackId
 2. `zip-test-2`：`https://wwatl.lanzouw.com/i9neI435o4zg`
 3. `zip-test-3`：`https://wwatl.lanzouw.com/iGrHV435o5ah`
 4. 三个地址只用于 03helper 的隐藏 WebView、ZIP 下载和解压施工 fixture；组件映射、ZIP / APK 摘要、包身份和正式发布状态尚未冻结，Cloud release index 在这些信息齐全前不得把它们输出为 production 组件。
+5. `2026-08-19` 只读核对 Cloud 当前 `products/`、release profile、release scripts 和协议后，只有 TileLauncher 存在安装包 release profile；03歌词 / 03桌面当前 Cloud 条目是产品或商业配置，没有 03helper Android profile、组件 ZIP 对象、清单公钥或发布脚本。该缺口保持待实施，不由客户端伪造。
 
 ## 4. 官网视觉复用边界
 
@@ -96,9 +100,9 @@ Cloud 最新 iCAR 03 官网已确认的可复用语言：
 
 ## 6. 后续施工顺序
 
-1. M0：冻结 Android 组件清单与 Cloud release index 的映射，确认三个产品仓库的包名、版本、签名身份、ZIP entry 名称和发布责任。
-2. M1：实现 03helper 本地 `ArtifactManifest`、隐藏 WebView 来源适配器、ZIP 下载器和 `ArtifactArchiveExtractor`；先用用户提供的三个 ZIP 蓝奏云链接完成 fixture。
-3. M2：接 Cloud R2 ZIP 对象和 GitHub Releases ZIP 备用；验证断点、失败切源、ZIP / APK 双重摘要、回滚和版本一致性。
+1. M0：Cloud 侧继续冻结 release index 映射，确认三个产品仓库的包名、版本、签名身份、ZIP entry 名称和发布责任；03helper 本地 schema 已完成。
+2. M1：03helper 本地隐藏 WebView 来源适配器、ZIP 下载器、完整性校验和 `InstallationSession` 事件接线已完成；用户提供的三个链接仍只作为 fixture。
+3. M2：待 Cloud R2 ZIP 对象和 GitHub Releases 真实候选具备后，执行断点、失败切源、ZIP / APK 双重摘要、回滚和版本一致性人工验证。
 4. M3：如需由 Cloud 官网提供“下载安装助手”入口，再在 `cloud/apps/website-next/` 增加安装助手产品入口；官网入口只指向助手 APK，不在官网复制车机安装流程。
 5. 每次 Cloud 侧涉及 release index、R2、官网入口、API 或生产部署时，先读取 Cloud 仓库对应专项文档；部署和上线仍按 Cloud 的固定候选与人工授权规则执行。
 

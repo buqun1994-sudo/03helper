@@ -25,6 +25,8 @@ class InstallationSessionTest {
         session.dispatchEvent(InstallationSessionEvent.ApkExtracted("component.apk", 512L, "apk-sha"))
         assertEquals(InstallationSessionState.VERIFYING_ARTIFACTS, session.currentSnapshot().state)
         session.dispatchEvent(InstallationSessionEvent.ArtifactsVerified(checks(session)))
+        assertEquals(InstallationSessionState.VERIFYING_ARTIFACTS, session.currentSnapshot().state)
+        session.dispatchEvent(InstallationSessionEvent.InstallationStarted())
         assertEquals(InstallationSessionState.INSTALLING, session.currentSnapshot().state)
         session.dispatchEvent(InstallationSessionEvent.InstallationCompleted(checks(session)))
         assertEquals(InstallationSessionState.AUTHORIZING, session.currentSnapshot().state)
@@ -310,6 +312,7 @@ class InstallationSessionTest {
         session.dispatchEvent(InstallationSessionEvent.ArchiveVerified(true))
         session.dispatchEvent(InstallationSessionEvent.ApkExtracted("component.apk", 512L, "apk-sha"))
         session.dispatchEvent(InstallationSessionEvent.ArtifactsVerified(checks(session)))
+        session.dispatchEvent(InstallationSessionEvent.InstallationStarted())
         session.dispatchEvent(InstallationSessionEvent.InstallationCompleted(checks(session)))
         session.dispatchEvent(InstallationSessionEvent.AuthorizationCompleted(checks(session)))
     }

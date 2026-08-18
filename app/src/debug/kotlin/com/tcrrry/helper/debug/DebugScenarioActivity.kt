@@ -148,6 +148,7 @@ internal object DebugScenarioFixtures {
         driver.event(InstallationSessionEvent.ArchiveVerified(verified = true), animated)
         driver.event(InstallationSessionEvent.ApkExtracted("component.apk", 512L, "debug-apk-sha"), animated)
         driver.event(InstallationSessionEvent.ArtifactsVerified(driver.checks()), animated)
+        driver.event(InstallationSessionEvent.InstallationStarted(), animated)
         driver.event(InstallationSessionEvent.InstallationCompleted(driver.checks()), animated)
         driver.event(InstallationSessionEvent.AuthorizationCompleted(driver.checks()), animated)
         driver.event(InstallationSessionEvent.DeviceVerified(driver.checks()), animated)

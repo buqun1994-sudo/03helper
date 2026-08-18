@@ -1,5 +1,17 @@
 package com.tcrrry.helper.domain.session
 
+import com.tcrrry.helper.domain.artifact.ArchiveDownloadEvidence
+import com.tcrrry.helper.domain.artifact.ArchiveVerificationEvidence
+import com.tcrrry.helper.domain.artifact.ApkExtractionEvidence
+import com.tcrrry.helper.domain.artifact.ArtifactManifestValidator
+import com.tcrrry.helper.domain.artifact.ArtifactSourceKind
+import com.tcrrry.helper.domain.artifact.ArtifactVerification
+import com.tcrrry.helper.domain.artifact.ManifestValidation
+import com.tcrrry.helper.domain.artifact.ReleaseSourcePolicy
+import com.tcrrry.helper.domain.artifact.SourceFailureRecord
+import com.tcrrry.helper.domain.artifact.SourceSelectionEvidence
+import com.tcrrry.helper.domain.artifact.toComponentDescriptor
+
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -110,6 +122,11 @@ class InstallationSession(
                 evidence = SessionEvidence(),
                 componentResults = emptyList(),
                 components = current.components.ifEmpty { catalog },
+                selectedSources = emptyMap(),
+                sourceFailures = emptyList(),
+                archiveDownloads = emptyMap(),
+                archiveVerifications = emptyMap(),
+                apkExtractions = emptyMap(),
             ),
         )
     }
@@ -131,6 +148,11 @@ class InstallationSession(
                 checkpoint = null,
                 evidence = SessionEvidence(),
                 componentResults = emptyList(),
+                selectedSources = emptyMap(),
+                sourceFailures = emptyList(),
+                archiveDownloads = emptyMap(),
+                archiveVerifications = emptyMap(),
+                apkExtractions = emptyMap(),
             ),
         )
     }
@@ -302,6 +324,10 @@ class InstallationSession(
             evidence = checkpoint.evidence,
             componentResults = buildComponentResults(checkpoint.evidence, current),
             checkpoint = checkpoint,
+            selectedSources = checkpoint.selectedSources,
+            archiveDownloads = checkpoint.archiveDownloads,
+            archiveVerifications = checkpoint.archiveVerifications,
+            apkExtractions = checkpoint.apkExtractions,
         )
         startNewGeneration(restored)
     }
@@ -342,11 +368,20 @@ class InstallationSession(
         when (val event = command.event) {
             is InstallationSessionEvent.DeviceDiscovered -> handleDeviceDiscovered(event.device)
             is InstallationSessionEvent.DiscoverySnapshot -> handleDiscoverySnapshot(event.devices)
-            is InstallationSessionEvent.SourceResolved -> handleSourceResolved(event.sourceId)
+            is InstallationSessionEvent.CatalogResolved -> handleCatalogResolved(event)
+            is InstallationSessionEvent.CatalogFailed -> fail(
+                category = FailureCategory.VERIFICATION,
+                retryable = false,
+                reasonCode = event.reasonCode,
+            )
+
+            is InstallationSessionEvent.SourceResolved -> handleSourceResolved(event)
+            is InstallationSessionEvent.SourceFailed -> handleSourceFailed(event)
             is InstallationSessionEvent.ArchiveDownloaded -> handleArchiveDownloaded(event)
-            is InstallationSessionEvent.ArchiveVerified -> handleArchiveVerified(event.verified)
+            is InstallationSessionEvent.ArchiveVerified -> handleArchiveVerified(event)
             is InstallationSessionEvent.ApkExtracted -> handleApkExtracted(event)
-            is InstallationSessionEvent.ArtifactsVerified -> handleArtifactsVerified(event.checks)
+            is InstallationSessionEvent.ArtifactsVerified -> handleArtifactsVerified(event)
+            is InstallationSessionEvent.InstallationStarted -> handleInstallationStarted(event.componentIds)
             is InstallationSessionEvent.InstallationCompleted -> handleInstallationCompleted(event.checks)
             is InstallationSessionEvent.AuthorizationCompleted -> handleAuthorizationCompleted(event.checks)
             is InstallationSessionEvent.DeviceVerified -> handleDeviceVerified(event.checks)
@@ -399,77 +434,415 @@ class InstallationSession(
         publish(current.copy(discoveredDevices = mergeDevices(current.discoveredDevices, devices)), acceptedEventSequence)
     }
 
-    private fun handleSourceResolved(sourceId: String) {
+    private fun handleCatalogResolved(event: InstallationSessionEvent.CatalogResolved) {
+        val current = _snapshot.value
+        if (current.state !in CATALOG_ACCEPTING_STATES) {
+            fail(FailureCategory.UNKNOWN, reasonCode = "catalog_event_out_of_order")
+            return
+        }
+        if (event.catalogVersion.isBlank() || event.keyId.isBlank() || event.signatureAlgorithm.isBlank()) {
+            fail(FailureCategory.VERIFICATION, retryable = false, reasonCode = "catalog_trust_evidence_missing")
+            return
+        }
+        if (event.signatureAlgorithm !in SUPPORTED_CATALOG_SIGNATURE_ALGORITHMS) {
+            fail(FailureCategory.VERIFICATION, retryable = false, reasonCode = "catalog_signature_algorithm_unsupported")
+            return
+        }
+        when (val validation = ArtifactManifestValidator.validateCatalog(event.manifests)) {
+            is ManifestValidation.Invalid -> {
+                fail(FailureCategory.VERIFICATION, retryable = false, reasonCode = validation.reasonCode)
+                return
+            }
+
+            ManifestValidation.Valid -> Unit
+        }
+        val sourcePolicy = ReleaseSourcePolicy()
+        event.manifests.forEach { manifest ->
+            when (val plan = sourcePolicy.plan(manifest)) {
+                is com.tcrrry.helper.domain.artifact.SourcePlan.Rejected -> {
+                    fail(FailureCategory.VERIFICATION, retryable = false, reasonCode = plan.reasonCode)
+                    return
+                }
+
+                is com.tcrrry.helper.domain.artifact.SourcePlan.Accepted -> Unit
+            }
+        }
+        val components = event.manifests.map { it.toComponentDescriptor() }
+        val optionalIds = components.filterNot { it.required }.map { it.id }.toSet()
+        publish(
+            current.copy(
+                components = components,
+                artifactManifests = event.manifests,
+                catalogVersion = event.catalogVersion,
+                catalogKeyId = event.keyId,
+                catalogSignatureAlgorithm = event.signatureAlgorithm,
+                selectedOptionalComponentIds = current.selectedOptionalComponentIds.filterTo(mutableSetOf()) {
+                    it in optionalIds
+                },
+                currentComponentName = null,
+                progress = null,
+                evidence = SessionEvidence(),
+                componentResults = emptyList(),
+                checkpoint = null,
+                selectedSources = emptyMap(),
+                sourceFailures = emptyList(),
+                archiveDownloads = emptyMap(),
+                archiveVerifications = emptyMap(),
+                apkExtractions = emptyMap(),
+                failure = null,
+            ),
+            acceptedEventSequence,
+        )
+    }
+
+    private fun handleSourceFailed(event: InstallationSessionEvent.SourceFailed) {
+        val current = _snapshot.value
+        if (current.state !in F2_PIPELINE_STATES) {
+            fail(FailureCategory.UNKNOWN, reasonCode = "source_failure_out_of_order")
+            return
+        }
+        if (current.state == InstallationSessionState.VERIFYING_ARTIFACTS &&
+            current.evidence.artifactsVerified.isNotEmpty()
+        ) {
+            fail(FailureCategory.UNKNOWN, reasonCode = "source_failure_after_artifact_verification")
+            return
+        }
+        if (event.componentId !in selectedComponentIds(current) || event.reasonCode.isBlank()) {
+            fail(FailureCategory.DOWNLOAD, reasonCode = "source_failure_invalid")
+            return
+        }
+        val failureRecord = SourceFailureRecord(
+            componentId = event.componentId,
+            sourceKind = event.sourceKind,
+            reasonCode = event.reasonCode,
+            retryable = event.retryable,
+        )
+        if (event.terminal) {
+            publish(
+                current.copy(
+                    sourceFailures = (current.sourceFailures + failureRecord).takeLast(MAX_SOURCE_FAILURE_RECORDS),
+                ),
+                acceptedEventSequence,
+            )
+            fail(
+                category = FailureCategory.DOWNLOAD,
+                componentName = componentName(current, event.componentId),
+                retryable = event.retryable,
+                reasonCode = "all_sources_failed",
+            )
+            return
+        }
+        publish(
+            current.copy(
+                sourceFailures = (current.sourceFailures + failureRecord).takeLast(MAX_SOURCE_FAILURE_RECORDS),
+            ),
+            acceptedEventSequence,
+        )
+    }
+
+    private fun handleSourceResolved(event: InstallationSessionEvent.SourceResolved) {
         if (!requireState(InstallationSessionState.RESOLVING_SOURCE, "source_event_out_of_order")) return
-        if (sourceId.isBlank()) {
+        if (event.sourceId.isBlank()) {
             fail(FailureCategory.DOWNLOAD, reasonCode = "source_missing")
+            return
+        }
+        val current = _snapshot.value
+        val selections = normalizeSourceSelections(event)
+        if (current.artifactManifests.isNotEmpty() && !validateSourceSelections(selections, current)) {
+            fail(FailureCategory.DOWNLOAD, reasonCode = "source_evidence_invalid")
             return
         }
         transition(
             state = InstallationSessionState.DOWNLOADING_ARCHIVE,
             progress = progress(0.0f, indeterminate = true),
+            selectedSources = if (selections.isEmpty()) {
+                current.selectedSources
+            } else {
+                selections.associate { it.componentId to it.sourceKind }
+            },
         )
     }
 
     private fun handleArchiveDownloaded(event: InstallationSessionEvent.ArchiveDownloaded) {
         if (!requireState(InstallationSessionState.DOWNLOADING_ARCHIVE, "archive_event_out_of_order")) return
-        if (event.sizeBytes <= 0L || event.sha256.isBlank()) {
+        val current = _snapshot.value
+        val archives = normalizeArchiveDownloads(event)
+        if (current.artifactManifests.isNotEmpty() && !validateArchiveDownloads(archives, current)) {
+            fail(FailureCategory.DOWNLOAD, reasonCode = "archive_identity_invalid")
+            return
+        }
+        if (current.artifactManifests.isEmpty() && (event.sizeBytes <= 0L || event.sha256.isBlank())) {
             fail(FailureCategory.DOWNLOAD, reasonCode = "archive_identity_missing")
             return
         }
         transition(
             state = InstallationSessionState.VERIFYING_ARCHIVE,
             progress = progress(0.25f, indeterminate = true),
+            archiveDownloads = if (archives.isEmpty()) current.archiveDownloads else archives.associateBy { it.componentId },
         )
     }
 
-    private fun handleArchiveVerified(verified: Boolean) {
+    private fun handleArchiveVerified(event: InstallationSessionEvent.ArchiveVerified) {
         if (!requireState(InstallationSessionState.VERIFYING_ARCHIVE, "archive_verification_out_of_order")) return
-        if (!verified) {
+        if (!event.verified) {
             fail(FailureCategory.ARCHIVE, reasonCode = "archive_verification_failed")
+            return
+        }
+        val current = _snapshot.value
+        val verifications = normalizeArchiveVerifications(event)
+        if (current.artifactManifests.isNotEmpty() && !validateArchiveVerifications(verifications, current)) {
+            fail(FailureCategory.ARCHIVE, reasonCode = "archive_verification_evidence_invalid")
             return
         }
         transition(
             state = InstallationSessionState.EXTRACTING_APK,
             progress = progress(0.4f, indeterminate = true),
+            archiveVerifications = if (verifications.isEmpty()) {
+                current.archiveVerifications
+            } else {
+                verifications.associateBy { it.componentId }
+            },
         )
     }
 
     private fun handleApkExtracted(event: InstallationSessionEvent.ApkExtracted) {
         if (!requireState(InstallationSessionState.EXTRACTING_APK, "apk_event_out_of_order")) return
-        if (
-            event.entryName.isBlank() ||
-            event.entryName.contains('/') ||
-            event.entryName.contains('\\') ||
-            event.entryName.contains("..") ||
-            event.sizeBytes <= 0L ||
-            event.sha256.isBlank()
-        ) {
+        val current = _snapshot.value
+        val extractions = normalizeApkExtractions(event)
+        if (current.artifactManifests.isNotEmpty() && !validateApkExtractions(extractions, current)) {
+            fail(FailureCategory.ARCHIVE, reasonCode = "apk_extraction_evidence_invalid")
+            return
+        }
+        if (current.artifactManifests.isEmpty() && !isValidLegacyApkExtraction(event)) {
             fail(FailureCategory.ARCHIVE, reasonCode = "apk_identity_missing")
             return
         }
         transition(
             state = InstallationSessionState.VERIFYING_ARTIFACTS,
             progress = progress(0.55f, indeterminate = true),
+            apkExtractions = if (extractions.isEmpty()) current.apkExtractions else extractions.associateBy { it.componentId },
         )
     }
 
-    private fun handleArtifactsVerified(checks: List<ComponentCheck>) {
+    private fun handleArtifactsVerified(event: InstallationSessionEvent.ArtifactsVerified) {
         if (!requireState(InstallationSessionState.VERIFYING_ARTIFACTS, "artifact_event_out_of_order")) return
-        val verified = validateChecks(checks)
+        val verified = validateChecks(event.checks)
         if (verified == null) {
             fail(FailureCategory.VERIFICATION, reasonCode = "artifact_verification_failed")
             return
         }
         val current = _snapshot.value
-        val evidence = current.evidence.copy(artifactsVerified = verified)
+        val verifications = event.verifications
+        if (current.artifactManifests.isNotEmpty() && !validateArtifactVerifications(verifications, current)) {
+            fail(FailureCategory.VERIFICATION, reasonCode = "artifact_verification_evidence_invalid")
+            return
+        }
+        val evidence = current.evidence.copy(
+            artifactsVerified = verified,
+            artifactVerifications = if (verifications.isEmpty()) {
+                current.evidence.artifactVerifications
+            } else {
+                verifications.associateBy { it.componentId }
+            },
+        )
         transition(
-            state = InstallationSessionState.INSTALLING,
+            state = InstallationSessionState.VERIFYING_ARTIFACTS,
             evidence = evidence,
             componentResults = buildComponentResults(evidence, current),
+            progress = progress(0.6f, indeterminate = false),
+        )
+    }
+
+    private fun handleInstallationStarted(componentIds: List<String>) {
+        if (!requireState(InstallationSessionState.VERIFYING_ARTIFACTS, "installation_start_out_of_order")) return
+        val current = _snapshot.value
+        val expected = selectedComponentIds(current)
+        val requested = componentIds.toSet().ifEmpty { expected }
+        if (requested != expected || current.evidence.artifactsVerified != expected) {
+            fail(FailureCategory.VERIFICATION, reasonCode = "artifact_evidence_incomplete")
+            return
+        }
+        if (current.artifactManifests.isNotEmpty() && current.evidence.artifactVerifications.keys != expected) {
+            fail(FailureCategory.VERIFICATION, reasonCode = "artifact_identity_evidence_missing")
+            return
+        }
+        transition(
+            state = InstallationSessionState.INSTALLING,
             progress = progress(0.65f, indeterminate = true),
         )
     }
+
+    private fun normalizeSourceSelections(
+        event: InstallationSessionEvent.SourceResolved,
+    ): List<SourceSelectionEvidence> = when {
+        event.selections.isNotEmpty() -> event.selections
+        event.componentId != null && event.sourceKind != null -> listOf(
+            SourceSelectionEvidence(event.componentId, event.sourceKind),
+        )
+
+        else -> emptyList()
+    }
+
+    private fun normalizeArchiveDownloads(
+        event: InstallationSessionEvent.ArchiveDownloaded,
+    ): List<ArchiveDownloadEvidence> = when {
+        event.archives.isNotEmpty() -> event.archives
+        event.componentId != null -> listOf(
+            ArchiveDownloadEvidence(
+                componentId = event.componentId,
+                sizeBytes = event.sizeBytes,
+                sha256 = event.sha256,
+                resumed = event.resumed,
+            ),
+        )
+
+        else -> emptyList()
+    }
+
+    private fun normalizeArchiveVerifications(
+        event: InstallationSessionEvent.ArchiveVerified,
+    ): List<ArchiveVerificationEvidence> = when {
+        event.verifications.isNotEmpty() -> event.verifications
+        event.verification != null -> listOf(event.verification)
+        event.componentId != null -> listOf(
+            ArchiveVerificationEvidence(
+                componentId = event.componentId,
+                sizeBytes = _snapshot.value.archiveDownloads[event.componentId]?.sizeBytes ?: 0L,
+                sha256 = _snapshot.value.archiveDownloads[event.componentId]?.sha256.orEmpty(),
+            ),
+        )
+
+        else -> emptyList()
+    }
+
+    private fun normalizeApkExtractions(
+        event: InstallationSessionEvent.ApkExtracted,
+    ): List<ApkExtractionEvidence> = when {
+        event.extractions.isNotEmpty() -> event.extractions
+        event.componentId != null -> listOf(
+            ApkExtractionEvidence(
+                componentId = event.componentId,
+                entryName = event.entryName,
+                sizeBytes = event.sizeBytes,
+                sha256 = event.sha256,
+            ),
+        )
+
+        else -> emptyList()
+    }
+
+    private fun validateSourceSelections(
+        selections: List<SourceSelectionEvidence>,
+        snapshot: InstallationSessionSnapshot,
+    ): Boolean {
+        val expected = selectedComponentIds(snapshot)
+        if (selections.size != selections.map { it.componentId }.toSet().size) return false
+        if (selections.map { it.componentId }.toSet() != expected) return false
+        val manifests = snapshot.artifactManifests.associateBy { it.componentId }
+        return selections.all { selection ->
+            manifests[selection.componentId]?.sources?.any { it.kind == selection.sourceKind } == true
+        }
+    }
+
+    private fun validateArchiveDownloads(
+        downloads: List<ArchiveDownloadEvidence>,
+        snapshot: InstallationSessionSnapshot,
+    ): Boolean {
+        val expected = selectedComponentIds(snapshot)
+        if (downloads.size != downloads.map { it.componentId }.toSet().size) return false
+        if (downloads.map { it.componentId }.toSet() != expected) return false
+        val manifests = snapshot.artifactManifests.associateBy { it.componentId }
+        return downloads.all { download ->
+            val manifest = manifests[download.componentId] ?: return@all false
+            download.sizeBytes == manifest.archiveSizeBytes &&
+                download.sha256.equals(manifest.archiveSha256, ignoreCase = true)
+        }
+    }
+
+    private fun validateArchiveVerifications(
+        verifications: List<ArchiveVerificationEvidence>,
+        snapshot: InstallationSessionSnapshot,
+    ): Boolean {
+        val expected = selectedComponentIds(snapshot)
+        if (verifications.size != verifications.map { it.componentId }.toSet().size) return false
+        if (verifications.map { it.componentId }.toSet() != expected) return false
+        val manifests = snapshot.artifactManifests.associateBy { it.componentId }
+        return verifications.all { verification ->
+            val manifest = manifests[verification.componentId] ?: return@all false
+            val downloaded = snapshot.archiveDownloads[verification.componentId] ?: return@all false
+            verification.sizeBytes == manifest.archiveSizeBytes &&
+                verification.sha256.equals(manifest.archiveSha256, ignoreCase = true) &&
+                downloaded.sizeBytes == verification.sizeBytes &&
+                downloaded.sha256.equals(verification.sha256, ignoreCase = true)
+        }
+    }
+
+    private fun validateApkExtractions(
+        extractions: List<ApkExtractionEvidence>,
+        snapshot: InstallationSessionSnapshot,
+    ): Boolean {
+        val expected = selectedComponentIds(snapshot)
+        if (extractions.size != extractions.map { it.componentId }.toSet().size) return false
+        if (extractions.map { it.componentId }.toSet() != expected) return false
+        val manifests = snapshot.artifactManifests.associateBy { it.componentId }
+        return extractions.all { extraction ->
+            val manifest = manifests[extraction.componentId] ?: return@all false
+            extraction.entryName == manifest.apkEntryName &&
+                extraction.sizeBytes == manifest.apkSizeBytes &&
+                extraction.sha256.equals(manifest.apkSha256, ignoreCase = true) &&
+                isSafeApkEntry(extraction.entryName)
+        }
+    }
+
+    private fun validateArtifactVerifications(
+        verifications: List<ArtifactVerification>,
+        snapshot: InstallationSessionSnapshot,
+    ): Boolean {
+        val expected = selectedComponentIds(snapshot)
+        if (verifications.size != verifications.map { it.componentId }.toSet().size) return false
+        if (verifications.map { it.componentId }.toSet() != expected) return false
+        val manifests = snapshot.artifactManifests.associateBy { it.componentId }
+        return verifications.all { verification ->
+            val manifest = manifests[verification.componentId] ?: return@all false
+            verification.archiveDeleted &&
+                snapshot.selectedSources[verification.componentId] == verification.sourceKind &&
+                verification.archiveSizeBytes == manifest.archiveSizeBytes &&
+                verification.archiveSha256.equals(manifest.archiveSha256, ignoreCase = true) &&
+                verification.apkSizeBytes == manifest.apkSizeBytes &&
+                verification.apkSha256.equals(manifest.apkSha256, ignoreCase = true) &&
+                verification.packageName == manifest.packageName &&
+                verification.apkVersion == manifest.apkVersion &&
+                verification.certificateSha256.equals(manifest.certificateSha256, ignoreCase = true)
+        }
+    }
+
+    private fun isValidLegacyApkExtraction(event: InstallationSessionEvent.ApkExtracted): Boolean =
+        event.entryName.isNotBlank() &&
+            event.entryName != "." &&
+            event.entryName != ".." &&
+            !event.entryName.contains('/') &&
+            !event.entryName.contains('\\') &&
+            !event.entryName.contains("..") &&
+            !event.entryName.contains('\u0000') &&
+            event.sizeBytes > 0L &&
+            event.sha256.isNotBlank()
+
+    private fun isSafeApkEntry(value: String): Boolean =
+        value.isNotBlank() &&
+            !value.startsWith('/') &&
+            !value.startsWith('\\') &&
+            !value.contains('/') &&
+            !value.contains('\\') &&
+            !value.contains("..") &&
+            !value.contains('\u0000')
+
+    private fun selectedComponentIds(snapshot: InstallationSessionSnapshot): Set<String> =
+        snapshot.components.filter { it.required || it.id in snapshot.selectedOptionalComponentIds }
+            .map { it.id }
+            .toSet()
+
+    private fun componentName(snapshot: InstallationSessionSnapshot, componentId: String): String? =
+        snapshot.components.firstOrNull { it.id == componentId }?.displayName
 
     private fun handleInstallationCompleted(checks: List<ComponentCheck>) {
         if (!requireState(InstallationSessionState.INSTALLING, "installation_event_out_of_order")) return
@@ -595,6 +968,10 @@ class InstallationSession(
         evidence: SessionEvidence = _snapshot.value.evidence,
         componentResults: List<ComponentResult> = _snapshot.value.componentResults,
         checkpoint: SessionCheckpoint? = _snapshot.value.checkpoint,
+        selectedSources: Map<String, ArtifactSourceKind> = _snapshot.value.selectedSources,
+        archiveDownloads: Map<String, ArchiveDownloadEvidence> = _snapshot.value.archiveDownloads,
+        archiveVerifications: Map<String, ArchiveVerificationEvidence> = _snapshot.value.archiveVerifications,
+        apkExtractions: Map<String, ApkExtractionEvidence> = _snapshot.value.apkExtractions,
     ) {
         val current = _snapshot.value
         val next = current.copy(
@@ -603,6 +980,10 @@ class InstallationSession(
             evidence = evidence,
             componentResults = componentResults,
             checkpoint = checkpoint,
+            selectedSources = selectedSources,
+            archiveDownloads = archiveDownloads,
+            archiveVerifications = archiveVerifications,
+            apkExtractions = apkExtractions,
             failure = null,
         )
         publish(if (state == InstallationSessionState.SUCCEEDED) next else withCheckpoint(next), acceptedEventSequence)
@@ -671,6 +1052,15 @@ class InstallationSession(
             return "device_not_confirmed"
         }
         if (components.isEmpty()) return "component_catalog_missing"
+        if (snapshot.artifactManifests.isNotEmpty()) {
+            when (val validation = ArtifactManifestValidator.validateCatalog(snapshot.artifactManifests)) {
+                is ManifestValidation.Invalid -> return validation.reasonCode
+                ManifestValidation.Valid -> Unit
+            }
+            if (snapshot.artifactManifests.map { it.componentId }.toSet() != components.map { it.id }.toSet()) {
+                return "catalog_component_mapping_invalid"
+            }
+        }
         if (components.any { it.id.isBlank() || it.displayName.isBlank() }) return "component_identity_missing"
         if (components.map { it.id }.toSet().size != components.size) return "component_identity_duplicate"
 
@@ -748,6 +1138,10 @@ class InstallationSession(
         currentComponentName = snapshot.currentComponentName,
         progress = snapshot.progress,
         evidence = snapshot.evidence,
+        selectedSources = snapshot.selectedSources,
+        archiveDownloads = snapshot.archiveDownloads,
+        archiveVerifications = snapshot.archiveVerifications,
+        apkExtractions = snapshot.apkExtractions,
     )
 
     private fun withCheckpoint(snapshot: InstallationSessionSnapshot): InstallationSessionSnapshot =
@@ -807,6 +1201,23 @@ class InstallationSession(
     private fun nextSessionId(current: Long): Long = if (current == Long.MAX_VALUE) 1L else current + 1L
 
     private companion object {
+        const val MAX_SOURCE_FAILURE_RECORDS = 32
+        val SUPPORTED_CATALOG_SIGNATURE_ALGORITHMS = setOf("SHA256withECDSA", "Ed25519")
+
+        val CATALOG_ACCEPTING_STATES = setOf(
+            InstallationSessionState.IDLE,
+            InstallationSessionState.DISCOVERING,
+            InstallationSessionState.CONNECTED,
+        )
+
+        val F2_PIPELINE_STATES = setOf(
+            InstallationSessionState.RESOLVING_SOURCE,
+            InstallationSessionState.DOWNLOADING_ARCHIVE,
+            InstallationSessionState.VERIFYING_ARCHIVE,
+            InstallationSessionState.EXTRACTING_APK,
+            InstallationSessionState.VERIFYING_ARTIFACTS,
+        )
+
         val DISCOVERY_ENTRY_STATES = setOf(
             InstallationSessionState.IDLE,
             InstallationSessionState.FAILED,

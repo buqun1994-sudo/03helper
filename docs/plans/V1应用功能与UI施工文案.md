@@ -2,7 +2,7 @@
 
 ## 1. 文档状态
 
-1. 本文是 Android V1 的产品、界面和施工基线；F0 Android 工程、视觉令牌、状态投影和确定性 Debug 场景已经建立，F1 唯一安装会话与页面接线已完成，但真实 ADB 通道、下载服务、正式签名和 Cloud 发布链仍未完成。
+1. 本文是 Android V1 的产品、界面和施工基线；F0 Android 工程、视觉令牌、状态投影和确定性 Debug 场景、F1 唯一安装会话与页面接线、F2 本地下载 / 校验链已经完成，但真实 ADB 通道、Cloud Android profile、正式签名和真实网络主测仍未完成。
 2. 当前真实锚点为单 `app` 模块、`applicationId/namespace=com.tcrrry.helper`、`app/src/main/kotlin/com/tcrrry/helper/` 源码根与 `Theme.ThreeHelper`；完整 owner 与文件边界以 `docs/architecture/项目长期总纲.md` 第 2 节为准，不得从本文另建包名、状态机或动效参数。
 3. 本文复用 Cloud 最新 iCAR 03 官网的视觉语言，不复制官网页面。Cloud 接线能力与边界见 `docs/architecture/Cloud项目能力接线.md`。
 4. F0 已完成并通过本机与指定手机 smoke；F0 基座首笔提交为 `948f51d`。本条只证明手机工程、视觉壳、状态投影和确定性演示可运行，不代表真实车机安装能力已经开放。
@@ -187,12 +187,15 @@
 3. 来源固定为“蓝奏云单组件 ZIP 分享页 -> Cloudflare R2 同字节 ZIP -> GitHub Releases 同字节 ZIP”；密码文件夹、三应用合并 ZIP、夸克和第三方直链转换器不进入自动会话。
 4. 隐藏 WebView 使用 Android 默认手机端标识，挂载在当前安装页面背后并由不透明进度层遮挡；不启动外部浏览器、不接收用户触摸 / 焦点、不暴露 JavaScript bridge。取得下载回调或失败后立即停止加载并销毁。
 5. 下载器只写入应用私有缓存的 `.zip.part`；ZIP 大小与 SHA-256 通过后才允许受控解压。唯一 APK 的 entry 名称、大小、SHA-256、包名、版本和签名证书全部通过后，才向会话发送产物校验成功，并立即删除 ZIP。
+6. F2 实际文件边界固定为 `domain/artifact/`（清单、类型和策略）、`data/catalog/`（Cloud 验签与解析）、`data/web/`（隐藏 WebView）、`data/download/`（私有缓存与下载）、`data/artifact/`（ZIP / APK 校验）和 `application/artifact/`（事件编排）；事件只经 `InstallationSessionArtifactEventPort` 进入 F1 会话。
+7. `ArtifactsVerified` 只记录完整性成功并停在 `VERIFYING_ARTIFACTS`；F2 不发送 `InstallationStarted`、安装、授权或车机可用性事件。
 
 F2 验证门槛：
 
 1. 先用确定性 fixture 覆盖清单签名 / 字段缺失、来源切换、HTML 假响应、解析超时、断点 / 重试、ZIP 哈希不符、ZIP 结构异常、路径穿越、多个 APK、APK 哈希 / 包身份 / 证书不符和缓存清理；任何失败都必须 fail closed，并把结构化原因送入现有会话。
 2. 在真实 Android System WebView 和真实单组件 ZIP 证据具备前，不把模拟 User-Agent、桌面浏览器或 Debug fixture 记录为真实主源通过。
 3. F2 完成后，F1 的页面仍只消费 `InstallUiStateMapper`；下载与校验进度、失败原因和备用源切换不得通过页面内特判表达。
+4. 本轮按用户确认的最简自动化口径，只执行上述确定性 fixture、编译和直接相关单测；真实 WebView、真实 ZIP、网络切换和页面可见性由用户按 `docs/testing/验证矩阵.md` 的 F2 人工用例主测，不将未执行 smoke 计作失败或通过。
 
 当前施工起点：先读取 `docs/architecture/项目长期总纲.md` 第 2、5、7 节、`docs/plans/03helper首版安装流程计划.md` 的 ZIP 自动处理契约、`docs/architecture/Cloud项目能力接线.md` 和 `docs/testing/验证矩阵.md`，再给出文件级物理锚点；未冻结清单 schema 前禁止自由创建外部协议。
 

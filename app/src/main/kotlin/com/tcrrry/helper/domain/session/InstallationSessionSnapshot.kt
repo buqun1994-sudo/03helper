@@ -1,5 +1,13 @@
 package com.tcrrry.helper.domain.session
 
+import com.tcrrry.helper.domain.artifact.ArchiveDownloadEvidence
+import com.tcrrry.helper.domain.artifact.ArchiveVerificationEvidence
+import com.tcrrry.helper.domain.artifact.ApkExtractionEvidence
+import com.tcrrry.helper.domain.artifact.ArtifactManifest
+import com.tcrrry.helper.domain.artifact.ArtifactSourceKind
+import com.tcrrry.helper.domain.artifact.ArtifactVerification
+import com.tcrrry.helper.domain.artifact.SourceFailureRecord
+
 data class InstallationSessionSnapshot(
     val state: InstallationSessionState,
     val device: DeviceSummary? = null,
@@ -15,6 +23,15 @@ data class InstallationSessionSnapshot(
     val lastEventSequence: Long = 0L,
     val checkpoint: SessionCheckpoint? = null,
     val evidence: SessionEvidence = SessionEvidence(),
+    val artifactManifests: List<ArtifactManifest> = emptyList(),
+    val catalogVersion: String? = null,
+    val catalogKeyId: String? = null,
+    val catalogSignatureAlgorithm: String? = null,
+    val selectedSources: Map<String, ArtifactSourceKind> = emptyMap(),
+    val sourceFailures: List<SourceFailureRecord> = emptyList(),
+    val archiveDownloads: Map<String, ArchiveDownloadEvidence> = emptyMap(),
+    val archiveVerifications: Map<String, ArchiveVerificationEvidence> = emptyMap(),
+    val apkExtractions: Map<String, ApkExtractionEvidence> = emptyMap(),
 )
 
 data class DeviceSummary(
@@ -58,6 +75,7 @@ data class ComponentResult(
 /** Structured proof collected by the session before it can report success. */
 data class SessionEvidence(
     val artifactsVerified: Set<String> = emptySet(),
+    val artifactVerifications: Map<String, ArtifactVerification> = emptyMap(),
     val installed: Set<String> = emptySet(),
     val configured: Set<String> = emptySet(),
     val available: Set<String> = emptySet(),
@@ -72,4 +90,8 @@ data class SessionCheckpoint(
     val currentComponentName: String?,
     val progress: SessionProgress?,
     val evidence: SessionEvidence,
+    val selectedSources: Map<String, ArtifactSourceKind> = emptyMap(),
+    val archiveDownloads: Map<String, ArchiveDownloadEvidence> = emptyMap(),
+    val archiveVerifications: Map<String, ArchiveVerificationEvidence> = emptyMap(),
+    val apkExtractions: Map<String, ApkExtractionEvidence> = emptyMap(),
 )

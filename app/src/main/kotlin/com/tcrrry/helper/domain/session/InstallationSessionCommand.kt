@@ -1,5 +1,13 @@
 package com.tcrrry.helper.domain.session
 
+import com.tcrrry.helper.domain.artifact.ArchiveDownloadEvidence
+import com.tcrrry.helper.domain.artifact.ArchiveVerificationEvidence
+import com.tcrrry.helper.domain.artifact.ApkExtractionEvidence
+import com.tcrrry.helper.domain.artifact.ArtifactManifest
+import com.tcrrry.helper.domain.artifact.ArtifactSourceKind
+import com.tcrrry.helper.domain.artifact.ArtifactVerification
+import com.tcrrry.helper.domain.artifact.SourceSelectionEvidence
+
 /** Commands accepted by the single installation-session owner. */
 sealed interface InstallationSessionCommand {
     data object StartDiscovery : InstallationSessionCommand
@@ -37,22 +45,60 @@ sealed interface InstallationSessionEvent {
 
     data class DiscoverySnapshot(val devices: List<DeviceSummary>) : InstallationSessionEvent
 
-    data class SourceResolved(val sourceId: String) : InstallationSessionEvent
+    data class CatalogResolved(
+        val catalogVersion: String,
+        val keyId: String,
+        val signatureAlgorithm: String,
+        val manifests: List<ArtifactManifest>,
+    ) : InstallationSessionEvent
+
+    data class CatalogFailed(val reasonCode: String) : InstallationSessionEvent
+
+    data class SourceResolved(
+        val sourceId: String,
+        val componentId: String? = null,
+        val sourceKind: ArtifactSourceKind? = null,
+        val selections: List<SourceSelectionEvidence> = emptyList(),
+    ) : InstallationSessionEvent
+
+    data class SourceFailed(
+        val componentId: String,
+        val sourceKind: ArtifactSourceKind,
+        val reasonCode: String,
+        val retryable: Boolean = true,
+        val terminal: Boolean = false,
+    ) : InstallationSessionEvent
 
     data class ArchiveDownloaded(
         val sizeBytes: Long,
         val sha256: String,
+        val componentId: String? = null,
+        val resumed: Boolean = false,
+        val archives: List<ArchiveDownloadEvidence> = emptyList(),
     ) : InstallationSessionEvent
 
-    data class ArchiveVerified(val verified: Boolean) : InstallationSessionEvent
+    data class ArchiveVerified(
+        val verified: Boolean,
+        val componentId: String? = null,
+        val verification: ArchiveVerificationEvidence? = null,
+        val verifications: List<ArchiveVerificationEvidence> = emptyList(),
+    ) : InstallationSessionEvent
 
     data class ApkExtracted(
         val entryName: String,
         val sizeBytes: Long,
         val sha256: String,
+        val componentId: String? = null,
+        val extractions: List<ApkExtractionEvidence> = emptyList(),
     ) : InstallationSessionEvent
 
-    data class ArtifactsVerified(val checks: List<ComponentCheck>) : InstallationSessionEvent
+    data class ArtifactsVerified(
+        val checks: List<ComponentCheck>,
+        val verifications: List<ArtifactVerification> = emptyList(),
+        val archiveDeleted: Boolean = false,
+    ) : InstallationSessionEvent
+
+    data class InstallationStarted(val componentIds: List<String> = emptyList()) : InstallationSessionEvent
 
     data class InstallationCompleted(val checks: List<ComponentCheck>) : InstallationSessionEvent
 

@@ -64,14 +64,40 @@
 4. F2 的外部结果必须通过结构化端口 / adapter event 注入 `InstallationSession`；不得把 URL 解析、下载协议、ZIP 文件路径或错误分支写进 Compose 页面，也不得另建状态机。
 5. F2 交接时必须保留真实能力的待验证标记：在用户进行真实网络 / ZIP / WebView 验收前，不把 Debug fixture、单元测试或模拟下载写成真实源可用。
 
+## 2026-08-19 F2 下载与发布清单施工
+
+1. 已按用户要求把本轮验证口径固化为“最简自动化 + 用户人工主测”：更新根 `AGENTS.md`、`task-closeout` Skill、验证规则、验证矩阵和 F2 计划；本轮不执行设备、外部浏览器、真实 WebView、真实网络或运行级 smoke。
+2. 已冻结 `ArtifactManifest` schema：组件身份、发布版本、Android / 安装助手兼容范围、`archiveFormat=zip`、ZIP 文件名 / 大小 / SHA-256、唯一 `apkEntryName`、APK 大小 / SHA-256、包名、APK 版本和证书摘要，以及固定三源。签名 envelope 固定为 `SignedCatalogEnvelope`，先验签再严格 JSON 解码。
+3. 已落地 `CloudReleaseCatalogAdapter`、`ReleaseSourcePolicy`、`LanzouWebSourceAdapter`、隐藏 `AndroidLanzouWebViewHost`、`ArtifactDownloader`、`ArtifactCache`、`ArchiveIdentityVerifier`、`ArtifactArchiveExtractor`、`ArtifactIdentityVerifier` 和 `ArtifactPreparationCoordinator`；新增唯一 `android.permission.INTERNET`，并关闭明文流量，未新增存储、ADB、无障碍或定位权限。
+4. 隐藏 WebView 保持 Android System WebView 默认手机端标识，页面不挂载到视图层级、不接收触摸 / 焦点、不暴露 JavaScript bridge；下载上下文仅在内存中传递。下载使用应用私有 `.zip.part`，同一清单 / 来源类型才允许 Range 恢复，元数据不含短时 URL、Cookie 或 Referer。
+5. ZIP 必须先通过大小和 SHA-256；解压只接受清单指定的唯一根目录 APK，拒绝路径穿越、嵌套目录、多个 APK、额外文件、CRC / ZIP 结构异常和输出超限。APK 大小、SHA-256、包名、版本、证书全部通过后原子转正并立即删除 ZIP；失败清理 ZIP、部分 APK 和无效 APK。
+6. F1 会话已扩展为接收清单、来源选择 / 失败、归档 / 解压 / 产物证据；`ArtifactsVerified` 成功后停留在 `VERIFYING_ARTIFACTS`，F2 不发送 `InstallationStarted`、安装、授权或车机可用性事件。Compose 仍只走 `InstallationSessionSnapshot -> InstallUiStateMapper -> InstallApp`。
+7. 本机自动化已通过：F2 领域 / 适配器单测 21 项与既有 F1 / UI 单测合计 41 项全部通过；覆盖清单签名 / 字段、来源顺序、HTML 假响应、取消与恢复、ZIP / APK 反例、缓存清理、来源切换和会话阶段门禁。另通过 `:app:lintDebug`、`:app:assembleDebug`、`:app:assembleDebugAndroidTest`、`node scripts/check-project-docs.mjs`、`node scripts/check-skills.mjs`、`git diff --check` 和本机环境快检。
+8. 已只读核对 Cloud 仓库：当前仅 TileLauncher 有安装包 release profile，03歌词 / 03桌面只有产品或商业配置，不存在 03helper Android profile、组件 ZIP 对象、清单公钥或发布脚本。本轮没有修改 Cloud。真实 Android System WebView 隐藏回调、真实蓝奏云 ZIP、切网 / Range 续传、R2 / GitHub 对象一致性和手机画面主测仍未执行；这些已整理到 `docs/testing/验证矩阵.md` 的 F2 人工用例，不能用 fixture 结果替代。
+9. 用户复核后确认：Cloud profile、公钥和组件 ZIP 不应由测试用户自行获取；`docs/testing/验证矩阵.md` 已改为由项目 / Cloud 发布方提供候选，资料缺失时记录外部发布前置阻断。清单签名 / 字段反例继续由确定性自动化测试覆盖，不要求在手机上手工伪造。
+10. 使用本机配置中的显式手机 serial 做了只读包检查：设备在线，原先安装的是 `com.tcrrry.helper` 的 `versionName=0.1.0`、`versionCode=1` 旧 Debug 包，最后更新时间为 `2026-08-18 23:34:24`；该包请求权限中没有 F2 新增的 `android.permission.INTERNET`，因此不是当前 F2 构建。
+11. 当前生产 `MainActivity` 只创建并驱动 `InstallationSession`，仓库尚无生产 LAN / ADB discovery adapter；因此“查找车机”无真实发现结果是 F3 尚未施工的预期阻断，与另一 ADB 助手是否连接车机无关。
+12. 用户将本轮真实来源范围收窄为蓝奏云单组件 ZIP 主源；R2 / GitHub Releases 尚未上传组件 APK / ZIP，已从当前人工前置和失败判定中移除，固定备用顺序继续只由自动化 fixture 覆盖。
+13. 经用户明确要求，使用显式手机 serial 对当前 F2 Debug APK 执行保留数据覆盖安装，ADB 返回 `Success`；安装后包仍为 `0.1.0 (1)`、Debug、`INTERNET` 已声明并授予。未启动应用，等待用户进行主源人工测试。
+14. 进一步核对生产接线：`MainActivity` 当前只创建 `InstallationSession`，`ArtifactCatalogSessionAdapter` 与 `ArtifactPreparationCoordinator` 尚未在生产入口组装；在 Cloud Android profile / 公钥和组件映射具备前，当前 APK 不能从主界面触发真实蓝奏云下载。该阻断独立于 R2 / GitHub 尚未上传对象。
+15. 用户实测反馈：手机安装助手查找不到车机，但电脑上的既有 ADB 助手可以找到并连接。源码与运行边界确认这不是两个工具争抢连接；电脑 ADB 会话不会被手机应用复用，当前安装助手也没有发起 LAN / ADB discovery 请求，因此 F2 后续真实来源测试会在生产入口前置处停止。
+
 ## 未完成事项
 
 1. 接入真实局域网发现、设备连接和 ADB 端口适配；沿用 F1 会话的结构化 command / event，不在适配器内复制状态机。
-2. 建立隐藏 Android System WebView 蓝奏云 ZIP 适配器、应用内下载器、`ArtifactArchiveExtractor`、签名版本清单、R2 / GitHub Releases ZIP 自动备用和回滚链；确认客户端不会打开外部浏览器或把夸克页面当自动协议。
+2. 用用户提供的人工用例验证真实 Android System WebView 蓝奏云回调、真实 ZIP、切网 / Range 续传和主源失败清理；R2 / GitHub Releases 对象与回滚链待对象上传后再开，Cloud Android profile 与生产公钥具备前保持阻断。
 3. 为 03 歌词、03桌面和文件管理器取得可验证的包身份、兼容范围、发布签名和合规材料。
 4. 用真实 `S56_HQX` 设备完成定向安装、授权回读、启动可用性和断线恢复 smoke；用独立设备验证异常和破坏性动作门禁。
 5. 完成维护态的检查更新、保留数据重装、修复授权、重启服务、缓存清理、受控安装 / 卸载和脱敏诊断。
 
 ## F2 交接入口
 
-下一轮从 `docs/plans/V1应用功能与UI施工文案.md` 的 F2 小节开始：先冻结 `ArtifactManifest`、来源策略和结构化下载结果，再实现隐藏 WebView、私有缓存下载、ZIP / APK 校验与固定源切换；完成后把结果接入现有 `InstallationSession` 的 `RESOLVING_SOURCE` 至 `VERIFYING_ARTIFACTS` 阶段。F3 的 LAN / ADB、安装、授权和车机可用性验证暂不提前施工。
+F2 Debug APK 已按用户授权安装到指定手机。当前真实手测范围为蓝奏云主源；但生产入口尚未组装清单 / 产物协调器，且 Cloud Android profile、公钥和组件映射仍未具备，因此暂不能宣称主界面可触发真实蓝奏云链路。R2 / GitHub Releases 对象尚未具备，不纳入本轮测试；F3 的 LAN / ADB、安装、授权和车机可用性验证暂不提前施工。
+
+## 2026-08-19 F2 收尾与下轮交接
+
+1. 用户决定结束 F2 的本轮人工测试，不再用“查找车机”结果反复回归；本轮没有把真实 WebView、真实蓝奏云 ZIP 或生产发布链写成通过。
+2. F2 已提交的本地能力包括：签名清单 schema / 验签、固定来源策略、隐藏 Android System WebView 适配器、私有 `.zip.part` 下载与同源恢复、ZIP / APK 完整性校验、受控解压、失败清理和结构化 `InstallationSession` 事件。
+3. 下轮施工开始前必须先补齐生产可测入口：接入真实 `DeviceDiscovery` / `DeviceTransport`（F3 owner），在生产入口组装 `ArtifactCatalogSessionAdapter` 与 `ArtifactPreparationCoordinator`，并接入项目 / Cloud 提供的 Android profile、公钥和组件映射。不得把三个蓝奏云 fixture 地址按顺序猜成产品身份。
+4. 在 R2 / GitHub Releases 对象上传前，下轮真实来源仍只测蓝奏云主源；备用源只保留自动化 fixture，不要求用户准备或验证不存在的对象。
+5. 验证口径保持“最简自动化 + 用户人工主测”：优先运行语法 / 编译、直接相关单测和文档护栏；不自动启动设备、浏览器或真实网络。生产入口和清单具备后，再把蓝奏云主源的人工动作、预期结果和停止条件交给用户。

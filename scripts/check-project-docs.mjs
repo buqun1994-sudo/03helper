@@ -78,7 +78,17 @@ if (!product.includes("单组件 ZIP")) failures.push("产品基线未固定单�
 if (!architecture.includes("ArtifactArchiveExtractor")) {
   failures.push("架构总纲缺少 ArtifactArchiveExtractor owner");
 }
-for (const field of ["archiveSizeBytes", "archiveSha256", "apkSizeBytes", "apkSha256"]) {
+for (const field of [
+  "archiveFormat",
+  "archiveSizeBytes",
+  "archiveSha256",
+  "apkEntryName",
+  "apkSizeBytes",
+  "apkSha256",
+  "packageName",
+  "apkVersion",
+  "certificateSha256",
+]) {
   if (!cloudIntegration.includes(field)) failures.push(`Cloud Android 清单缺少字段：${field}`);
 }
 if (!uiPlan.includes("隐藏 WebView")) failures.push("V1 UI 施工文案未声明隐藏 WebView 用户边界");
