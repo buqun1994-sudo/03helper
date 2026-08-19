@@ -4,6 +4,8 @@ import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
 import com.tcrrry.helper.domain.artifact.ArtifactVersion
+import com.tcrrry.helper.domain.device.ApkDeclarationMetadata
+import com.tcrrry.helper.domain.device.ApkServiceDeclaration
 import java.io.File
 import java.security.MessageDigest
 
@@ -14,12 +16,15 @@ class AndroidApkMetadataReader(
 
     @Suppress("DEPRECATION")
     override fun read(apk: File): ApkMetadata? {
-        val flags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+        val signingFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             PackageManager.GET_SIGNING_CERTIFICATES
         } else {
             PackageManager.GET_SIGNATURES
         }
-        val packageInfo = packageManager.getPackageArchiveInfo(apk.absolutePath, flags) ?: return null
+        val packageInfo = packageManager.getPackageArchiveInfo(
+            apk.absolutePath,
+            signingFlags or PackageManager.GET_PERMISSIONS or PackageManager.GET_SERVICES,
+        ) ?: return null
         val signatures = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             packageInfo.signingInfo?.apkContentsSigners?.toList().orEmpty()
         } else {
@@ -43,6 +48,24 @@ class AndroidApkMetadataReader(
                 code = versionCode,
             ),
             certificateSha256s = certificateDigests,
+            declarations = ApkDeclarationMetadata(
+                requestedPermissions = packageInfo.requestedPermissions?.toSet().orEmpty(),
+                services = packageInfo.services.orEmpty().map { service ->
+                    ApkServiceDeclaration(
+                        componentName = serviceComponentName(packageInfo.packageName, service.name),
+                        permission = service.permission,
+                    )
+                }.toSet(),
+            ),
         )
+    }
+
+    private fun serviceComponentName(packageName: String, className: String): String {
+        val qualified = when {
+            className.startsWith('.') -> packageName + className
+            className.contains('.') -> className
+            else -> "$packageName.$className"
+        }
+        return "$packageName/$qualified"
     }
 }

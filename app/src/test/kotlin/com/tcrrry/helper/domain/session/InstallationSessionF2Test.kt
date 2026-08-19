@@ -35,6 +35,7 @@ class InstallationSessionF2Test {
         session.dispatchEvent(InstallationSessionEvent.DeviceDiscovered(confirmedDevice))
         session.dispatch(InstallationSessionCommand.SelectDevice(confirmedDevice.id))
         confirmConnection(session, confirmedDevice)
+        session.dispatch(InstallationSessionCommand.ToggleOptionalComponent("lyrics", selected = true))
         session.dispatch(InstallationSessionCommand.StartInstallation)
         session.dispatch(InstallationSessionCommand.BeginPipeline)
         session.dispatchEvent(
@@ -111,6 +112,7 @@ class InstallationSessionF2Test {
         session.dispatchEvent(InstallationSessionEvent.DeviceDiscovered(confirmedDevice))
         session.dispatch(InstallationSessionCommand.SelectDevice(confirmedDevice.id))
         confirmConnection(session, confirmedDevice)
+        session.dispatch(InstallationSessionCommand.ToggleOptionalComponent("lyrics", selected = true))
         session.dispatch(InstallationSessionCommand.StartInstallation)
         session.dispatch(InstallationSessionCommand.BeginPipeline)
         session.dispatchEvent(
@@ -220,7 +222,7 @@ class InstallationSessionF2Test {
             ComponentDescriptor(
                 id = "lyrics",
                 displayName = "Lyrics",
-                required = true,
+                required = false,
                 versionLabel = "1.0",
                 sizeLabel = "1 MB",
                 compatibilityLabel = "Android 26+",
@@ -243,6 +245,9 @@ class InstallationSessionF2Test {
             sessionId = connecting.sessionId,
             sequence = connecting.lastEventSequence + 1L,
         )
+        session.dispatch(
+            InstallationSessionCommand.ToggleOptionalComponent("lyrics", selected = true),
+        )
         return session
     }
 
@@ -259,7 +264,7 @@ class InstallationSessionF2Test {
         schemaVersion = 1,
         componentId = "lyrics",
         displayName = "Lyrics",
-        required = true,
+        required = false,
         version = ArtifactVersion("1.0.0", 1),
         compatibility = CompatibilityRange(26),
         archiveFileName = "lyrics.zip",
@@ -281,6 +286,7 @@ class InstallationSessionF2Test {
     private fun desktopManifest(): ArtifactManifest = manifest().copy(
         componentId = "desktop",
         displayName = "Desktop",
+        required = true,
         archiveFileName = "desktop.zip",
         apkEntryName = "desktop.apk",
         packageName = "com.example.desktop",

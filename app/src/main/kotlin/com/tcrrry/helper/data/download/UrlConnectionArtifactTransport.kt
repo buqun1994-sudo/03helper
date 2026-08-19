@@ -1,5 +1,6 @@
 package com.tcrrry.helper.data.download
 
+import android.util.Log
 import com.tcrrry.helper.domain.artifact.ResolvedDownloadRequest
 import com.tcrrry.helper.domain.artifact.ReleaseSourcePolicy
 import java.net.HttpURLConnection
@@ -19,6 +20,7 @@ class UrlConnectionArtifactTransport(
     ): ArtifactTransportResponse = withContext(Dispatchers.IO) {
         var currentRequest = request
         var currentUrl = request.url
+        Log.d(TAG, "open_start host=${safeHost(currentUrl)} range=$rangeStartBytes")
         repeat(MAX_REDIRECTS + 1) { redirectCount ->
             val uri = URI(currentUrl)
             require(uri.scheme.equals("https", ignoreCase = true))
@@ -42,12 +44,17 @@ class UrlConnectionArtifactTransport(
                 connection.setRequestProperty("Range", "bytes=$rangeStartBytes-")
             }
             val status = connection.responseCode
+            Log.d(
+                TAG,
+                "response host=${safeHost(currentUrl)} status=$status type=${connection.contentType?.substringBefore(';') ?: "unknown"}",
+            )
             if (status in REDIRECT_STATUSES) {
                 val location = connection.getHeaderField("Location")
                     ?: throw IllegalStateException("artifact_redirect_location_missing")
                 val redirectedUrl = uri.resolve(location).toString()
                 val nextUri = URI(redirectedUrl)
                 val validation = sourcePolicy.validateResolvedRequest(currentRequest.copy(url = redirectedUrl))
+                Log.d(TAG, "redirect host=${safeHost(redirectedUrl)} accepted=${validation is com.tcrrry.helper.domain.artifact.SourcePolicyValidation.Accepted}")
                 connection.disconnect()
                 if (validation is com.tcrrry.helper.domain.artifact.SourcePolicyValidation.Rejected) {
                     throw IllegalStateException(validation.reasonCode)
@@ -74,8 +81,14 @@ class UrlConnectionArtifactTransport(
         throw IllegalStateException("artifact_redirect_limit")
     }
 
+    private fun safeHost(url: String): String = runCatching { URI(url).host }
+        .getOrNull()
+        ?.lowercase()
+        .orEmpty()
+
     companion object {
         private const val MAX_REDIRECTS = 3
         private val REDIRECT_STATUSES = setOf(301, 302, 303, 307, 308)
+        private const val TAG = "03helper.Download"
     }
 }

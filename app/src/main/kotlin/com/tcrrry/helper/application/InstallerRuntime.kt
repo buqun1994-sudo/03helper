@@ -5,6 +5,8 @@ import com.tcrrry.helper.application.device.DeviceConnectionSessionAdapter
 import com.tcrrry.helper.application.session.InstallationSessionEventDispatcher
 import com.tcrrry.helper.application.session.InstallationSessionEventPort
 import com.tcrrry.helper.domain.artifact.ArtifactManifest
+import com.tcrrry.helper.application.artifact.ArtifactPreparationResult
+import com.tcrrry.helper.application.artifact.PreparedArtifact
 import com.tcrrry.helper.domain.device.ConnectedDevice
 import com.tcrrry.helper.domain.device.DeviceConnectionLease
 import com.tcrrry.helper.domain.session.DeviceConnectionStatus
@@ -24,14 +26,16 @@ import kotlinx.coroutines.launch
 
 /**
  * Application owner that starts, retains and cancels adapters around the single domain session.
- * It contains no UI state and still stops the production pipeline at verified artifacts in F3.
+ * It contains no UI state and hands verified artifacts to the retained device connection.
  */
 class InstallerRuntime(
     val session: InstallationSession,
     private val createDiscoveryAdapter: (InstallationSessionEventPort) -> DeviceDiscoverySessionAdapter,
     private val createConnectionAdapter: (InstallationSessionEventPort) -> DeviceConnectionSessionAdapter,
     private val loadCatalog: suspend (InstallationSessionEventPort) -> Unit,
-    private val prepareArtifacts: suspend (List<ArtifactManifest>, InstallationSessionEventPort) -> Unit,
+    private val prepareArtifacts: suspend (List<ArtifactManifest>, InstallationSessionEventPort) -> Unit = { _, _ -> },
+    private val prepareArtifactsWithResult: (suspend (List<ArtifactManifest>, InstallationSessionEventPort) -> ArtifactPreparationResult)? = null,
+    private val executeDeviceInstallation: (suspend (DeviceConnectionLease, List<PreparedArtifact>, InstallationSessionEventPort) -> Unit)? = null,
     coroutineContext: CoroutineContext,
 ) : AutoCloseable {
     private val runtimeJob = SupervisorJob(coroutineContext[Job])
@@ -269,7 +273,29 @@ class InstallerRuntime(
         }
         artifactJob = scope.launch {
             try {
-                prepareArtifacts(manifests, port)
+                val result = prepareArtifactsWithResult?.invoke(manifests, port)
+                if (result == null) {
+                    prepareArtifacts(manifests, port)
+                } else if (result is ArtifactPreparationResult.Prepared) {
+                    val connection = activeConnection
+                    if (
+                        connection == null ||
+                        session.currentSnapshot().state != InstallationSessionState.VERIFYING_ARTIFACTS
+                    ) {
+                        return@launch
+                    }
+                    val execute = executeDeviceInstallation
+                    if (execute == null) {
+                        port.emit(
+                            InstallationSessionEvent.FatalError(
+                                category = FailureCategory.INSTALLATION,
+                                reasonCode = "device_action_gateway_unavailable",
+                            ),
+                        )
+                    } else {
+                        execute(connection, result.artifacts, port)
+                    }
+                }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {

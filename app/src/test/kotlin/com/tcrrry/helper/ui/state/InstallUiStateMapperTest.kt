@@ -42,14 +42,15 @@ class InstallUiStateMapperTest {
     }
 
     @Test
-    fun `selection locks required components and gates missing selected size`() {
+    fun `selection keeps desktop locked and gates missing selected size`() {
         val ready = InstallUiStateMapper.map(
             selectionSnapshot(
                 listOf(
-                    component("lyrics", required = true, size = "18 MB"),
+                    component("lyrics", required = false, size = "18 MB"),
                     component("desktop", required = true, size = "12 MB"),
                     component("files", required = false, size = null),
                 ),
+                selectedOptionalIds = setOf("lyrics"),
             ),
         ) as InstallUiState.Selection
 
@@ -158,7 +159,7 @@ class InstallUiStateMapperTest {
         val unconfirmed = InstallUiStateMapper.map(
             selectionSnapshot(
                 components = listOf(
-                    component("lyrics", required = true, size = "18 MB"),
+                    component("lyrics", required = false, size = "18 MB"),
                     component("desktop", required = true, size = "12 MB"),
                 ).map { it.copy(compatibilityLabel = null) },
             ).copy(device = device.copy(connectionStatus = DeviceConnectionStatus.CONNECTING)),
@@ -168,7 +169,7 @@ class InstallUiStateMapperTest {
         val incomplete = InstallUiStateMapper.map(
             selectionSnapshot(
                 components = listOf(
-                    component("lyrics", required = true, size = "18 MB"),
+                    component("lyrics", required = false, size = "18 MB"),
                     component("desktop", required = true, size = "12 MB"),
                 ).map { it.copy(versionLabel = null) },
             ),

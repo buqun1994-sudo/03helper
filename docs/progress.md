@@ -10,7 +10,7 @@
 ## 2026-08-18 首版安装助手方案落档
 
 1. 已把“03应用安装助手”确定为独立手机 Android 应用的产品边界；不把 03 歌词、03桌面或文件管理器源码并入本仓库。
-2. 已记录首次安装主链：局域网优先发现 / 连接设备，用户选择组件（03 歌词和 03桌面必装且不可取消，文件管理器可选），随后由助手自动完成下载页解析、ZIP 下载与校验、APK 解压与校验、ZIP 删除、非流式推送、安装、白名单授权、启动和可用性验证，成功后转入维护态。
+2. 已记录首次安装主链：局域网优先发现 / 连接设备，用户选择组件（03桌面唯一必装且不可取消，03 歌词和文件管理器可选），随后由助手自动完成下载页解析、ZIP 下载与校验、APK 解压与校验、ZIP 删除、非流式推送、安装、一次统一综合命令授权、仅启动 03 桌面和可用性验证，成功后转入维护态。
 3. 已记录分发初始方案：助手本体单独下载；组件安装包使用签名版本清单和外部对象流量，不使用自有服务器每月 600GB 流量作为安装包直链主分发。源顺序已在后续 ZIP 主链决策中定稿，尚未接入代码或生产服务。
 4. 已记录当前样本车机实测事实：`S56_HQX`、Android 9、TCP `5555` 常驻开放、`ro.adb.secure=0`。首次连接前不承诺自动打开无线调试；OTG 尚无能力证据，暂不进入正式主链。
 5. 已记录安全不变量：远端清单不得下发任意 shell；授权必须读取原值、幂等追加并回读确认；ZIP 与 APK 完整校验后才可非流式推送；失败与未知状态必须 fail closed。
@@ -38,7 +38,7 @@
 5. F0 主源码清单不声明网络、存储、ADB、WebView 或无障碍业务权限；AndroidX 合并清单自动生成的签名级动态接收器权限属于框架产物。已补充 Android 12+ 云备份 / 设备迁移排除规则，安装助手私有数据不进入备份。
 6. 本机验证已通过：`node scripts/check-local-environment.mjs`、`node scripts/check-project-docs.mjs`、`node scripts/check-skills.mjs`、`git diff --check`、`./gradlew :app:lintDebug`、`./gradlew :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest`。Lint 仅保留已锁定依赖版本的更新提示，没有错误。
 7. 已在指定手机测试设备上使用显式 serial 保留数据覆盖安装 Debug APK 与测试 APK；设备为 `SM-F946B`、Android SDK 36、`904x2316`、`420dpi`。生产 `MainActivity` 冷启动返回 `Status: ok`，保持前台，日志未发现应用致命异常；首屏、选择、进度、成功、暂停、失败、维护和断线维护画面均完成真实截图检查，整屏背景与状态栏 / 导航栏保持 `#1976C5`，未见文本截断、重叠或问号回退图标。
-8. 真实交互 smoke 已完成：选择页取消可选文件管理器后摘要从 3 个应用变为 2 个，03 歌词和 03桌面仍不可取消；点击“开始安装”进入安装阶段；维护态滚动后全部三组动作可见，断线态显示“重新连接”。
+8. 真实交互 smoke 已完成：选择页可分别取消 03 歌词和文件管理器，03桌面保持不可取消；点击“开始安装”进入安装阶段；维护态滚动后全部三组动作可见，断线态显示“重新连接”。
 9. 指定手机上的 instrumentation 已通过 `2/2`：生产入口和 Debug 维护场景均到达 resumed 状态。测试 APK 显式加入 `androidx.test:runner:1.5.2`，不再出现运行器缺失导致的假失败。
 10. F0 只证明手机工程、状态投影、视觉壳、动效和启动可运行；真实局域网发现、组件下载 / 解压 / 哈希、ADB 上传安装、授权回读、车机可用性验证、Cloud 发布链和正式签名仍未施工。
 11. F0 基座已在提交 `948f51d` 固化；提交前完成暂存区差异检查，未包含本机上下文、设备地址、截图或构建产物。
@@ -47,9 +47,9 @@
 
 1. 已新增 `app/src/main/kotlin/com/tcrrry/helper/domain/session/InstallationSession.kt` 与 `InstallationSessionCommand.kt`；文件头、包名和编码沿用 `InstallationSessionSnapshot.kt`，没有新增外部依赖或业务权限。
 2. `InstallationSession` 现在是唯一可变状态 owner，暴露 `StateFlow<InstallationSessionSnapshot>`；快照新增会话代次、修订号、事件序号、可恢复检查点和结构化证据，旧会话事件、重复事件和未知事件均不能覆盖较新状态。
-3. 已实现并由单测覆盖：显式开始发现、设备去重、未确认设备阻断、03 歌词 / 03桌面必装锁定、可选组件切换、元数据完整性门禁，以及 `SELECTION_CONFIRMED` 后严格经过获取 / 下载 / 归档校验 / 解压 / 产物校验 / 安装 / 配置 / 设备验证阶段。
+3. 已实现并由单测覆盖：显式开始发现、设备去重、未确认设备阻断、03桌面唯一必装锁定、03 歌词 / 文件管理器可选切换、元数据完整性门禁，以及 `SELECTION_CONFIRMED` 后严格经过获取 / 下载 / 归档校验 / 解压 / 产物校验 / 安装 / 综合命令授权 / 设备验证阶段。
 4. 取消、断线和可恢复错误进入 `PAUSED` 并保存检查点；断线恢复必须接收带 `CONFIRMED` 设备身份的结构化重连事件。前置结果缺失、校验失败、未知事件和成功证据不足均 fail closed。
-5. 只有安装、配置、可用性三类证据以及前置产物校验全部成立时才进入 `SUCCEEDED`；成功后的维护入口仍由同一会话接收，不建立第二套 Debug 或 UI 状态机。
+5. 只有安装、授权、可用性三类证据以及前置产物校验全部成立时才进入 `SUCCEEDED`；成功后的维护入口仍由同一会话接收，不建立第二套 Debug 或 UI 状态机。
 6. `MainActivity` 已改为创建会话并用生命周期感知方式收集快照；`InstallUiStateMapper` 仍是唯一领域到 UI 投影，并同步补齐元数据 / 设备确认的启动按钮门禁。
 7. `DebugScenarioActivity` 已改为只发送 fake command / adapter event；`flow`、暂停、失败、成功和维护场景均通过生产 `InstallationSession` 推进，不再在 Debug 内复制 `snapshot.copy` reducer。
 8. 本轮本机验证通过：`./gradlew :app:lintDebug :app:testDebugUnitTest :app:assembleDebug :app:assembleDebugAndroidTest`；lint 无错误，仅保留 F0 已锁定依赖的版本提示。
@@ -85,8 +85,8 @@
 ## 当前未完成事项
 
 1. 由项目 / Cloud 发布方提供并接入可验证的 Android profile、公钥、组件映射、ZIP / APK 身份和正式签名资料；资料缺失时客户端继续保持 fail closed。
-2. 用用户提供的人工用例验证真实 Android System WebView 蓝奏云回调、真实 ZIP、切网 / Range 续传和主源失败清理；R2 / GitHub Releases 对象与回滚链待对象上传后再开。
-3. 用真实 `S56_HQX` 设备完成定向 APK 安装、授权回读、启动可用性和断线恢复 smoke；用独立设备验证异常和破坏性动作门禁。
+2. 真实 Android System WebView 蓝奏云回调、真实 ZIP 和正常三组件主链已经通过；仍需补做切网 / Range 续传、主源失败清理以及 R2 / GitHub Releases 对象上传后的回滚链验证。
+3. 真实 `S56_HQX` 正常安装、统一授权和 03 桌面启动可用性已经通过；仍需补做断线恢复，并用独立设备验证异常和破坏性动作门禁。
 4. 完成维护态的检查更新、保留数据重装、修复授权、重启服务、缓存清理、受控安装 / 卸载和脱敏诊断。
 5. 为 03 歌词、03桌面和文件管理器取得可审计的包身份、兼容范围、发布签名和合规材料。
 
@@ -162,3 +162,29 @@ F2 Debug APK 已按用户授权安装到指定手机。该段记录的是 F2 交
 1. 通过测试手机的无线 ADB 进行只读核对：点击发现的 `S56_HQX` 后，`com.tcrrry.helper` 进程所属 UID 的网络表出现到车机 TCP `5555` 的 `ESTABLISHED` 会话，车机端同时出现匹配的反向会话。
 2. 手机界面同步显示“已连接到 S56_HQX”，随后因 Cloud Android profile 缺失停在“暂时无法准备安装应用”。这次证据证明的是手机应用自己的 Dadb ADB 租约，不是电脑上的另一个 ADB 助手连接；普通 `adb devices` 列表不能替代这项判断。
 3. 该证据是当前时刻的连接快照；应用后续仍通过前台健康检查和客观断线事件更新状态，真实安装流程继续受 Cloud profile、公钥、组件映射和 ZIP / APK 身份资料阻断。
+
+## 2026-08-20 F3 安装授权主链口径收敛
+
+1. 产品口径已确认：03桌面是唯一核心且必装；03 歌词和文件管理器均为可选。Debug 签名 profile 已更新为 `android-real-debug-2026-08-20-v4`，清单按桌面优先排序，歌词的 `required` 字段为 `false`，并由新的本地 Debug ECDSA 信任根重新签发；Release 不读取该资料。
+2. 安装阶段逐个执行 `pm install -r`，不启动任何目标应用；所有已选包安装完成后回读车机内实际 APK 的大小、SHA-256、包名、版本和证书。
+3. 授权与启动阶段只调用一次固定、版本化、白名单综合命令：按已验证的组件 ID 授权已安装组件，缺少可选组件时记录跳过并失败闭环，最后只解析并启动 03桌面；03 歌词和文件管理器不启动。
+4. 状态机、设备协调器、DADB 网关、Debug 场景、测试夹具和产品 / 架构 / 验证文档已同步上述不变量；`testDebugUnitTest` 当前 71 项全部通过。
+5. 用户已明确授权：若真实车机已有同包名安装且保留数据覆盖安装因签名 / 降级冲突无法继续，可在本轮测试中只对三个已核验目标包名执行精确卸载；不得扩大为默认清理行为。真实车机安装、授权和可用性 smoke 待本轮 Debug APK 构建后执行。
+
+## 2026-08-20 F3 三组件真实完整主链通过
+
+1. 测试前只读核对确认三个精确目标包均不存在，保护包 `com.tcrrry.desktopcast` 仍存在。手机先停在结构化下载失败页；对应日志表明蓝奏页面在约 `4.4` 秒内未触发下载回调并返回 `lanzou_download_trigger_timeout`，安装助手进程未崩溃，车机没有进入安装或授权阶段。
+2. `05:28:19` 从手机页面点击一次“重新尝试”后不再进行任何用户操作。三个隐藏 WebView 均自动捕获 `zip1.webgetstore.com` 的短时下载地址，三个响应都是 `200 application/octet-stream`；页面按“获取安装包 -> 检查安装包 -> 发送到车机 -> 正在授权 -> 检查是否可用”自动推进，没有外部浏览器、可见蓝奏页面或额外授权按钮。
+3. 03桌面、03歌词和文件管理器分别在 `05:28:27`、`05:28:29`、`05:28:38` 完成首次安装；`05:28:51` 只出现一次 `shortcut_result completed`。从重试点击到统一命令完成约 `32.4` 秒，低于本轮 `120` 秒测试停止边界；该边界没有写入产品超时规则。
+4. 手机最终自动进入“安装完成”，说明为“安装和授权已完成，请在车机开始使用。”，三个已选组件均显示“已安装 · 已完成授权 · 可用”。授权期间页面只显示“正在授权”和状态驱动进度，不要求用户点击；失败时保留“重新授权”作为恢复动作，不构成正常主链步骤。
+5. 车机最终 APK 与签名 Debug profile 逐项一致：03桌面 `0.1.0 (1)`、`6615694` 字节、SHA-256 `21f2f432070cf356a2c99f64e415a6b41cba510eebd7673ee256e94c11e9ea75`；03歌词 `1.14-icar03 (114)`、`6173971` 字节、SHA-256 `839dd4403233d82025b6ad2429a3b914a1ab8810dd0c556262574698d8514c41`；文件管理器 `1.6.1-car175.1 (14)`、`31423255` 字节、SHA-256 `8f64699f6fb2bb4b5006b57e20e994b6946518eb749fa07fa4ff6a7c1726c1b4`。应用主链还完成了包名、版本和证书回读门禁。
+6. 综合命令源码只有一个显式 `am start`，目标固定为 03桌面；03 桌面进程、前台 Overlay Service 和必要无障碍 Service 均可观察。03歌词的进程及两个 Service 是 Android 在通知监听和无障碍白名单回读成功后自动绑定产生，不是助手显式启动；文件管理器没有运行进程。保护包在测试后仍存在。
+7. 整轮真实复测没有从电脑端手工注入综合授权命令，没有清数据、重启、触碰保护包、安装 Release、发布、提交或推送。
+
+## 2026-08-20 F3 收尾验证与最终手机交付
+
+1. 当前源码重新通过 `:app:testDebugUnitTest`、`:app:lintDebug`、`:app:assembleDebug` 和 `:app:assembleDebugAndroidTest`；单元测试报告为 `71` 项、`0` failures、`0` errors。`apksigner` 核对 Debug 主包的 APK Signature Scheme v2 为 `true`。
+2. 使用当前显式手机 serial 运行既有 `:app:connectedDebugAndroidTest`，`InstallAppActivitySmokeTest` `2/2` 通过；测试框架随后移除了主包，符合既有收尾行为，未把该中间状态作为最终交付。
+3. 文档、Skill、本机环境和差异检查均通过：`check-project-docs.mjs`、`check-skills.mjs`、`check-local-environment.mjs`、`git diff --check`。
+4. 所有自动化结束后，使用最新 `app-debug.apk` 对手机执行一次保留数据覆盖安装，系统返回 `Success`。最终包为 `com.tcrrry.helper`、Debug、`0.1.0 (1)`，`android.permission.INTERNET` 已授予；`MAIN` / `LAUNCHER` 解析到 `com.tcrrry.helper/.MainActivity`。APK SHA-256 为 `dc0bec47aa202ddefd840608d1dc072265d2fc49c2bb5f06637a50186240e45f`。
+5. 本轮不提交、不推送、不发布；未清数据、卸载、降级、重启手机或车机，也未从电脑端手工执行综合授权命令。剩余未覆盖项仅为切网 / Range / 断线恢复、R2 / GitHub 发布对象和正式 Release 资料，不影响本次 Debug 三组件正常主链目标。

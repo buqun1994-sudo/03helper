@@ -5,6 +5,7 @@ import android.content.Context
 import android.graphics.Color
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.view.View
 import android.webkit.CookieManager
 import android.webkit.DownloadListener
@@ -16,6 +17,7 @@ import android.webkit.WebViewClient
 import com.tcrrry.helper.domain.artifact.ArtifactFailure
 import com.tcrrry.helper.domain.artifact.ArtifactFailurePhase
 import com.tcrrry.helper.domain.artifact.ArtifactSourceKind
+import com.tcrrry.helper.domain.artifact.ReleaseSourcePolicy
 import com.tcrrry.helper.domain.artifact.ResolvedDownloadRequest
 import java.net.URI
 
@@ -26,6 +28,7 @@ import java.net.URI
 @Suppress("ClickableViewAccessibility")
 class AndroidLanzouWebViewHost(
     context: Context,
+    private val sourcePolicy: ReleaseSourcePolicy = ReleaseSourcePolicy(),
 ) : LanzouWebViewHost {
     private val applicationContext = context.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
@@ -35,6 +38,7 @@ class AndroidLanzouWebViewHost(
     private var currentPageUrl: String? = null
     private var downloadCallback: ((ResolvedDownloadRequest) -> Unit)? = null
     private var failureCallback: ((ArtifactFailure) -> Unit)? = null
+    private var triggerAttempts = 0
 
     @SuppressLint("SetJavaScriptEnabled")
     override fun start(
@@ -42,11 +46,13 @@ class AndroidLanzouWebViewHost(
         onDownload: (ResolvedDownloadRequest) -> Unit,
         onFailure: (ArtifactFailure) -> Unit,
     ) {
+        Log.d(TAG, "webview_start")
         mainHandler.post {
             if (destroyed) return@post
             downloadCallback = onDownload
             failureCallback = onFailure
             currentPageUrl = shareUrl
+            triggerAttempts = 0
             val view = WebView(applicationContext)
             webView = view
             view.visibility = View.GONE
@@ -79,8 +85,22 @@ class AndroidLanzouWebViewHost(
         override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
             if (!request.isForMainFrame) return false
             val url = request.url.toString()
-            currentPageUrl = url
-            if (!isLanzouPage(url)) {
+            if (
+                request.method.equals("GET", ignoreCase = true) &&
+                sourcePolicy.isLanzouTransientDownloadUrl(url)
+            ) {
+                Log.d(TAG, "transient_download_capture host=${safeHost(url)} path=${safePathPrefix(url)}")
+                completeDownload(
+                    url = url,
+                    userAgent = view.settings.userAgentString,
+                    referer = currentPageUrl,
+                )
+                return true
+            }
+            val pageUrl = normalizePageUrl(url)
+            currentPageUrl = pageUrl
+            if (!sourcePolicy.isLanzouSharePage(pageUrl) && !sourcePolicy.isLanzouVerificationPage(pageUrl)) {
+                Log.w(TAG, "navigation_forbidden method=${request.method} host=${safeHost(url)}")
                 reportFailure("lanzou_redirect_forbidden", retryable = false)
                 return true
             }
@@ -89,8 +109,19 @@ class AndroidLanzouWebViewHost(
 
         @Suppress("DEPRECATION")
         override fun shouldOverrideUrlLoading(view: WebView, url: String): Boolean {
-            currentPageUrl = url
-            if (!isLanzouPage(url)) {
+            if (sourcePolicy.isLanzouTransientDownloadUrl(url)) {
+                Log.d(TAG, "transient_download_capture host=${safeHost(url)} path=${safePathPrefix(url)}")
+                completeDownload(
+                    url = url,
+                    userAgent = view.settings.userAgentString,
+                    referer = currentPageUrl,
+                )
+                return true
+            }
+            val pageUrl = normalizePageUrl(url)
+            currentPageUrl = pageUrl
+            if (!sourcePolicy.isLanzouSharePage(pageUrl) && !sourcePolicy.isLanzouVerificationPage(pageUrl)) {
+                Log.w(TAG, "navigation_forbidden host=${safeHost(url)}")
                 reportFailure("lanzou_redirect_forbidden", retryable = false)
                 return true
             }
@@ -126,18 +157,93 @@ class AndroidLanzouWebViewHost(
                 reportFailure("lanzou_http_${errorResponse.statusCode}", retryable = true)
             }
         }
+
+        override fun onPageFinished(view: WebView, url: String) {
+            val pageUrl = normalizePageUrl(url)
+            Log.d(TAG, "page_finished host=${safeHost(pageUrl)}")
+            currentPageUrl = pageUrl
+            if (!sourcePolicy.isLanzouSharePage(pageUrl) && !sourcePolicy.isLanzouVerificationPage(pageUrl)) {
+                Log.w(TAG, "page_forbidden host=${safeHost(url)}")
+                reportFailure("lanzou_redirect_forbidden", retryable = false)
+                return
+            }
+            triggerPageAction(view)
+        }
+    }
+
+    private fun triggerPageAction(view: WebView) {
+        if (destroyed) return
+        if (triggerAttempts++ >= MAX_TRIGGER_ATTEMPTS) {
+            reportFailure("lanzou_download_trigger_timeout", retryable = true)
+            return
+        }
+        view.evaluateJavascript(
+            """
+            (function(){
+              var link=document.querySelector('#go a[href],#ok a[href],a.tc2');
+              if(link && /^https:/i.test(link.href)){
+                link.removeAttribute('target');
+                link.click();
+                return 'download';
+              }
+              var action=document.querySelector('#go [onclick*=\"down_r\"],#sub [onclick*=\"down_r\"],#sub2 [onclick*=\"down_r\"]');
+              if(action && !window.__03helperVerificationTriggered){
+                window.__03helperVerificationTriggered=true;
+                action.click();
+                return 'verify';
+              }
+              var share=document.querySelector('#downurl,#submit');
+              if(share && !window.__03helperShareTriggered){
+                window.__03helperShareTriggered=true;
+                share.removeAttribute('target');
+                share.focus();
+                share.click();
+                return 'share';
+              }
+              return 'wait';
+            })()
+            """.trimIndent(),
+        ) { result ->
+            if (!destroyed && result?.contains("download") != true) {
+                mainHandler.postDelayed({ triggerPageAction(view) }, TRIGGER_RETRY_DELAY_MILLIS)
+            }
+        }
     }
 
     private fun downloadListener(): DownloadListener = DownloadListener { url, userAgent, contentDisposition, mimeType, contentLength ->
+        Log.d(TAG, "download_callback host=${runCatching { URI(url).host }.getOrNull()} mime=${mimeType ?: "unknown"}")
+        if (!sourcePolicy.isLanzouTransientDownloadUrl(url)) {
+            reportFailure("lanzou_download_target_invalid", retryable = true)
+            return@DownloadListener
+        }
+        completeDownload(
+            url = url,
+            userAgent = userAgent,
+            referer = currentPageUrl,
+            contentDisposition = contentDisposition,
+            mimeType = mimeType,
+            contentLength = contentLength.takeIf { it >= 0L },
+        )
+    }
+
+    private fun completeDownload(
+        url: String,
+        userAgent: String?,
+        referer: String?,
+        contentDisposition: String? = null,
+        mimeType: String? = null,
+        contentLength: Long? = null,
+    ) {
+        if (destroyed) return
         val request = ResolvedDownloadRequest(
             sourceKind = ArtifactSourceKind.LANZOU_SHARE,
             url = url,
             userAgent = userAgent,
             cookie = CookieManager.getInstance().getCookie(url),
-            referer = currentPageUrl,
+            referer = referer,
             contentDisposition = contentDisposition,
             mimeType = mimeType,
-            contentLength = contentLength.takeIf { it >= 0L },
+            contentLength = contentLength,
         )
         downloadCallback?.invoke(request)
         destroyNow()
@@ -145,6 +251,7 @@ class AndroidLanzouWebViewHost(
 
     private fun reportFailure(reasonCode: String, retryable: Boolean) {
         if (destroyed) return
+        Log.w(TAG, "webview_failure reason=$reasonCode retryable=$retryable")
         failureCallback?.invoke(
             ArtifactFailure(
                 phase = ArtifactFailurePhase.SOURCE_RESOLUTION,
@@ -172,15 +279,20 @@ class AndroidLanzouWebViewHost(
         webView = null
     }
 
-    private fun isLanzouPage(url: String): Boolean {
-        val uri = try {
-            URI(url)
-        } catch (_: IllegalArgumentException) {
-            return false
-        }
-        val host = uri.host?.lowercase() ?: return false
-        val allowed = setOf("lanzou.com", "lanzouw.com", "lanzoux.com", "lanzoui.com", "lanzouy.com")
-        return uri.scheme.equals("https", ignoreCase = true) &&
-            (host in allowed || allowed.any { host.endsWith(".$it") })
+    private fun safeHost(url: String): String = runCatching { URI(url).host }
+        .getOrNull()
+        ?.lowercase()
+        .orEmpty()
+
+    private fun safePathPrefix(url: String): String = runCatching {
+        URI(url).path.orEmpty().trim('/').substringBefore('/').lowercase()
+    }.getOrDefault("")
+
+    private fun normalizePageUrl(url: String): String = url.substringBefore('#')
+
+    private companion object {
+        const val TAG = "03helper.Lanzou"
+        const val MAX_TRIGGER_ATTEMPTS = 48
+        const val TRIGGER_RETRY_DELAY_MILLIS = 200L
     }
 }

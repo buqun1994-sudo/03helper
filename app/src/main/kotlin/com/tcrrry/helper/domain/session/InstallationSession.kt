@@ -11,6 +11,10 @@ import com.tcrrry.helper.domain.artifact.ReleaseSourcePolicy
 import com.tcrrry.helper.domain.artifact.SourceFailureRecord
 import com.tcrrry.helper.domain.artifact.SourceSelectionEvidence
 import com.tcrrry.helper.domain.artifact.toComponentDescriptor
+import com.tcrrry.helper.domain.device.AuthorizationPlanBuildResult
+import com.tcrrry.helper.domain.device.AuthorizationPlanFactory
+import com.tcrrry.helper.domain.device.DeviceAvailabilityEvidence
+import com.tcrrry.helper.domain.device.InstalledArtifactEvidence
 
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -25,6 +29,7 @@ import kotlinx.coroutines.flow.asStateFlow
 class InstallationSession(
     componentCatalog: List<ComponentDescriptor> = emptyList(),
     initialSnapshot: InstallationSessionSnapshot = InstallationSessionSnapshot(InstallationSessionState.IDLE),
+    private val sourcePolicy: ReleaseSourcePolicy = ReleaseSourcePolicy(),
 ) : AutoCloseable {
     constructor(initialSnapshot: InstallationSessionSnapshot) : this(
         componentCatalog = initialSnapshot.components,
@@ -428,9 +433,9 @@ class InstallationSession(
             is InstallationSessionEvent.ApkExtracted -> handleApkExtracted(event)
             is InstallationSessionEvent.ArtifactsVerified -> handleArtifactsVerified(event)
             is InstallationSessionEvent.InstallationStarted -> handleInstallationStarted(event.componentIds)
-            is InstallationSessionEvent.InstallationCompleted -> handleInstallationCompleted(event.checks)
-            is InstallationSessionEvent.AuthorizationCompleted -> handleAuthorizationCompleted(event.checks)
-            is InstallationSessionEvent.DeviceVerified -> handleDeviceVerified(event.checks)
+            is InstallationSessionEvent.InstallationCompleted -> handleInstallationCompleted(event)
+            is InstallationSessionEvent.AuthorizationCompleted -> handleAuthorizationCompleted(event)
+            is InstallationSessionEvent.DeviceVerified -> handleDeviceVerified(event)
             is InstallationSessionEvent.DeviceDisconnected -> handleDeviceDisconnected(event)
             is InstallationSessionEvent.DeviceReconnected -> handleDeviceReconnected(event.device)
             is InstallationSessionEvent.RecoverableError -> pause(
@@ -577,7 +582,6 @@ class InstallationSession(
 
             ManifestValidation.Valid -> Unit
         }
-        val sourcePolicy = ReleaseSourcePolicy()
         event.manifests.forEach { manifest ->
             when (val plan = sourcePolicy.plan(manifest)) {
                 is com.tcrrry.helper.domain.artifact.SourcePlan.Rejected -> {
@@ -962,6 +966,51 @@ class InstallationSession(
         }
     }
 
+    private fun validateAuthorizationEvidence(
+        evidence: List<com.tcrrry.helper.domain.device.AuthorizationActionEvidence>,
+        snapshot: InstallationSessionSnapshot,
+    ): Boolean {
+        val selectedIds = selectedComponentIds(snapshot)
+        val manifests = snapshot.artifactManifests.filter { it.componentId in selectedIds }
+        if (manifests.size != selectedIds.size) return false
+        val plan = when (val result = AuthorizationPlanFactory.createForManifests(manifests)) {
+            is AuthorizationPlanBuildResult.Ready -> result.plan
+            is AuthorizationPlanBuildResult.Rejected -> return false
+        }
+        return AuthorizationPlanFactory.validateEvidence(plan, evidence)
+    }
+
+    private fun validateAvailabilityEvidence(
+        evidence: List<DeviceAvailabilityEvidence>,
+        snapshot: InstallationSessionSnapshot,
+    ): Boolean {
+        val expectedIds = selectedComponentIds(snapshot)
+        if (evidence.size != expectedIds.size || evidence.map { it.componentId }.toSet() != expectedIds) {
+            return false
+        }
+        val manifests = snapshot.artifactManifests.associateBy { it.componentId }
+        return evidence.all { item ->
+            val manifest = manifests[item.componentId] ?: return@all false
+            val isLaunchTarget = item.componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
+            item.packageName == manifest.packageName &&
+                item.version == manifest.apkVersion &&
+                item.installedArchiveVerified &&
+                item.launchAttempted == isLaunchTarget &&
+                if (isLaunchTarget) {
+                    item.launcherResolved &&
+                        item.processRunning &&
+                        item.requiredServiceBound == true
+                } else {
+                    !item.launcherResolved &&
+                        !item.processRunning &&
+                        // Optional components are deliberately not launched during
+                        // first install; their proof is package identity/install
+                        // presence only, so no service-binding result is expected.
+                        item.requiredServiceBound == null
+                }
+        }
+    }
+
     private fun isValidLegacyApkExtraction(event: InstallationSessionEvent.ApkExtracted): Boolean =
         event.entryName.isNotBlank() &&
             event.entryName != "." &&
@@ -990,15 +1039,22 @@ class InstallationSession(
     private fun componentName(snapshot: InstallationSessionSnapshot, componentId: String): String? =
         snapshot.components.firstOrNull { it.id == componentId }?.displayName
 
-    private fun handleInstallationCompleted(checks: List<ComponentCheck>) {
+    private fun handleInstallationCompleted(event: InstallationSessionEvent.InstallationCompleted) {
         if (!requireState(InstallationSessionState.INSTALLING, "installation_event_out_of_order")) return
-        val installed = validateChecks(checks)
+        val installed = validateChecks(event.checks)
         if (installed == null) {
             fail(FailureCategory.INSTALLATION, reasonCode = "installation_evidence_missing")
             return
         }
         val current = _snapshot.value
-        val evidence = current.evidence.copy(installed = installed)
+        if (current.artifactManifests.isNotEmpty() && !validateInstallationEvidence(event.evidence, current)) {
+            fail(FailureCategory.INSTALLATION, reasonCode = "installation_detail_invalid")
+            return
+        }
+        val evidence = current.evidence.copy(
+            installed = installed,
+            installation = event.evidence.associateBy { it.componentId },
+        )
         transition(
             state = InstallationSessionState.AUTHORIZING,
             evidence = evidence,
@@ -1007,15 +1063,39 @@ class InstallationSession(
         )
     }
 
-    private fun handleAuthorizationCompleted(checks: List<ComponentCheck>) {
+    private fun validateInstallationEvidence(
+        evidence: List<InstalledArtifactEvidence>,
+        snapshot: InstallationSessionSnapshot,
+    ): Boolean {
+        val expectedIds = selectedComponentIds(snapshot)
+        if (evidence.size != expectedIds.size || evidence.map { it.componentId }.toSet() != expectedIds) return false
+        val manifests = snapshot.artifactManifests.associateBy { it.componentId }
+        return evidence.all { item ->
+            val manifest = manifests[item.componentId] ?: return@all false
+            item.packageName == manifest.packageName &&
+                item.version == manifest.apkVersion &&
+                item.apkSizeBytes == manifest.apkSizeBytes &&
+                item.apkSha256.equals(manifest.apkSha256, ignoreCase = true) &&
+                item.certificateSha256.equals(manifest.certificateSha256, ignoreCase = true)
+        }
+    }
+
+    private fun handleAuthorizationCompleted(event: InstallationSessionEvent.AuthorizationCompleted) {
         if (!requireState(InstallationSessionState.AUTHORIZING, "authorization_event_out_of_order")) return
-        val configured = validateChecks(checks)
+        val configured = validateChecks(event.checks)
         if (configured == null) {
             fail(FailureCategory.CONFIGURATION, reasonCode = "configuration_evidence_missing")
             return
         }
         val current = _snapshot.value
-        val evidence = current.evidence.copy(configured = configured)
+        if (current.artifactManifests.isNotEmpty() && !validateAuthorizationEvidence(event.evidence, current)) {
+            fail(FailureCategory.CONFIGURATION, reasonCode = "authorization_action_evidence_invalid")
+            return
+        }
+        val evidence = current.evidence.copy(
+            configured = configured,
+            authorizationActions = event.evidence,
+        )
         transition(
             state = InstallationSessionState.VERIFYING_DEVICE,
             evidence = evidence,
@@ -1024,15 +1104,22 @@ class InstallationSession(
         )
     }
 
-    private fun handleDeviceVerified(checks: List<ComponentCheck>) {
+    private fun handleDeviceVerified(event: InstallationSessionEvent.DeviceVerified) {
         if (!requireState(InstallationSessionState.VERIFYING_DEVICE, "device_verification_out_of_order")) return
-        val available = validateChecks(checks)
+        val available = validateChecks(event.checks)
         if (available == null) {
             fail(FailureCategory.VERIFICATION, reasonCode = "availability_evidence_missing")
             return
         }
         val current = _snapshot.value
-        val evidence = current.evidence.copy(available = available)
+        if (current.artifactManifests.isNotEmpty() && !validateAvailabilityEvidence(event.evidence, current)) {
+            fail(FailureCategory.VERIFICATION, reasonCode = "availability_detail_invalid")
+            return
+        }
+        val evidence = current.evidence.copy(
+            available = available,
+            availability = event.evidence.associateBy { it.componentId },
+        )
         val results = buildComponentResults(evidence, current)
         if (!hasCompleteSuccessEvidence(evidence, current)) {
             fail(FailureCategory.VERIFICATION, reasonCode = "success_evidence_incomplete")
@@ -1236,10 +1323,10 @@ class InstallationSession(
         if (components.any { it.id.isBlank() || it.displayName.isBlank() }) return "component_identity_missing"
         if (components.map { it.id }.toSet().size != components.size) return "component_identity_duplicate"
 
-        val lyrics = components.firstOrNull { it.id == "lyrics" }
         val desktop = components.firstOrNull { it.id == "desktop" }
-        if (lyrics == null || desktop == null) return "required_components_missing"
-        if (!lyrics.required || !desktop.required) return "required_component_unlocked"
+        if (desktop == null) return "required_components_missing"
+        if (!desktop.required) return "required_component_unlocked"
+        if (components.any { it.id != "desktop" && it.required }) return "optional_component_locked"
 
         val optionalIds = components.filterNot { it.required }.map { it.id }.toSet()
         if (!snapshot.selectedOptionalComponentIds.all { it in optionalIds }) return "unknown_component"
@@ -1295,11 +1382,19 @@ class InstallationSession(
         snapshot: InstallationSessionSnapshot,
     ): Boolean {
         val expected = selectedComponents(snapshot).map { it.id }.toSet()
+        val detailedEvidenceValid = snapshot.artifactManifests.isEmpty() || (
+            evidence.installation.keys == expected &&
+            evidence.authorizationActions.isNotEmpty() &&
+                evidence.availability.keys == expected &&
+                validateAuthorizationEvidence(evidence.authorizationActions, snapshot) &&
+                validateAvailabilityEvidence(evidence.availability.values.toList(), snapshot)
+            )
         return expected.isNotEmpty() &&
             expected.all { it in evidence.artifactsVerified } &&
             expected.all { it in evidence.installed } &&
             expected.all { it in evidence.configured } &&
-            expected.all { it in evidence.available }
+            expected.all { it in evidence.available } &&
+            detailedEvidenceValid
     }
 
     private fun checkpointOf(snapshot: InstallationSessionSnapshot): SessionCheckpoint = SessionCheckpoint(

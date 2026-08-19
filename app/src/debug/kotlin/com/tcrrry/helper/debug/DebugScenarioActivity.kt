@@ -62,19 +62,19 @@ internal object DebugScenarioFixtures {
 
     val components = listOf(
         ComponentDescriptor(
-            id = "lyrics",
-            displayName = "03歌词",
-            required = true,
-            versionLabel = "1.14",
-            sizeLabel = "18 MB",
-            compatibilityLabel = "适用于当前车机",
-        ),
-        ComponentDescriptor(
             id = "desktop",
             displayName = "03桌面",
             required = true,
             versionLabel = "0.1",
             sizeLabel = "12 MB",
+            compatibilityLabel = "适用于当前车机",
+        ),
+        ComponentDescriptor(
+            id = "lyrics",
+            displayName = "03歌词",
+            required = false,
+            versionLabel = "1.14",
+            sizeLabel = "18 MB",
             compatibilityLabel = "适用于当前车机",
         ),
         ComponentDescriptor(
@@ -177,6 +177,10 @@ private class FakeSessionDriver(
         discover(animated)
         command(InstallationSessionCommand.SelectDevice(DebugScenarioFixtures.connectedDevice.id), animated)
         if (selectOptional) {
+            command(
+                InstallationSessionCommand.ToggleOptionalComponent("lyrics", selected = true),
+                animated,
+            )
             command(
                 InstallationSessionCommand.ToggleOptionalComponent("file-manager", selected = true),
                 animated,

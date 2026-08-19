@@ -1,15 +1,18 @@
 package com.tcrrry.helper.data.device
 
 import dadb.Dadb
+import com.tcrrry.helper.data.artifact.ApkMetadataReader
 import com.tcrrry.helper.domain.device.ConnectedDevice
 import com.tcrrry.helper.domain.device.DeviceCapability
 import com.tcrrry.helper.domain.device.DeviceConnectionAttempt
 import com.tcrrry.helper.domain.device.DeviceConnectionCheck
 import com.tcrrry.helper.domain.device.DeviceConnectionFactory
 import com.tcrrry.helper.domain.device.DeviceConnectionLease
+import com.tcrrry.helper.domain.device.DeviceActionConnectionLease
 import com.tcrrry.helper.domain.device.DeviceEndpoint
 import com.tcrrry.helper.domain.device.DeviceIdentity
 import java.io.IOException
+import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
@@ -21,6 +24,8 @@ import kotlinx.coroutines.withContext
 class DadbDeviceConnectionFactory(
     private val connectTimeoutMillis: Int = DEFAULT_CONNECT_TIMEOUT_MILLIS,
     private val readTimeoutMillis: Int = DEFAULT_READ_TIMEOUT_MILLIS,
+    private val installedApkCacheDirectory: File? = null,
+    private val installedApkMetadataReader: ApkMetadataReader? = null,
 ) : DeviceConnectionFactory {
     override suspend fun open(endpoint: DeviceEndpoint): DeviceConnectionAttempt = withContext(Dispatchers.IO) {
         var adb: Dadb? = null
@@ -44,6 +49,8 @@ class DadbDeviceConnectionFactory(
                                 DeviceCapability.IDENTITY_READ,
                             ),
                         ),
+                        installedApkCacheDirectory = installedApkCacheDirectory,
+                        installedApkMetadataReader = installedApkMetadataReader,
                     )
                     adb = null
                     DeviceConnectionAttempt.Connected(lease)
@@ -68,9 +75,18 @@ class DadbDeviceConnectionFactory(
     private class DadbDeviceConnection(
         private val adb: Dadb,
         override val device: ConnectedDevice,
-    ) : DeviceConnectionLease {
+        installedApkCacheDirectory: File?,
+        installedApkMetadataReader: ApkMetadataReader?,
+    ) : DeviceActionConnectionLease {
         private val closed = AtomicBoolean(false)
         private val ioMutex = Mutex()
+        override val commandGateway = DadbCommandGateway(
+            adb = adb,
+            closed = closed,
+            ioMutex = ioMutex,
+            installedApkCacheDirectory = installedApkCacheDirectory,
+            installedApkMetadataReader = installedApkMetadataReader,
+        )
 
         override suspend fun check(): DeviceConnectionCheck = withContext(Dispatchers.IO) {
             if (closed.get()) return@withContext DeviceConnectionCheck(false, "adb_connection_closed")

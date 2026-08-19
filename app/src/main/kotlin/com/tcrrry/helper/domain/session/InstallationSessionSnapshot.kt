@@ -8,6 +8,9 @@ import com.tcrrry.helper.domain.artifact.ArtifactSourceKind
 import com.tcrrry.helper.domain.artifact.ArtifactVerification
 import com.tcrrry.helper.domain.artifact.SourceFailureRecord
 import com.tcrrry.helper.domain.device.DeviceCapability
+import com.tcrrry.helper.domain.device.AuthorizationActionEvidence
+import com.tcrrry.helper.domain.device.DeviceAvailabilityEvidence
+import com.tcrrry.helper.domain.device.InstalledArtifactEvidence
 
 data class InstallationSessionSnapshot(
     val state: InstallationSessionState,
@@ -80,8 +83,11 @@ data class SessionEvidence(
     val artifactsVerified: Set<String> = emptySet(),
     val artifactVerifications: Map<String, ArtifactVerification> = emptyMap(),
     val installed: Set<String> = emptySet(),
+    val installation: Map<String, InstalledArtifactEvidence> = emptyMap(),
     val configured: Set<String> = emptySet(),
     val available: Set<String> = emptySet(),
+    val authorizationActions: List<AuthorizationActionEvidence> = emptyList(),
+    val availability: Map<String, DeviceAvailabilityEvidence> = emptyMap(),
 )
 
 /** The last reliable point from which a paused installation can resume. */

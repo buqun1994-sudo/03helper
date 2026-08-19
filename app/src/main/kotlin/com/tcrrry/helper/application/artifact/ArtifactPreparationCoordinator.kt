@@ -28,6 +28,7 @@ import com.tcrrry.helper.domain.artifact.ReleaseSourcePolicy
 import com.tcrrry.helper.domain.artifact.ResolvedDownloadRequest
 import com.tcrrry.helper.domain.artifact.SourcePlan
 import com.tcrrry.helper.domain.artifact.SourceSelectionEvidence
+import com.tcrrry.helper.domain.device.ApkDeclarationMetadata
 import com.tcrrry.helper.domain.session.ComponentCheck
 import com.tcrrry.helper.domain.session.FailureCategory
 import com.tcrrry.helper.domain.session.InstallationSessionEvent
@@ -38,6 +39,7 @@ data class PreparedArtifact(
     val manifest: ArtifactManifest,
     val sourceKind: ArtifactSourceKind,
     val finalApk: File,
+    val declarations: ApkDeclarationMetadata? = null,
 )
 
 sealed interface ArtifactPreparationResult {
@@ -145,6 +147,7 @@ class ArtifactPreparationCoordinator(
                     manifest = success.manifest,
                     sourceKind = success.sourceKind,
                     finalApk = success.verifiedApk.file,
+                    declarations = success.verifiedApk.metadata?.declarations,
                 )
             },
         )

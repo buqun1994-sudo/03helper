@@ -1,5 +1,7 @@
 package com.tcrrry.helper.application
 
+import com.tcrrry.helper.application.artifact.ArtifactPreparationResult
+import com.tcrrry.helper.application.artifact.PreparedArtifact
 import com.tcrrry.helper.application.device.DeviceDiscoverySessionAdapter
 import com.tcrrry.helper.application.device.DeviceConnectionSessionAdapter
 import com.tcrrry.helper.application.session.InstallationSessionEventPort
@@ -29,6 +31,7 @@ import com.tcrrry.helper.domain.session.InstallationSession
 import com.tcrrry.helper.domain.session.InstallationSessionCommand
 import com.tcrrry.helper.domain.session.InstallationSessionEvent
 import com.tcrrry.helper.domain.session.InstallationSessionState
+import java.io.File
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -84,61 +87,7 @@ class InstallerRuntimeTest {
             },
             prepareArtifacts = { selected, port ->
                 preparedIds += selected.map { it.componentId }
-                port.emit(
-                    InstallationSessionEvent.SourceResolved(
-                        sourceId = "fixed-release-source-policy",
-                        selections = selected.map {
-                            SourceSelectionEvidence(it.componentId, ArtifactSourceKind.LANZOU_SHARE)
-                        },
-                    ),
-                )
-                port.emit(
-                    InstallationSessionEvent.ArchiveDownloaded(
-                        sizeBytes = selected.sumOf { it.archiveSizeBytes },
-                        sha256 = "batch",
-                        archives = selected.map {
-                            ArchiveDownloadEvidence(it.componentId, it.archiveSizeBytes, it.archiveSha256)
-                        },
-                    ),
-                )
-                port.emit(
-                    InstallationSessionEvent.ArchiveVerified(
-                        verified = true,
-                        verifications = selected.map {
-                            ArchiveVerificationEvidence(it.componentId, it.archiveSizeBytes, it.archiveSha256)
-                        },
-                    ),
-                )
-                port.emit(
-                    InstallationSessionEvent.ApkExtracted(
-                        entryName = "batch.apk",
-                        sizeBytes = selected.sumOf { it.apkSizeBytes },
-                        sha256 = "batch",
-                        extractions = selected.map {
-                            ApkExtractionEvidence(it.componentId, it.apkEntryName, it.apkSizeBytes, it.apkSha256)
-                        },
-                    ),
-                )
-                port.emit(
-                    InstallationSessionEvent.ArtifactsVerified(
-                        checks = selected.map { ComponentCheck(it.componentId, true) },
-                        verifications = selected.map { manifest ->
-                            ArtifactVerification(
-                                componentId = manifest.componentId,
-                                sourceKind = ArtifactSourceKind.LANZOU_SHARE,
-                                archiveSizeBytes = manifest.archiveSizeBytes,
-                                archiveSha256 = manifest.archiveSha256,
-                                apkSizeBytes = manifest.apkSizeBytes,
-                                apkSha256 = manifest.apkSha256,
-                                packageName = manifest.packageName,
-                                apkVersion = manifest.apkVersion,
-                                certificateSha256 = manifest.certificateSha256,
-                                archiveDeleted = true,
-                            )
-                        },
-                        archiveDeleted = true,
-                    ),
-                )
+                emitArtifactPreparationEvidence(selected, port)
             },
             coroutineContext = UnconfinedTestDispatcher(testScheduler),
         )
@@ -154,12 +103,78 @@ class InstallerRuntimeTest {
         assertEquals(InstallationSessionState.CONNECTED, runtime.session.currentSnapshot().state)
         assertEquals(manifests.map { it.componentId }.toSet(), runtime.session.currentSnapshot().artifactManifests.map { it.componentId }.toSet())
 
+        runtime.dispatch(InstallationSessionCommand.ToggleOptionalComponent("lyrics", selected = true))
         runtime.dispatch(InstallationSessionCommand.StartInstallation)
         advanceUntilIdle()
         val prepared = runtime.session.currentSnapshot()
         assertEquals(listOf("lyrics", "desktop"), preparedIds)
         assertEquals(InstallationSessionState.VERIFYING_ARTIFACTS, prepared.state)
         assertTrue(prepared.lastEventSequence >= 6L)
+
+        runtime.close()
+    }
+
+    @Test
+    fun `verified artifacts continue through the retained connection into device installation`() = runTest {
+        val manifests = listOf(manifest("lyrics"), manifest("desktop"))
+        val lease = TrackingConnectionLease()
+        var installationConnection: DeviceConnectionLease? = null
+        var installationComponentIds = emptyList<String>()
+        val runtime = InstallerRuntime(
+            session = InstallationSession(),
+            createDiscoveryAdapter = { port -> DeviceDiscoverySessionAdapter(fakeDiscovery(), port) },
+            createConnectionAdapter = { port ->
+                DeviceConnectionSessionAdapter(
+                    connectionFactory = DeviceConnectionFactory {
+                        DeviceConnectionAttempt.Connected(lease)
+                    },
+                    eventPort = port,
+                )
+            },
+            loadCatalog = { port ->
+                port.emit(
+                    InstallationSessionEvent.CatalogResolved(
+                        catalogVersion = "android-v1",
+                        keyId = "test-key",
+                        signatureAlgorithm = "SHA256withECDSA",
+                        manifests = manifests,
+                    ),
+                )
+            },
+            prepareArtifactsWithResult = { selected, port ->
+                emitArtifactPreparationEvidence(selected, port)
+                ArtifactPreparationResult.Prepared(
+                    selected.map { manifest ->
+                        PreparedArtifact(
+                            manifest = manifest,
+                            sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                            finalApk = File("${manifest.componentId}.apk"),
+                        )
+                    },
+                )
+            },
+            executeDeviceInstallation = { connection, artifacts, _ ->
+                installationConnection = connection
+                installationComponentIds = artifacts.map { it.manifest.componentId }
+            },
+            coroutineContext = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        runtime.dispatch(InstallationSessionCommand.StartDiscovery)
+        advanceUntilIdle()
+        runtime.dispatch(
+            InstallationSessionCommand.SelectDevice(
+                runtime.session.currentSnapshot().discoveredDevices.single().id,
+            ),
+        )
+        advanceUntilIdle()
+        runtime.dispatch(InstallationSessionCommand.ToggleOptionalComponent("lyrics", selected = true))
+        runtime.dispatch(InstallationSessionCommand.StartInstallation)
+        advanceUntilIdle()
+
+        assertTrue(installationConnection === lease)
+        assertEquals(listOf("lyrics", "desktop"), installationComponentIds)
+        assertEquals(InstallationSessionState.VERIFYING_ARTIFACTS, runtime.session.currentSnapshot().state)
 
         runtime.close()
     }
@@ -286,11 +301,72 @@ class InstallerRuntimeTest {
             eventPort = eventPort,
         )
 
+    private fun emitArtifactPreparationEvidence(
+        selected: List<ArtifactManifest>,
+        port: InstallationSessionEventPort,
+    ) {
+        port.emit(
+            InstallationSessionEvent.SourceResolved(
+                sourceId = "fixed-release-source-policy",
+                selections = selected.map {
+                    SourceSelectionEvidence(it.componentId, ArtifactSourceKind.LANZOU_SHARE)
+                },
+            ),
+        )
+        port.emit(
+            InstallationSessionEvent.ArchiveDownloaded(
+                sizeBytes = selected.sumOf { it.archiveSizeBytes },
+                sha256 = "batch",
+                archives = selected.map {
+                    ArchiveDownloadEvidence(it.componentId, it.archiveSizeBytes, it.archiveSha256)
+                },
+            ),
+        )
+        port.emit(
+            InstallationSessionEvent.ArchiveVerified(
+                verified = true,
+                verifications = selected.map {
+                    ArchiveVerificationEvidence(it.componentId, it.archiveSizeBytes, it.archiveSha256)
+                },
+            ),
+        )
+        port.emit(
+            InstallationSessionEvent.ApkExtracted(
+                entryName = "batch.apk",
+                sizeBytes = selected.sumOf { it.apkSizeBytes },
+                sha256 = "batch",
+                extractions = selected.map {
+                    ApkExtractionEvidence(it.componentId, it.apkEntryName, it.apkSizeBytes, it.apkSha256)
+                },
+            ),
+        )
+        port.emit(
+            InstallationSessionEvent.ArtifactsVerified(
+                checks = selected.map { ComponentCheck(it.componentId, true) },
+                verifications = selected.map { manifest ->
+                    ArtifactVerification(
+                        componentId = manifest.componentId,
+                        sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                        archiveSizeBytes = manifest.archiveSizeBytes,
+                        archiveSha256 = manifest.archiveSha256,
+                        apkSizeBytes = manifest.apkSizeBytes,
+                        apkSha256 = manifest.apkSha256,
+                        packageName = manifest.packageName,
+                        apkVersion = manifest.apkVersion,
+                        certificateSha256 = manifest.certificateSha256,
+                        archiveDeleted = true,
+                    )
+                },
+                archiveDeleted = true,
+            ),
+        )
+    }
+
     private fun manifest(componentId: String): ArtifactManifest = ArtifactManifest(
         schemaVersion = 1,
         componentId = componentId,
         displayName = componentId,
-        required = true,
+        required = componentId == "desktop",
         version = ArtifactVersion("1.0.0", 1),
         compatibility = CompatibilityRange(minAndroidSdk = 26, maxAndroidSdk = 30),
         archiveFileName = "$componentId.zip",

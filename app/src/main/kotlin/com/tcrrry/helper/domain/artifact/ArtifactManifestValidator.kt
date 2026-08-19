@@ -28,7 +28,7 @@ object ArtifactManifestValidator {
         !sha256Pattern.matches(manifest.apkSha256) -> invalid("apk_sha256_invalid")
         !packageNamePattern.matches(manifest.packageName) -> invalid("apk_package_name_invalid")
         !sha256Pattern.matches(manifest.certificateSha256) -> invalid("certificate_sha256_invalid")
-        manifest.sources.size != ArtifactSourceKind.AUTOMATIC_ORDER.size ->
+        manifest.sources.isEmpty() || manifest.sources.size > ArtifactSourceKind.AUTOMATIC_ORDER.size ->
             invalid("source_count_invalid")
         manifest.sources.map { it.kind }.toSet().size != manifest.sources.size ->
             invalid("source_duplicate")

@@ -88,9 +88,9 @@ class ArtifactArchiveExtractor(
         ZipInputStream(FileInputStream(archive)).use { zip ->
             while (true) {
                 val entry = zip.nextEntry ?: break
+                val entryName = entry.name
                 entryCount += 1
                 if (entryCount > 1) throw ExtractionRejected("archive_extra_entry")
-                val entryName = entry.name
                 if (!isSafeRootEntry(entryName)) throw ExtractionRejected("archive_path_traversal")
                 if (entry.isDirectory) throw ExtractionRejected("archive_directory_forbidden")
                 if (entryName != manifest.apkEntryName) {

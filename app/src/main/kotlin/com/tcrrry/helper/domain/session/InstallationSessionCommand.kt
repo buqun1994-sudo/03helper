@@ -7,6 +7,9 @@ import com.tcrrry.helper.domain.artifact.ArtifactManifest
 import com.tcrrry.helper.domain.artifact.ArtifactSourceKind
 import com.tcrrry.helper.domain.artifact.ArtifactVerification
 import com.tcrrry.helper.domain.artifact.SourceSelectionEvidence
+import com.tcrrry.helper.domain.device.AuthorizationActionEvidence
+import com.tcrrry.helper.domain.device.DeviceAvailabilityEvidence
+import com.tcrrry.helper.domain.device.InstalledArtifactEvidence
 
 /** Commands accepted by the single installation-session owner. */
 sealed interface InstallationSessionCommand {
@@ -116,11 +119,20 @@ sealed interface InstallationSessionEvent {
 
     data class InstallationStarted(val componentIds: List<String> = emptyList()) : InstallationSessionEvent
 
-    data class InstallationCompleted(val checks: List<ComponentCheck>) : InstallationSessionEvent
+    data class InstallationCompleted(
+        val checks: List<ComponentCheck>,
+        val evidence: List<InstalledArtifactEvidence> = emptyList(),
+    ) : InstallationSessionEvent
 
-    data class AuthorizationCompleted(val checks: List<ComponentCheck>) : InstallationSessionEvent
+    data class AuthorizationCompleted(
+        val checks: List<ComponentCheck>,
+        val evidence: List<AuthorizationActionEvidence> = emptyList(),
+    ) : InstallationSessionEvent
 
-    data class DeviceVerified(val checks: List<ComponentCheck>) : InstallationSessionEvent
+    data class DeviceVerified(
+        val checks: List<ComponentCheck>,
+        val evidence: List<DeviceAvailabilityEvidence> = emptyList(),
+    ) : InstallationSessionEvent
 
     data class DeviceDisconnected(
         val deviceId: String? = null,

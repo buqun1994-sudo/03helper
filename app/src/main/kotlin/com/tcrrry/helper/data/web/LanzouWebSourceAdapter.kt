@@ -1,5 +1,6 @@
 package com.tcrrry.helper.data.web
 
+import android.util.Log
 import com.tcrrry.helper.domain.artifact.ArtifactFailure
 import com.tcrrry.helper.domain.artifact.ArtifactFailurePhase
 import com.tcrrry.helper.domain.artifact.ArtifactSource
@@ -38,6 +39,7 @@ class LanzouWebSourceAdapter(
     private val timeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS,
 ) {
     suspend fun resolve(source: ArtifactSource): LanzouResolutionResult {
+        Log.d(TAG, "resolve_start kind=${source.kind}")
         if (source.kind != ArtifactSourceKind.LANZOU_SHARE) {
             return LanzouResolutionResult.Failure(
                 ArtifactFailure(
@@ -165,5 +167,6 @@ class LanzouWebSourceAdapter(
 
     companion object {
         const val DEFAULT_TIMEOUT_MILLIS = 15_000L
+        private const val TAG = "03helper.Lanzou"
     }
 }

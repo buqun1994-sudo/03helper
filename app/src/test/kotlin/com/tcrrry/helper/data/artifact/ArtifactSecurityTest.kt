@@ -50,7 +50,7 @@ class ArtifactSecurityTest {
     }
 
     @Test
-    fun `source policy fixes order and rejects folders and converters`() {
+    fun `source policy fixes order and recognizes only bounded Lanzou transient download hosts`() {
         val manifest = manifestFor(byteArrayOf(1), byteArrayOf(2)).copy(
             sources = listOf(
                 ArtifactSource(ArtifactSourceKind.GITHUB_RELEASES, "https://github.com/a/b/releases/download/v1/a.zip"),
@@ -83,6 +83,47 @@ class ArtifactSecurityTest {
             },
         )
         assertTrue(com.tcrrry.helper.domain.artifact.ReleaseSourcePolicy().plan(converter) is SourcePlan.Rejected)
+
+        val policy = com.tcrrry.helper.domain.artifact.ReleaseSourcePolicy()
+        val transientLanzouRequest = ResolvedDownloadRequest(
+            sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+            url = "https://developer2.lanrar.com/file/?short-lived-token",
+            userAgent = "Android System WebView",
+        )
+        assertTrue(
+            policy.validateResolvedRequest(transientLanzouRequest) is
+                com.tcrrry.helper.domain.artifact.SourcePolicyValidation.Accepted,
+        )
+        val transientCdnRequest = transientLanzouRequest.copy(
+            url = "https://zip1.webgetstore.com/2026/8/19/archive.zip?short-lived-token",
+        )
+        assertTrue(
+            policy.validateResolvedRequest(transientCdnRequest) is
+                com.tcrrry.helper.domain.artifact.SourcePolicyValidation.Accepted,
+        )
+        assertTrue(policy.isLanzouSharePage("https://wwatl.lanzouw.com/tp/iabc123?token"))
+        assertFalse(policy.isLanzouSharePage(transientLanzouRequest.url))
+        assertFalse(policy.isLanzouTransientDownloadUrl(transientLanzouRequest.url))
+        assertTrue(policy.isLanzouVerificationPage("https://developer2.lanrar.com/file/?short-lived-token"))
+        assertTrue(policy.isLanzouTransientDownloadUrl(transientCdnRequest.url))
+        assertFalse(policy.isLanzouTransientDownloadUrl("https://zip1.webgetstore.com/"))
+        assertFalse(policy.isLanzouTransientDownloadUrl("https://zip1.evilwebgetstore.com/2026/archive.zip"))
+        assertEquals(
+            "lanzou_manifest_host_forbidden",
+            (
+                policy.validateManifestSource(
+                    ArtifactSource(ArtifactSourceKind.LANZOU_SHARE, transientLanzouRequest.url),
+                ) as com.tcrrry.helper.domain.artifact.SourcePolicyValidation.Rejected
+            ).reasonCode,
+        )
+        assertEquals(
+            "lanzou_manifest_host_forbidden",
+            (
+                policy.validateManifestSource(
+                    ArtifactSource(ArtifactSourceKind.LANZOU_SHARE, transientCdnRequest.url),
+                ) as com.tcrrry.helper.domain.artifact.SourcePolicyValidation.Rejected
+            ).reasonCode,
+        )
     }
 
     @Test
@@ -369,7 +410,7 @@ class ArtifactSecurityTest {
         val destroyed = AtomicInteger(0)
         val request = ResolvedDownloadRequest(
             sourceKind = ArtifactSourceKind.LANZOU_SHARE,
-            url = "https://download.lanzouw.com/file.zip?x=1",
+            url = "https://developer2.lanrar.com/file/?short-lived-token",
             userAgent = "Android System WebView",
             mimeType = "application/zip",
         )

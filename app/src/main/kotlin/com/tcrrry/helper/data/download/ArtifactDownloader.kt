@@ -1,5 +1,6 @@
 package com.tcrrry.helper.data.download
 
+import android.util.Log
 import com.tcrrry.helper.domain.artifact.ArtifactFailure
 import com.tcrrry.helper.domain.artifact.ArtifactFailurePhase
 import com.tcrrry.helper.domain.artifact.ArtifactManifest
@@ -9,8 +10,10 @@ import java.io.Closeable
 import java.io.FileOutputStream
 import java.io.InputStream
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.withContext
 
 data class ArtifactTransportResponse(
     val statusCode: Int,
@@ -55,6 +58,13 @@ class ArtifactDownloader(
     private val onProgress: (DownloadProgress) -> Unit = {},
 ) {
     suspend fun download(
+        manifest: ArtifactManifest,
+        request: ResolvedDownloadRequest,
+    ): ArtifactDownloadResult = withContext(Dispatchers.IO) {
+        downloadInternal(manifest, request)
+    }
+
+    private suspend fun downloadInternal(
         manifest: ArtifactManifest,
         request: ResolvedDownloadRequest,
     ): ArtifactDownloadResult {
@@ -124,7 +134,8 @@ class ArtifactDownloader(
         } catch (cancelled: CancellationException) {
             // Keep the part and metadata for the same manifest/source resume boundary.
             throw cancelled
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            Log.w(TAG, "download_exception type=${error::class.java.simpleName} message=${error.message ?: "unknown"}")
             return failed(manifest, request, "download_io_failed", paths.archivePart.length())
         } finally {
             response?.close()
@@ -138,6 +149,7 @@ class ArtifactDownloader(
         partialBytes: Long = 0L,
         clearPartial: Boolean = false,
     ): ArtifactDownloadResult.Failed {
+        Log.w(TAG, "download_failed reason=$reasonCode partial=$partialBytes")
         if (clearPartial) {
             cache.clearArtifact(manifest)
         }
@@ -153,5 +165,9 @@ class ArtifactDownloader(
             ),
             partialBytes = partialBytes,
         )
+    }
+
+    private companion object {
+        const val TAG = "03helper.Download"
     }
 }

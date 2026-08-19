@@ -67,16 +67,17 @@ rollbackId
 1. 各产品仓库先生成已签名 APK，分别由 03 歌词、03桌面和文件管理器仓库负责包身份、版本和证书；03helper 不复制产品源码，也不重新签名。
 2. Cloud release 流程为每个组件生成一个单组件 ZIP，归档根目录只放一个预期 APK；生成后计算 ZIP 大小 / SHA-256 和 APK 大小 / SHA-256，写入 Android profile 的签名清单。
 3. 同一 ZIP 字节复制到蓝奏云、R2 和 GitHub Releases，不能分别重新压缩，否则外层 ZIP 摘要会变化。蓝奏云分享页 URL 只作为主源页面地址写入 `sources[]`，不把短时最终地址写入清单。
-4. 只有 staging 下载、解压、APK 包身份 / 证书校验、ADB 安装验证和回滚指针全部通过，才允许把清单候选切到公开状态。当前三个测试分享页先作为 fixture，组件映射冻结前不得发布为正式组件；本轮真实 WebView / 网络验证由用户人工主测，未执行项不计为生产通过。
+4. 只有正式 staging 下载、解压、APK 包身份 / 证书校验、ADB 安装验证和回滚指针全部通过，才允许把清单候选切到公开状态。当前真实组件 Debug 包只进入 03helper Debug 变体的本地签名验证 profile；它们可以证明客户端完整工程链，但不代表 Cloud Android profile、生产签名或公开发布候选通过。
 5. Cloud 不向客户端下发压缩包密码、网盘账号、R2 密钥、GitHub PAT 或任意命令；蓝奏云密码聚合文件夹和三应用合并 ZIP 不进入 Android 自动清单。
 
-### 3.4 当前蓝奏云 ZIP fixture
+### 3.4 当前 F3 真实 Debug 验证资料
 
-1. `zip-test-1`：`https://wwatl.lanzouw.com/icExq435o4sj`
-2. `zip-test-2`：`https://wwatl.lanzouw.com/i9neI435o4zg`
-3. `zip-test-3`：`https://wwatl.lanzouw.com/iGrHV435o5ah`
-4. 三个地址只用于 03helper 的隐藏 WebView、ZIP 下载和解压施工 fixture；组件映射、ZIP / APK 摘要、包身份和正式发布状态尚未冻结，Cloud release index 在这些信息齐全前不得把它们输出为 production 组件。
-5. `2026-08-19` 只读核对 Cloud 当前 `products/`、release profile、release scripts 和协议后，只有 TileLauncher 存在安装包 release profile；03歌词 / 03桌面当前 Cloud 条目是产品或商业配置，没有 03helper Android profile、组件 ZIP 对象、清单公钥或发布脚本。该缺口保持待实施，不由客户端伪造。
+1. `desktop`：`https://wwatl.lanzouw.com/iCdE743g9zve`，ZIP `03desktop-debug.zip`，APK 包名 `com.tcrrry.desktop`。
+2. `lyrics`：`https://wwatl.lanzouw.com/ipRbT43g9zzi`，ZIP `03lyrics-debug.zip`，APK 包名 `com.tcrrry.desktoplyrics`。
+3. `file-manager`：`https://wwatl.lanzouw.com/itMa843ga0la`，ZIP `fossify-file-manager-car-debug.zip`，APK 包名 `org.fossify.filemanager.debug`。
+4. 每份 ZIP 的根目录均只有一个预期 APK；链接、ZIP / APK 大小与 SHA-256、包名、版本、兼容范围和 Debug 证书已经写入 `app/src/debug/assets/real-debug/android-profile.json` 并由同目录公钥验签。Debug 使用完整安装、一次统一授权和可用性主链，不存在安装专用成功态；03桌面是唯一必装核心，其他组件可选。
+5. 蓝奏云分享页不是长期直链。页面验证后产生的 `zipN.webgetstore.com` 地址带短时上下文，只在内存中交给原生下载器，不能写入清单或文档作为固定对象地址。
+6. 这些资料只用于 F3 工程验证，不进入 Cloud 正式发布。Cloud 当前仍没有 03helper Android production profile、正式组件对象和生产信任资料；它们须由后续发布流程独立提供，不能把本地 Debug profile 直接公开。
 
 ## 4. 官网视觉复用边界
 
@@ -101,7 +102,7 @@ Cloud 最新 iCAR 03 官网已确认的可复用语言：
 ## 6. 后续施工顺序
 
 1. M0：Cloud 侧继续冻结 release index 映射，确认三个产品仓库的包名、版本、签名身份、ZIP entry 名称和发布责任；03helper 本地 schema 已完成。
-2. M1：03helper 本地隐藏 WebView 来源适配器、ZIP 下载器、完整性校验和 `InstallationSession` 事件接线已完成；用户提供的三个链接仍只作为 fixture。
+2. M1：03helper 本地隐藏 WebView 来源适配器、ZIP 下载器、完整性校验、设备动作和 `InstallationSession` 事件接线已完成；当前三条真实 Debug 链接只用于 F3 完整工程验证，不升级为 Cloud 正式候选。
 3. M2：待 Cloud R2 ZIP 对象和 GitHub Releases 真实候选具备后，执行断点、失败切源、ZIP / APK 双重摘要、回滚和版本一致性人工验证。
 4. M3：如需由 Cloud 官网提供“下载安装助手”入口，再在 `cloud/apps/website-next/` 增加安装助手产品入口；官网入口只指向助手 APK，不在官网复制车机安装流程。
 5. 每次 Cloud 侧涉及 release index、R2、官网入口、API 或生产部署时，先读取 Cloud 仓库对应专项文档；部署和上线仍按 Cloud 的固定候选与人工授权规则执行。

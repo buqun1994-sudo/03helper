@@ -1,11 +1,94 @@
 package com.tcrrry.helper.domain.session
 
+import com.tcrrry.helper.domain.artifact.ArtifactManifest
+import com.tcrrry.helper.domain.artifact.ArtifactSource
+import com.tcrrry.helper.domain.artifact.ArtifactSourceKind
+import com.tcrrry.helper.domain.artifact.ArtifactVersion
+import com.tcrrry.helper.domain.artifact.CompatibilityRange
+import com.tcrrry.helper.domain.artifact.toComponentDescriptor
+import com.tcrrry.helper.domain.device.AuthorizationAction
+import com.tcrrry.helper.domain.device.AuthorizationActionEvidence
+import com.tcrrry.helper.domain.device.AuthorizationPlanBuildResult
+import com.tcrrry.helper.domain.device.AuthorizationPlanFactory
+import com.tcrrry.helper.domain.device.AuthorizationValueState
+import com.tcrrry.helper.domain.device.DeviceAvailabilityEvidence
+import com.tcrrry.helper.domain.device.DeviceCapability
+import com.tcrrry.helper.domain.device.InstalledArtifactEvidence
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class InstallationSessionTest {
+    @Test
+    fun `optional installed components do not require launch or service evidence`() {
+        val manifests = listOf(
+            evidenceManifest("desktop", AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME, required = true),
+            evidenceManifest("lyrics", AuthorizationPlanFactory.LYRICS_PACKAGE_NAME, required = false),
+            evidenceManifest("file-manager", AuthorizationPlanFactory.FILE_MANAGER_PACKAGE_NAME, required = false),
+        )
+        val selected = manifests.map { it.componentId }.toSet()
+        val plan = (AuthorizationPlanFactory.createForManifests(manifests) as AuthorizationPlanBuildResult.Ready).plan
+        val installation = manifests.associate { manifest ->
+            manifest.componentId to InstalledArtifactEvidence(
+                componentId = manifest.componentId,
+                packageName = manifest.packageName,
+                version = manifest.apkVersion,
+                apkSizeBytes = manifest.apkSizeBytes,
+                apkSha256 = manifest.apkSha256,
+                certificateSha256 = manifest.certificateSha256,
+            )
+        }
+        val availability = manifests.map { manifest ->
+            val desktop = manifest.componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
+            DeviceAvailabilityEvidence(
+                componentId = manifest.componentId,
+                packageName = manifest.packageName,
+                version = manifest.apkVersion,
+                installedArchiveVerified = true,
+                launchAttempted = desktop,
+                launcherResolved = desktop,
+                processRunning = desktop,
+                requiredServiceBound = if (desktop) true else null,
+            )
+        }
+        val device = DeviceSummary(
+            id = "evidence-device",
+            displayName = "Evidence device",
+            connectionStatus = DeviceConnectionStatus.CONFIRMED,
+            androidSdk = 28,
+            capabilities = setOf(DeviceCapability.ADB_TCP, DeviceCapability.IDENTITY_READ),
+        )
+        val session = InstallationSession(
+            initialSnapshot = InstallationSessionSnapshot(
+                state = InstallationSessionState.VERIFYING_DEVICE,
+                device = device,
+                components = manifests.map { it.toComponentDescriptor() },
+                selectedOptionalComponentIds = setOf("lyrics", "file-manager"),
+                artifactManifests = manifests,
+                evidence = SessionEvidence(
+                    artifactsVerified = selected,
+                    installed = selected,
+                    configured = selected,
+                    available = selected,
+                    installation = installation,
+                    authorizationActions = validAuthorizationEvidence(plan),
+                    availability = availability.associateBy { it.componentId },
+                ),
+            ),
+        )
+
+        session.dispatchEvent(
+            InstallationSessionEvent.DeviceVerified(
+                checks = selected.map { ComponentCheck(it, passed = true) },
+                evidence = availability,
+            ),
+        )
+
+        assertEquals(InstallationSessionState.SUCCEEDED, session.currentSnapshot().state)
+        assertTrue(session.currentSnapshot().componentResults.all { it.installed && it.configured && it.available })
+    }
+
     @Test
     fun `normal path follows every guarded stage and requires all evidence`() {
         val session = connectedSession(includeOptional = true)
@@ -165,6 +248,8 @@ class InstallationSessionTest {
                 if (component.id == "file-manager") component.copy(sizeLabel = null) else component
             },
         )
+        session.dispatch(InstallationSessionCommand.ToggleOptionalComponent("lyrics", selected = true))
+        assertEquals(setOf("lyrics"), session.currentSnapshot().selectedOptionalComponentIds)
         session.dispatch(InstallationSessionCommand.ToggleOptionalComponent("lyrics", selected = false))
         assertTrue(session.currentSnapshot().selectedOptionalComponentIds.isEmpty())
 
@@ -293,7 +378,7 @@ class InstallationSessionTest {
 
     @Test
     fun `success evidence is rejected when any category is missing`() {
-        val expected = setOf("lyrics", "desktop")
+        val expected = setOf("desktop")
         val session = InstallationSession(
             componentCatalog = components,
             initialSnapshot = InstallationSessionSnapshot(
@@ -376,6 +461,9 @@ class InstallationSessionTest {
         )
         if (includeOptional) {
             session.dispatch(
+                InstallationSessionCommand.ToggleOptionalComponent("lyrics", selected = true),
+            )
+            session.dispatch(
                 InstallationSessionCommand.ToggleOptionalComponent("file-manager", selected = true),
             )
         }
@@ -405,12 +493,76 @@ class InstallationSessionTest {
             .filter { it.required || it.id in session.currentSnapshot().selectedOptionalComponentIds }
             .map { ComponentCheck(it.id, passed = true) }
 
+    private fun validAuthorizationEvidence(
+        plan: com.tcrrry.helper.domain.device.AuthorizationPlan,
+    ): List<AuthorizationActionEvidence> = plan.actions.map { action ->
+        when (action) {
+            is AuthorizationAction.EnsureAppOpAllowed -> AuthorizationActionEvidence(
+                componentId = action.componentId,
+                actionId = action.id,
+                before = AuthorizationValueState.DEFAULT,
+                writeApplied = true,
+                after = AuthorizationValueState.ALLOWED,
+            )
+
+            is AuthorizationAction.EnsureRuntimePermissionGranted -> AuthorizationActionEvidence(
+                componentId = action.componentId,
+                actionId = action.id,
+                before = AuthorizationValueState.DENIED,
+                writeApplied = true,
+                after = AuthorizationValueState.GRANTED,
+            )
+
+            is AuthorizationAction.EnsureSecureSettingEnabled -> AuthorizationActionEvidence(
+                componentId = action.componentId,
+                actionId = action.id,
+                before = AuthorizationValueState.DISABLED,
+                writeApplied = true,
+                after = AuthorizationValueState.ENABLED,
+            )
+
+            is AuthorizationAction.AppendSecureComponent -> AuthorizationActionEvidence(
+                componentId = action.componentId,
+                actionId = action.id,
+                before = AuthorizationValueState.COMPONENT_ABSENT,
+                writeApplied = true,
+                after = AuthorizationValueState.COMPONENT_PRESENT,
+                preservedEntryCount = 0,
+            )
+        }
+    }
+
+    private fun evidenceManifest(
+        componentId: String,
+        packageName: String,
+        required: Boolean,
+    ): ArtifactManifest = ArtifactManifest(
+        schemaVersion = 1,
+        componentId = componentId,
+        displayName = componentId,
+        required = required,
+        version = ArtifactVersion("1.0.0", 1),
+        compatibility = CompatibilityRange(minAndroidSdk = 26, maxAndroidSdk = 30),
+        archiveFileName = "$componentId.zip",
+        archiveSizeBytes = 100L,
+        archiveSha256 = "11".repeat(32),
+        apkEntryName = "$componentId.apk",
+        apkSizeBytes = 50L,
+        apkSha256 = "22".repeat(32),
+        packageName = packageName,
+        apkVersion = ArtifactVersion("1.0.0", 1),
+        certificateSha256 = "33".repeat(32),
+        sources = listOf(
+            ArtifactSource(ArtifactSourceKind.LANZOU_SHARE, "https://wwatl.lanzouw.com/i$componentId"),
+        ),
+    )
+
     private companion object {
         val components = listOf(
             ComponentDescriptor(
                 id = "lyrics",
                 displayName = "Lyrics",
-                required = true,
+                required = false,
                 versionLabel = "1.14",
                 sizeLabel = "18 MB",
                 compatibilityLabel = "compatible",

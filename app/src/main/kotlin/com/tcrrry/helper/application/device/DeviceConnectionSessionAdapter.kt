@@ -16,7 +16,7 @@ class DeviceConnectionSessionAdapter(
         return when (val attempt = connectionFactory.open(expected.endpoint)) {
             is DeviceConnectionAttempt.Connected -> {
                 val connection = attempt.connection
-                if (connection.device.identity.stableId != expected.identity.stableId) {
+                if (connection.device.endpoint != expected.endpoint || connection.device.identity != expected.identity) {
                     connection.close()
                     eventPort.emit(
                         InstallationSessionEvent.DeviceConnectionFailed(

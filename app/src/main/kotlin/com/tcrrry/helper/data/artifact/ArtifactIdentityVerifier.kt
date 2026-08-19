@@ -6,6 +6,7 @@ import com.tcrrry.helper.domain.artifact.ArtifactManifest
 import com.tcrrry.helper.domain.artifact.ArtifactSourceKind
 import com.tcrrry.helper.domain.artifact.ArtifactVerification
 import com.tcrrry.helper.domain.artifact.ArtifactVersion
+import com.tcrrry.helper.domain.device.ApkDeclarationMetadata
 import java.io.File
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
@@ -15,6 +16,7 @@ data class ApkMetadata(
     val packageName: String,
     val version: ArtifactVersion,
     val certificateSha256s: Set<String>,
+    val declarations: ApkDeclarationMetadata = ApkDeclarationMetadata(),
 )
 
 fun interface ApkMetadataReader {
@@ -24,6 +26,7 @@ fun interface ApkMetadataReader {
 data class VerifiedApk(
     val file: File,
     val verification: ArtifactVerification,
+    val metadata: ApkMetadata? = null,
 )
 
 sealed interface ArtifactIdentityResult {
@@ -114,6 +117,7 @@ class ArtifactIdentityVerifier(
                     certificateSha256 = manifest.certificateSha256.lowercase(),
                     archiveDeleted = true,
                 ),
+                metadata = metadata,
             ),
         )
     }
