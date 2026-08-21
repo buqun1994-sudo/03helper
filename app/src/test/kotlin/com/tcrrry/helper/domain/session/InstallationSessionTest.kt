@@ -344,6 +344,39 @@ class InstallationSessionTest {
     }
 
     @Test
+    fun `connected checkpoint uses installation reconnect instead of resetting to discovery`() {
+        val session = connectedSession(includeOptional = false)
+        val before = session.currentSnapshot()
+
+        assertEquals(InstallationSessionState.CONNECTED, before.state)
+        assertEquals(InstallationSessionState.CONNECTED, before.checkpoint?.state)
+
+        session.dispatch(InstallationSessionCommand.Reconnect)
+        val reconnecting = session.currentSnapshot()
+        assertEquals(InstallationSessionState.DISCOVERING, reconnecting.state)
+        assertTrue(reconnecting.installationReconnectPending)
+        assertEquals(before.checkpoint, reconnecting.checkpoint)
+        assertEquals(before.device?.id, reconnecting.device?.id)
+
+        session.dispatchEvent(InstallationSessionEvent.DeviceDiscovered(confirmedDevice))
+        session.dispatch(InstallationSessionCommand.SelectDevice(confirmedDevice.id))
+        val connecting = session.currentSnapshot()
+        assertEquals(InstallationSessionState.CONNECTING, connecting.state)
+        assertTrue(connecting.installationReconnectPending)
+
+        session.dispatchEvent(
+            InstallationSessionEvent.DeviceConnectionConfirmed(confirmedDevice),
+            sessionId = connecting.sessionId,
+            sequence = connecting.lastEventSequence + 1L,
+        )
+        val restored = session.currentSnapshot()
+        assertEquals(InstallationSessionState.CONNECTED, restored.state)
+        assertEquals(DeviceConnectionStatus.CONFIRMED, restored.device?.connectionStatus)
+        assertFalse(restored.installationReconnectPending)
+        assertEquals(before.checkpoint?.state, restored.checkpoint?.state)
+    }
+
+    @Test
     fun `out of order and failed verification never advance the pipeline`() {
         val session = connectedSession(includeOptional = false)
         session.dispatch(InstallationSessionCommand.StartInstallation)

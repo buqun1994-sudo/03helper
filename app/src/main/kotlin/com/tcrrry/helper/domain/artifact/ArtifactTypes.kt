@@ -115,21 +115,31 @@ data class ArtifactFailure(
     val retryable: Boolean,
 )
 
-fun ArtifactManifest.toComponentDescriptor(): com.tcrrry.helper.domain.session.ComponentDescriptor =
+fun ArtifactManifest.toComponentDescriptor(
+    androidSdk: Int? = null,
+): com.tcrrry.helper.domain.session.ComponentDescriptor =
     com.tcrrry.helper.domain.session.ComponentDescriptor(
         id = componentId,
         displayName = displayName,
         required = required,
         versionLabel = version.name,
         sizeLabel = formatBytes(archiveSizeBytes),
-        compatibilityLabel = compatibility.toLabel(),
+        // Keep the compatibility gate in the domain while exposing only plain language.
+        compatibilityLabel = when {
+            androidSdk == null -> null
+            androidSdk < compatibility.minAndroidSdk -> "当前车机暂不支持此应用"
+            compatibility.maxAndroidSdk?.let { androidSdk > it } == true -> "当前车机暂不支持此应用"
+            else -> "适用于当前车机"
+        },
+        compatibilityState = when {
+            androidSdk == null -> com.tcrrry.helper.domain.session.ComponentCompatibility.UNKNOWN
+            androidSdk < compatibility.minAndroidSdk -> com.tcrrry.helper.domain.session.ComponentCompatibility.UNSUPPORTED
+            compatibility.maxAndroidSdk?.let { androidSdk > it } == true ->
+                com.tcrrry.helper.domain.session.ComponentCompatibility.UNSUPPORTED
+            else -> com.tcrrry.helper.domain.session.ComponentCompatibility.SUPPORTED
+        },
+        iconKey = componentId,
     )
-
-private fun CompatibilityRange.toLabel(): String = when {
-    maxAndroidSdk == null -> "Android ${minAndroidSdk}+"
-    minAndroidSdk == maxAndroidSdk -> "Android $minAndroidSdk"
-    else -> "Android $minAndroidSdk-$maxAndroidSdk"
-}
 
 private fun formatBytes(bytes: Long): String {
     if (bytes < 1024L) return "$bytes B"

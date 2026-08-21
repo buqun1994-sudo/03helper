@@ -30,6 +30,8 @@ sealed interface InstallationSessionCommand {
     data object ResumeInstallation : InstallationSessionCommand
     data object RetryInstallation : InstallationSessionCommand
     data object ReconfigureInstallation : InstallationSessionCommand
+    /** Internal recovery command: restart from the saved selection after an uncertain write stage. */
+    data object RestartFromCheckpoint : InstallationSessionCommand
     data object Reconnect : InstallationSessionCommand
     data object DisconnectDevice : InstallationSessionCommand
     data object EnterMaintenance : InstallationSessionCommand
@@ -69,6 +71,14 @@ sealed interface InstallationSessionEvent {
         val keyId: String,
         val signatureAlgorithm: String,
         val manifests: List<ArtifactManifest>,
+    ) : InstallationSessionEvent
+
+    /** Folder-based distribution exposes component choices before APK metadata is known. */
+    data class DistributionConfigResolved(
+        val configVersion: String,
+        val keyId: String,
+        val signatureAlgorithm: String,
+        val components: List<ComponentDescriptor>,
     ) : InstallationSessionEvent
 
     data class CatalogFailed(val reasonCode: String) : InstallationSessionEvent

@@ -176,6 +176,11 @@ internal class DadbCommandGateway(
 
     override suspend fun repairAuthorization(
         manifests: List<com.tcrrry.helper.domain.artifact.ArtifactManifest>,
+    ): MaintenanceDeviceResult = repairAuthorization(manifests, emptyMap())
+
+    override suspend fun repairAuthorization(
+        manifests: List<com.tcrrry.helper.domain.artifact.ArtifactManifest>,
+        declarationsByComponent: Map<String, com.tcrrry.helper.domain.device.ApkDeclarationMetadata>,
     ): MaintenanceDeviceResult = withLease(
         whenClosed = MaintenanceDeviceResult.Failed(
             DeviceActionFailure("adb_connection_closed", retryable = true),
@@ -195,24 +200,36 @@ internal class DadbCommandGateway(
                 DeviceActionFailure(result.reasonCode, retryable = false),
             )
         }
-        val verificationDirectory = installedApkCacheDirectory
-            ?: return@withLease MaintenanceDeviceResult.Failed(
-                DeviceActionFailure("install_apk_verifier_unavailable", retryable = false),
-            )
-        val metadataReader = installedApkMetadataReader
-            ?: return@withLease MaintenanceDeviceResult.Failed(
-                DeviceActionFailure("install_apk_verifier_unavailable", retryable = false),
-            )
-        if (!verificationDirectory.mkdirs() && !verificationDirectory.isDirectory) {
-            return@withLease MaintenanceDeviceResult.Failed(
-                DeviceActionFailure("installed_apk_verification_cache_unavailable", retryable = true),
-            )
-        }
         val declarations = linkedMapOf<String, com.tcrrry.helper.domain.device.ApkDeclarationMetadata?>()
         manifests.forEach { manifest ->
-            when (val result = verifyInstalledArtifactForMaintenance(manifest, metadataReader, verificationDirectory)) {
-                is MaintenanceInstalledIdentity.Completed -> declarations[manifest.componentId] = result.declarations
-                is MaintenanceInstalledIdentity.Failed -> return@withLease MaintenanceDeviceResult.Failed(result.failure)
+            verifyInstalledArtifactQuick(manifest)?.let { failure ->
+                return@withLease MaintenanceDeviceResult.Failed(failure)
+            }
+        }
+        val missingDeclarations = manifests.filter { manifest ->
+            val declaration = declarationsByComponent[manifest.componentId]
+            declarations[manifest.componentId] = declaration
+            declaration == null
+        }
+        if (missingDeclarations.isNotEmpty()) {
+            val verificationDirectory = installedApkCacheDirectory
+                ?: return@withLease MaintenanceDeviceResult.Failed(
+                    DeviceActionFailure("install_apk_verifier_unavailable", retryable = false),
+                )
+            val metadataReader = installedApkMetadataReader
+                ?: return@withLease MaintenanceDeviceResult.Failed(
+                    DeviceActionFailure("install_apk_verifier_unavailable", retryable = false),
+                )
+            if (!verificationDirectory.mkdirs() && !verificationDirectory.isDirectory) {
+                return@withLease MaintenanceDeviceResult.Failed(
+                    DeviceActionFailure("installed_apk_verification_cache_unavailable", retryable = true),
+                )
+            }
+            missingDeclarations.forEach { manifest ->
+                when (val result = verifyInstalledArtifactForMaintenance(manifest, metadataReader, verificationDirectory)) {
+                    is MaintenanceInstalledIdentity.Completed -> declarations[manifest.componentId] = result.declarations
+                    is MaintenanceInstalledIdentity.Failed -> return@withLease MaintenanceDeviceResult.Failed(result.failure)
+                }
             }
         }
         AuthorizationDeclarationValidator.validateDeclarations(plan, declarations)?.let { failure ->
@@ -373,6 +390,7 @@ internal class DadbCommandGateway(
                         apkSizeBytes = pulledApk.length(),
                         apkSha256 = digest,
                         certificateSha256 = certificate.lowercase(),
+                        declarations = metadata.declarations,
                     ),
                 )
             }
@@ -444,6 +462,38 @@ internal class DadbCommandGateway(
         } finally {
             pulledApk.delete()
         }
+    }
+
+    /** Reads only small package-manager evidence before considering a full APK pull. */
+    private fun verifyInstalledArtifactQuick(
+        manifest: com.tcrrry.helper.domain.artifact.ArtifactManifest,
+    ): DeviceActionFailure? {
+        val remoteApkPath = readInstalledApkPath(manifest.packageName)
+            ?: return DeviceActionFailure("maintenance_package_path_missing", manifest.componentId, retryable = false)
+        val stat = shell("stat -c %s $remoteApkPath")
+            ?: return DeviceActionFailure("maintenance_identity_probe_failed", manifest.componentId, retryable = true)
+        val size = stat.output.trim().lineSequence().firstOrNull()?.toLongOrNull()
+            ?: return DeviceActionFailure("maintenance_identity_probe_invalid", manifest.componentId, retryable = true)
+        if (size != manifest.apkSizeBytes) {
+            return DeviceActionFailure("maintenance_installed_identity_mismatch", manifest.componentId, retryable = false)
+        }
+        val digestResponse = shell("sha256sum $remoteApkPath")
+            ?: return DeviceActionFailure("maintenance_identity_probe_failed", manifest.componentId, retryable = true)
+        val digest = digestResponse.output.trim().substringBefore(' ').takeIf { it.length == 64 }
+            ?: return DeviceActionFailure("maintenance_identity_probe_invalid", manifest.componentId, retryable = true)
+        if (!digest.equals(manifest.apkSha256, ignoreCase = true)) {
+            return DeviceActionFailure("maintenance_installed_identity_mismatch", manifest.componentId, retryable = false)
+        }
+        val packageInfo = shell("dumpsys package ${manifest.packageName} | grep -m 2 -E 'versionCode=|versionName='")
+            ?: return DeviceActionFailure("maintenance_identity_probe_failed", manifest.componentId, retryable = true)
+        val lines = packageInfo.output.lineSequence().map(String::trim).filter(String::isNotBlank).toList()
+        val versionCode = lines.firstOrNull { it.startsWith("versionCode=") }
+            ?.substringAfter('=')?.substringBefore(' ')?.toLongOrNull()
+        val versionName = lines.firstOrNull { it.startsWith("versionName=") }?.substringAfter('=').orEmpty()
+        if (versionCode != manifest.apkVersion.code || versionName != manifest.apkVersion.name) {
+            return DeviceActionFailure("maintenance_installed_identity_mismatch", manifest.componentId, retryable = false)
+        }
+        return null
     }
 
     private fun inspectInstalledPackage(componentId: String, packageName: String): PackageInspection {

@@ -4,6 +4,7 @@ import com.tcrrry.helper.application.artifact.ArtifactPreparationResult
 import com.tcrrry.helper.application.artifact.PreparedArtifact
 import com.tcrrry.helper.application.device.DeviceDiscoverySessionAdapter
 import com.tcrrry.helper.application.device.DeviceConnectionSessionAdapter
+import com.tcrrry.helper.application.device.toDeviceSummary
 import com.tcrrry.helper.application.session.InstallationSessionEventPort
 import com.tcrrry.helper.domain.artifact.ApkExtractionEvidence
 import com.tcrrry.helper.domain.artifact.ArchiveDownloadEvidence
@@ -64,6 +65,75 @@ class InstallerRuntimeTest {
         runtime.onForeground()
         assertEquals(firstForegroundSnapshot.sessionId, runtime.session.currentSnapshot().sessionId)
 
+        runtime.close()
+    }
+
+    @Test
+    fun `foreground reestablishes a connected checkpoint instead of resetting the install flow`() = runTest {
+        val seed = InstallationSession()
+        seed.dispatch(InstallationSessionCommand.StartDiscovery)
+        seed.dispatchEvent(InstallationSessionEvent.DeviceDiscovered(fakeVehicle().toDeviceSummary()))
+        seed.dispatch(InstallationSessionCommand.SelectDevice("adb:vehicle-1"))
+        val connecting = seed.currentSnapshot()
+        seed.dispatchEvent(
+            InstallationSessionEvent.DeviceConnectionConfirmed(fakeVehicle().toDeviceSummary()),
+            sessionId = connecting.sessionId,
+            sequence = connecting.lastEventSequence + 1L,
+        )
+        val runtimeSession = InstallationSession(seed.currentSnapshot())
+        var catalogLoads = 0
+        val runtime = InstallerRuntime(
+            session = runtimeSession,
+            createDiscoveryAdapter = { port -> DeviceDiscoverySessionAdapter(fakeDiscovery(), port) },
+            createConnectionAdapter = { port -> fakeConnectionAdapter(port) },
+            loadCatalog = { port ->
+                catalogLoads += 1
+                port.emit(InstallationSessionEvent.CatalogFailed("catalog_not_ready"))
+            },
+            coroutineContext = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        runtime.onForeground()
+        advanceUntilIdle()
+
+        val restored = runtime.session.currentSnapshot()
+        assertEquals(InstallationSessionState.CONNECTED, restored.state)
+        assertEquals(DeviceConnectionStatus.CONFIRMED, restored.device?.connectionStatus)
+        assertEquals(false, restored.installationReconnectPending)
+        assertEquals(1, catalogLoads)
+        assertEquals("catalog_not_ready", restored.failure?.reasonCode)
+
+        runtime.close()
+        seed.close()
+    }
+
+    @Test
+    fun `adapter disconnect resumes once from the connected checkpoint`() = runTest {
+        var catalogLoads = 0
+        val runtime = InstallerRuntime(
+            session = InstallationSession(),
+            createDiscoveryAdapter = { port -> DeviceDiscoverySessionAdapter(fakeDiscovery(), port) },
+            createConnectionAdapter = { port -> fakeConnectionAdapter(port) },
+            loadCatalog = { port ->
+                catalogLoads += 1
+                port.emit(InstallationSessionEvent.CatalogFailed("catalog_not_ready"))
+            },
+            coroutineContext = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        runtime.dispatch(InstallationSessionCommand.StartDiscovery)
+        advanceUntilIdle()
+        runtime.dispatch(InstallationSessionCommand.SelectDevice("adb:vehicle-1"))
+        advanceUntilIdle()
+        assertEquals(InstallationSessionState.CONNECTED, runtime.session.currentSnapshot().state)
+
+        runtime.session.dispatchEvent(InstallationSessionEvent.DeviceDisconnected("adb:vehicle-1"))
+        advanceUntilIdle()
+
+        assertEquals(InstallationSessionState.CONNECTED, runtime.session.currentSnapshot().state)
+        assertEquals(DeviceConnectionStatus.CONFIRMED, runtime.session.currentSnapshot().device?.connectionStatus)
+        assertEquals(2, catalogLoads)
+        assertEquals("catalog_not_ready", runtime.session.currentSnapshot().failure?.reasonCode)
         runtime.close()
     }
 
@@ -268,18 +338,18 @@ class InstallerRuntimeTest {
 
     private fun fakeDiscovery(): DeviceDiscovery = object : DeviceDiscovery {
         override suspend fun discover(onDevice: suspend (ConnectedDevice) -> Unit): DeviceDiscoveryResult {
-            onDevice(
-                ConnectedDevice(
-                    endpoint = DeviceEndpoint("192.168.1.203"),
-                    identity = DeviceIdentity("adb:vehicle-1", "S56_HQX", 28),
-                    capabilities = setOf(DeviceCapability.ADB_TCP, DeviceCapability.IDENTITY_READ),
-                ),
-            )
+            onDevice(fakeVehicle())
             return DeviceDiscoveryResult(scannedCount = 1, confirmedCount = 1)
         }
 
         override fun cancel() = Unit
     }
+
+    private fun fakeVehicle(): ConnectedDevice = ConnectedDevice(
+        endpoint = DeviceEndpoint("192.168.1.203"),
+        identity = DeviceIdentity("adb:vehicle-1", "S56_HQX", 28),
+        capabilities = setOf(DeviceCapability.ADB_TCP, DeviceCapability.IDENTITY_READ),
+    )
 
     private fun fakeConnectionAdapter(eventPort: InstallationSessionEventPort): DeviceConnectionSessionAdapter =
         DeviceConnectionSessionAdapter(

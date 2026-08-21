@@ -128,7 +128,10 @@ class MaintenanceController(
             fail(actionId, "device_action_gateway_unavailable", retryable = false, eventPort)
             return
         }
-        when (val result = gateway.repairAuthorization(manifests)) {
+        val declarations = snapshot.evidence.installation.mapNotNull { (componentId, evidence) ->
+            evidence.declarations?.let { componentId to it }
+        }.toMap()
+        when (val result = gateway.repairAuthorization(manifests, declarations)) {
             is MaintenanceDeviceResult.Completed -> complete(actionId, result.resultCode, eventPort)
             is MaintenanceDeviceResult.Failed -> fail(actionId, result.failure.reasonCode, result.failure.retryable, eventPort)
         }

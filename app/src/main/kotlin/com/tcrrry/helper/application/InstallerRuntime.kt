@@ -55,9 +55,15 @@ class InstallerRuntime(
     private var maintenanceJob: Job? = null
     private var eventDispatcherSessionId: Long? = null
     private var eventDispatcher: InstallationSessionEventPort? = null
+    private var automaticReconnectSessionId: Long? = null
     private var closed = false
 
     init {
+        scope.launch {
+            session.snapshots.collect { snapshot ->
+                reconcileDisconnectedInstallation(snapshot)
+            }
+        }
         persistMaintenanceSnapshot?.let { persist ->
             scope.launch {
                 session.snapshots.collect { snapshot ->
@@ -137,6 +143,8 @@ class InstallerRuntime(
             InstallationSessionCommand.ReconfigureInstallation,
             -> {
                 if (after.sessionId != before.sessionId) cancelTransferWork()
+                // Resume is a user intent. If the lease was lost, reconcile starts
+                // one bounded discovery pass and restores the same checkpoint.
                 reconcile(after)
             }
 
@@ -148,6 +156,7 @@ class InstallerRuntime(
             is InstallationSessionCommand.ToggleOptionalComponent,
             InstallationSessionCommand.BeginPipeline,
             InstallationSessionCommand.EnterMaintenance,
+            InstallationSessionCommand.RestartFromCheckpoint,
             -> Unit
 
             is InstallationSessionCommand.MaintenanceAction -> when {
@@ -176,6 +185,15 @@ class InstallerRuntime(
         val current = session.currentSnapshot()
         return when {
             current.state == InstallationSessionState.IDLE -> dispatch(InstallationSessionCommand.StartDiscovery)
+            current.state == InstallationSessionState.PAUSED &&
+                current.checkpoint != null &&
+                current.failure?.reasonCode != "cancelled" -> {
+                dispatch(InstallationSessionCommand.ContinueInstallation)
+            }
+            current.state in INSTALL_RECONCILE_STATES && activeConnection == null -> {
+                reconcile(current)
+                session.currentSnapshot()
+            }
             current.state in CONNECTION_HELD_STATES &&
                 current.device?.connectionStatus == DeviceConnectionStatus.CONFIRMED &&
                 activeConnection != null -> {
@@ -196,17 +214,61 @@ class InstallerRuntime(
         session.close()
     }
 
+    @Synchronized
     private fun reconcile(snapshot: InstallationSessionSnapshot) {
         when (snapshot.state) {
             InstallationSessionState.DISCOVERING -> launchDiscovery(snapshot)
-            InstallationSessionState.CONNECTING -> Unit
+            InstallationSessionState.CONNECTING -> {
+                val device = snapshot.device
+                if (device != null && device.connectionStatus == DeviceConnectionStatus.CONNECTING) {
+                    val candidate = discoveryAdapter?.confirmedDevice(device.id)
+                    if (candidate != null) launchConnection(snapshot, candidate)
+                }
+            }
             InstallationSessionState.CONNECTED -> {
-                if (snapshot.artifactManifests.isEmpty()) launchCatalog(snapshot)
+                if (activeConnection == null && snapshot.checkpoint != null) {
+                    beginAutomaticInstallReconnect(snapshot)
+                } else if (snapshot.artifactManifests.isEmpty()) {
+                    launchCatalog(snapshot)
+                }
             }
 
             InstallationSessionState.SELECTION_CONFIRMED -> beginArtifactPreparation(snapshot)
-            InstallationSessionState.RESOLVING_SOURCE -> launchArtifactPreparation(snapshot)
+            InstallationSessionState.RESOLVING_SOURCE,
+            InstallationSessionState.DOWNLOADING_ARCHIVE,
+            InstallationSessionState.VERIFYING_ARCHIVE,
+            InstallationSessionState.EXTRACTING_APK,
+            InstallationSessionState.VERIFYING_ARTIFACTS,
+            -> launchArtifactPreparation(snapshot)
+
+            InstallationSessionState.INSTALLING,
+            InstallationSessionState.AUTHORIZING,
+            InstallationSessionState.VERIFYING_DEVICE,
+            -> restartInstallationFromCheckpoint(snapshot)
             else -> Unit
+        }
+    }
+
+    private fun restartInstallationFromCheckpoint(snapshot: InstallationSessionSnapshot) {
+        if (activeConnection == null) {
+            beginAutomaticInstallReconnect(snapshot)
+            return
+        }
+        // A write may have completed immediately before the lease disappeared.
+        // Re-running the verified pipeline is idempotent and restores all three
+        // structured proofs before the session can report success.
+        val restored = session.dispatch(InstallationSessionCommand.RestartFromCheckpoint)
+        if (restored.state == InstallationSessionState.SELECTION_CONFIRMED) {
+            beginArtifactPreparation(restored)
+        }
+    }
+
+    private fun beginAutomaticInstallReconnect(snapshot: InstallationSessionSnapshot) {
+        if (snapshot.checkpoint == null) return
+        val reconnecting = session.dispatch(InstallationSessionCommand.Reconnect)
+        if (reconnecting.state == InstallationSessionState.DISCOVERING) {
+            cancelDiscovery()
+            launchDiscovery(reconnecting)
         }
     }
 
@@ -230,11 +292,57 @@ class InstallerRuntime(
         discoveryJob = scope.launch {
             try {
                 adapter.discover()
+                autoSelectReconnectTarget(snapshot.sessionId)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
                 port.emit(InstallationSessionEvent.DiscoveryFinished(0, 0, "discovery_failed"))
             }
+        }
+    }
+
+    /**
+     * Adapter ports update the session directly, so this observer owns the
+     * one-shot recovery trigger for a connection loss. It never polls ADB and
+     * deliberately ignores non-connection failures to avoid retry loops.
+     */
+    @Synchronized
+    private fun reconcileDisconnectedInstallation(snapshot: InstallationSessionSnapshot) {
+        if (
+            closed ||
+            snapshot.state != InstallationSessionState.PAUSED ||
+            snapshot.checkpoint == null ||
+            snapshot.failure?.category != FailureCategory.CONNECTION ||
+            snapshot.failure?.reasonCode !in AUTO_RECONNECT_FAILURES ||
+            automaticReconnectSessionId == snapshot.sessionId
+        ) {
+            return
+        }
+        automaticReconnectSessionId = snapshot.sessionId
+        dispatch(InstallationSessionCommand.Reconnect)
+    }
+
+    /**
+     * Discovery adapters publish directly to the session event port. Once the
+     * bounded scan returns, the runtime performs the one automatic selection
+     * needed by a reconnect; ordinary discovery still waits for user choice.
+     */
+    @Synchronized
+    private fun autoSelectReconnectTarget(expectedSessionId: Long) {
+        val current = session.currentSnapshot()
+        if (
+            current.sessionId != expectedSessionId ||
+            current.state != InstallationSessionState.DISCOVERING ||
+            (!current.installationReconnectPending && !current.maintenanceReconnectPending)
+        ) {
+            return
+        }
+        val targetId = current.device?.id ?: return
+        if (current.discoveredDevices.any {
+                it.id == targetId && it.connectionStatus == DeviceConnectionStatus.CONFIRMED
+            }
+        ) {
+            dispatch(InstallationSessionCommand.SelectDevice(targetId))
         }
     }
 
@@ -261,8 +369,7 @@ class InstallerRuntime(
                 if (
                     confirmedSnapshot.sessionId != snapshot.sessionId ||
                     (
-                        confirmedSnapshot.state != InstallationSessionState.CONNECTED &&
-                            confirmedSnapshot.state != InstallationSessionState.MAINTENANCE
+                    confirmedSnapshot.state !in CONNECTION_HELD_STATES
                         ) ||
                     confirmedSnapshot.device?.id != device.identity.stableId
                 ) {
@@ -275,6 +382,7 @@ class InstallerRuntime(
                     launchCatalog(confirmedSnapshot)
                 } else {
                     scheduleConnectionHealthCheck(confirmedSnapshot)
+                    reconcile(confirmedSnapshot)
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -488,6 +596,26 @@ class InstallerRuntime(
             InstallationSessionState.SUCCEEDED,
             InstallationSessionState.PAUSED,
             InstallationSessionState.MAINTENANCE,
+        )
+        val INSTALL_RECONCILE_STATES = setOf(
+            // CONNECTED also carries a checkpoint; losing the lease here must
+            // restore the selection/catalog boundary instead of falling back
+            // to the initial connection page.
+            InstallationSessionState.CONNECTED,
+            InstallationSessionState.SELECTION_CONFIRMED,
+            InstallationSessionState.RESOLVING_SOURCE,
+            InstallationSessionState.DOWNLOADING_ARCHIVE,
+            InstallationSessionState.VERIFYING_ARCHIVE,
+            InstallationSessionState.EXTRACTING_APK,
+            InstallationSessionState.VERIFYING_ARTIFACTS,
+            InstallationSessionState.INSTALLING,
+            InstallationSessionState.AUTHORIZING,
+            InstallationSessionState.VERIFYING_DEVICE,
+        )
+        val AUTO_RECONNECT_FAILURES = setOf(
+            "device_disconnected",
+            "adb_connection_lost",
+            "adb_connection_check_failed",
         )
     }
 }

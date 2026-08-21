@@ -19,6 +19,8 @@ import com.tcrrry.helper.domain.artifact.ArtifactFailurePhase
 import com.tcrrry.helper.domain.artifact.ArtifactSourceKind
 import com.tcrrry.helper.domain.artifact.ReleaseSourcePolicy
 import com.tcrrry.helper.domain.artifact.ResolvedDownloadRequest
+import org.json.JSONObject
+import org.json.JSONTokener
 import java.net.URI
 
 /**
@@ -29,7 +31,7 @@ import java.net.URI
 class AndroidLanzouWebViewHost(
     context: Context,
     private val sourcePolicy: ReleaseSourcePolicy = ReleaseSourcePolicy(),
-) : LanzouWebViewHost {
+) : LanzouWebViewHost, LanzouFolderWebViewHost {
     private val applicationContext = context.applicationContext
     private val mainHandler = Handler(Looper.getMainLooper())
     private var webView: WebView? = null
@@ -38,6 +40,10 @@ class AndroidLanzouWebViewHost(
     private var currentPageUrl: String? = null
     private var downloadCallback: ((ResolvedDownloadRequest) -> Unit)? = null
     private var failureCallback: ((ArtifactFailure) -> Unit)? = null
+    private var folderEntriesCallback: ((List<LanzouFolderEntry>) -> Unit)? = null
+    private var folderFailureCallback: ((ArtifactFailure) -> Unit)? = null
+    private var operation: Operation = Operation.NONE
+    private var folderPassword: String? = null
     private var triggerAttempts = 0
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -51,29 +57,37 @@ class AndroidLanzouWebViewHost(
             if (destroyed) return@post
             downloadCallback = onDownload
             failureCallback = onFailure
+            folderEntriesCallback = null
+            folderFailureCallback = null
+            folderPassword = null
+            operation = Operation.DOWNLOAD
             currentPageUrl = shareUrl
             triggerAttempts = 0
-            val view = WebView(applicationContext)
-            webView = view
-            view.visibility = View.GONE
-            view.alpha = 0f
-            view.isClickable = false
-            view.isFocusable = false
-            view.isFocusableInTouchMode = false
-            view.isLongClickable = false
-            view.clearFocus()
-            view.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
-            view.setOnTouchListener { _, _ -> true }
-            view.setBackgroundColor(Color.TRANSPARENT)
-            view.settings.apply {
-                // Keep the Android System WebView default mobile UA untouched.
-                javaScriptEnabled = true
-                domStorageEnabled = true
-                cacheMode = WebSettings.LOAD_NO_CACHE
-            }
-            view.webViewClient = webClient()
-            view.setDownloadListener(downloadListener())
+            val view = createWebView()
             view.loadUrl(shareUrl)
+        }
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    override fun startFolder(
+        folderUrl: String,
+        password: String,
+        onEntries: (List<LanzouFolderEntry>) -> Unit,
+        onFailure: (ArtifactFailure) -> Unit,
+    ) {
+        Log.d(TAG, "folder_start")
+        mainHandler.post {
+            if (destroyed) return@post
+            downloadCallback = null
+            failureCallback = null
+            folderEntriesCallback = onEntries
+            folderFailureCallback = onFailure
+            folderPassword = password
+            operation = Operation.FOLDER
+            currentPageUrl = folderUrl
+            triggerAttempts = 0
+            val view = createWebView()
+            view.loadUrl(folderUrl)
         }
     }
 
@@ -167,8 +181,37 @@ class AndroidLanzouWebViewHost(
                 reportFailure("lanzou_redirect_forbidden", retryable = false)
                 return
             }
-            triggerPageAction(view)
+            if (operation == Operation.FOLDER) {
+                triggerFolderPageAction(view)
+            } else {
+                triggerPageAction(view)
+            }
         }
+    }
+
+    @SuppressLint("SetJavaScriptEnabled")
+    private fun createWebView(): WebView {
+        val view = WebView(applicationContext)
+        webView = view
+        view.visibility = View.GONE
+        view.alpha = 0f
+        view.isClickable = false
+        view.isFocusable = false
+        view.isFocusableInTouchMode = false
+        view.isLongClickable = false
+        view.clearFocus()
+        view.importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO_HIDE_DESCENDANTS
+        view.setOnTouchListener { _, _ -> true }
+        view.setBackgroundColor(Color.TRANSPARENT)
+        view.settings.apply {
+            // Keep the Android System WebView default mobile UA untouched.
+            javaScriptEnabled = true
+            domStorageEnabled = true
+            cacheMode = WebSettings.LOAD_NO_CACHE
+        }
+        view.webViewClient = webClient()
+        view.setDownloadListener(downloadListener())
+        return view
     }
 
     private fun triggerPageAction(view: WebView) {
@@ -207,6 +250,91 @@ class AndroidLanzouWebViewHost(
             if (!destroyed && result?.contains("download") != true) {
                 mainHandler.postDelayed({ triggerPageAction(view) }, TRIGGER_RETRY_DELAY_MILLIS)
             }
+        }
+    }
+
+    private fun triggerFolderPageAction(view: WebView) {
+        if (destroyed) return
+        if (triggerAttempts++ >= MAX_TRIGGER_ATTEMPTS) {
+            reportFolderFailure("lanzou_folder_parse_timeout", retryable = true)
+            return
+        }
+        val passwordLiteral = JSONObject.quote(folderPassword.orEmpty())
+        view.evaluateJavascript(
+            """
+            (function(){
+              var links=[].slice.call(document.querySelectorAll('#infos .mbx a.mlink')).map(function(a){
+                var href=a.getAttribute('href') || '';
+                var clone=a.cloneNode(true);
+                var meta=clone.querySelector('.mmr');
+                if(meta){ meta.remove(); }
+                return {href:href,name:(clone.textContent || '').trim()};
+              }).filter(function(item){ return item.href && item.name; });
+              if(links.length){ return JSON.stringify({kind:'entries',entries:links}); }
+              var info=(document.getElementById('infos') || {}).innerText || '';
+              if(info.indexOf('没有文件') >= 0 || info.indexOf('获取失败') >= 0){
+                return JSON.stringify({kind:'failure'});
+              }
+              var pwd=document.getElementById('pwd');
+              var submit=document.getElementById('sub');
+              if(pwd && submit && !window.__03helperFolderSubmitted){
+                pwd.value=$passwordLiteral;
+                window.__03helperFolderSubmitted=true;
+                submit.click();
+                return 'submitted';
+              }
+              return 'wait';
+            })()
+            """.trimIndent(),
+        ) { rawResult ->
+            if (destroyed) return@evaluateJavascript
+            when (val parsed = parseFolderResult(rawResult)) {
+                is FolderPageResult.Entries -> {
+                    if (parsed.entries.isEmpty()) {
+                        mainHandler.postDelayed({ triggerFolderPageAction(view) }, TRIGGER_RETRY_DELAY_MILLIS)
+                    } else {
+                        folderEntriesCallback?.invoke(parsed.entries)
+                        destroyNow()
+                    }
+                }
+
+                FolderPageResult.Failure -> reportFolderFailure("lanzou_folder_empty", retryable = false)
+                FolderPageResult.Wait -> mainHandler.postDelayed(
+                    { triggerFolderPageAction(view) },
+                    TRIGGER_RETRY_DELAY_MILLIS,
+                )
+            }
+        }
+    }
+
+    private fun parseFolderResult(rawResult: String?): FolderPageResult {
+        if (rawResult.isNullOrBlank()) return FolderPageResult.Wait
+        val value = runCatching { JSONTokener(rawResult).nextValue() }.getOrNull()
+        val json = (value as? String)?.let {
+            runCatching { JSONObject(it) }.getOrNull()
+        } ?: (value as? JSONObject)
+        if (json == null) return FolderPageResult.Wait
+        return when (json.optString("kind")) {
+            "failure" -> FolderPageResult.Failure
+            "entries" -> {
+                val entriesJson = json.optJSONArray("entries") ?: return FolderPageResult.Wait
+                val entries = buildList {
+                    for (index in 0 until entriesJson.length()) {
+                        val item = entriesJson.optJSONObject(index) ?: continue
+                        val href = item.optString("href").trim()
+                        val name = item.optString("name").trim()
+                        val id = runCatching {
+                            URI(href).path.orEmpty().trim('/').substringAfterLast('/')
+                        }.getOrDefault("")
+                        if (id.matches(FOLDER_ENTRY_ID_PATTERN) && name.isNotBlank()) {
+                            add(LanzouFolderEntry(id = id, name = name))
+                        }
+                    }
+                }
+                FolderPageResult.Entries(entries)
+            }
+
+            else -> FolderPageResult.Wait
         }
     }
 
@@ -263,11 +391,29 @@ class AndroidLanzouWebViewHost(
         destroyNow()
     }
 
+    private fun reportFolderFailure(reasonCode: String, retryable: Boolean) {
+        if (destroyed) return
+        Log.w(TAG, "folder_failure reason=$reasonCode retryable=$retryable")
+        folderFailureCallback?.invoke(
+            ArtifactFailure(
+                phase = ArtifactFailurePhase.SOURCE_RESOLUTION,
+                sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                reasonCode = reasonCode,
+                retryable = retryable,
+            ),
+        )
+        destroyNow()
+    }
+
     private fun destroyNow() {
         if (destroyed) return
         destroyed = true
         downloadCallback = null
         failureCallback = null
+        folderEntriesCallback = null
+        folderFailureCallback = null
+        folderPassword = null
+        operation = Operation.NONE
         webView?.let { view ->
             view.stopLoading()
             view.setDownloadListener(null)
@@ -294,5 +440,18 @@ class AndroidLanzouWebViewHost(
         const val TAG = "03helper.Lanzou"
         const val MAX_TRIGGER_ATTEMPTS = 48
         const val TRIGGER_RETRY_DELAY_MILLIS = 200L
+        val FOLDER_ENTRY_ID_PATTERN = Regex("^i[a-zA-Z0-9]+$")
+    }
+
+    private enum class Operation {
+        NONE,
+        DOWNLOAD,
+        FOLDER,
+    }
+
+    private sealed interface FolderPageResult {
+        data class Entries(val entries: List<LanzouFolderEntry>) : FolderPageResult
+        data object Failure : FolderPageResult
+        data object Wait : FolderPageResult
     }
 }

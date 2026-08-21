@@ -3,6 +3,7 @@ package com.tcrrry.helper.application
 import android.content.Context
 import com.tcrrry.helper.application.artifact.ArtifactCatalogSessionAdapter
 import com.tcrrry.helper.application.artifact.ArtifactPreparationCoordinator
+import com.tcrrry.helper.application.artifact.InstallerCatalogLoader
 import com.tcrrry.helper.application.device.DeviceConnectionSessionAdapter
 import com.tcrrry.helper.application.device.DeviceDiscoverySessionAdapter
 import com.tcrrry.helper.application.device.DeviceInstallationCoordinator
@@ -13,15 +14,18 @@ import com.tcrrry.helper.data.artifact.AndroidApkMetadataReader
 import com.tcrrry.helper.data.artifact.ArchiveIdentityVerifier
 import com.tcrrry.helper.data.artifact.ArtifactArchiveExtractor
 import com.tcrrry.helper.data.artifact.ArtifactIdentityVerifier
-import com.tcrrry.helper.data.catalog.CloudReleaseCatalogAdapter
+import com.tcrrry.helper.data.catalog.FolderArtifactCatalogAdapter
 import com.tcrrry.helper.data.device.DadbDeviceTransport
 import com.tcrrry.helper.data.device.DadbDeviceConnectionFactory
 import com.tcrrry.helper.data.device.JdkLocalIpv4SubnetProvider
 import com.tcrrry.helper.data.device.LanAdbDeviceDiscovery
 import com.tcrrry.helper.data.download.ArtifactCache
 import com.tcrrry.helper.data.download.ArtifactDownloader
+import com.tcrrry.helper.data.download.DynamicArtifactDownloader
 import com.tcrrry.helper.data.download.UrlConnectionArtifactTransport
 import com.tcrrry.helper.data.web.AndroidLanzouWebViewHost
+import com.tcrrry.helper.data.web.LanzouFolderSourceAdapter
+import com.tcrrry.helper.data.web.LanzouFolderWebViewHostFactory
 import com.tcrrry.helper.data.web.LanzouWebSourceAdapter
 import com.tcrrry.helper.data.web.LanzouWebViewHostFactory
 import com.tcrrry.helper.domain.artifact.ReleaseSourcePolicy
@@ -55,7 +59,31 @@ object ProductionInstallerRuntimeFactory {
             installedApkCacheDirectory = File(applicationContext.cacheDir, INSTALLED_APK_VERIFICATION_DIRECTORY),
             installedApkMetadataReader = apkMetadataReader,
         )
-        val catalogAdapter = catalogRuntime.createCatalogAdapter(applicationContext)
+        val distributionConfigAdapter = catalogRuntime.createDistributionConfigAdapter(applicationContext)
+        val folderCatalogAdapter = FolderArtifactCatalogAdapter(
+            configAdapter = distributionConfigAdapter,
+            folderSourceAdapter = LanzouFolderSourceAdapter(
+                hostFactory = LanzouFolderWebViewHostFactory {
+                    AndroidLanzouWebViewHost(applicationContext, sourcePolicy)
+                },
+                sourcePolicy = sourcePolicy,
+            ),
+            lanzouSourceAdapter = LanzouWebSourceAdapter(
+                hostFactory = LanzouWebViewHostFactory {
+                    AndroidLanzouWebViewHost(applicationContext, sourcePolicy)
+                },
+                sourcePolicy = sourcePolicy,
+            ),
+            downloader = DynamicArtifactDownloader(
+                transport = UrlConnectionArtifactTransport(sourcePolicy = sourcePolicy),
+                sourcePolicy = sourcePolicy,
+            ),
+            metadataReader = apkMetadataReader,
+            sourcePolicy = sourcePolicy,
+            artifactCache = artifactCache,
+            workingDirectory = File(applicationContext.cacheDir, DISTRIBUTION_CATALOG_DIRECTORY),
+        )
+        val catalogLoader = InstallerCatalogLoader { folderCatalogAdapter.load() }
 
         return InstallerRuntime(
             session = InstallationSession(
@@ -76,7 +104,7 @@ object ProductionInstallerRuntimeFactory {
                 DeviceConnectionSessionAdapter(installationDeviceConnectionFactory, eventPort)
             },
             loadCatalog = { eventPort ->
-                ArtifactCatalogSessionAdapter(catalogAdapter, eventPort).load()
+                ArtifactCatalogSessionAdapter(catalogLoader, eventPort).load()
             },
             prepareArtifactsWithResult = { manifests, eventPort ->
                 ArtifactPreparationCoordinator(
@@ -110,7 +138,7 @@ object ProductionInstallerRuntimeFactory {
                 diagnosticStore = MaintenanceDiagnosticStore(
                     File(applicationContext.cacheDir, DIAGNOSTIC_CACHE_DIRECTORY),
                 ),
-                loadCatalog = { catalogAdapter.load() },
+                loadCatalog = { catalogLoader.load() },
             ),
             persistMaintenanceSnapshot = { snapshot ->
                 withContext(Dispatchers.IO) { maintenanceSessionStore.save(snapshot) }
@@ -121,6 +149,7 @@ object ProductionInstallerRuntimeFactory {
 
     private const val ARTIFACT_CACHE_DIRECTORY = "install-artifacts"
     private const val INSTALLED_APK_VERIFICATION_DIRECTORY = "install-artifacts/installed-verification"
+    private const val DISTRIBUTION_CATALOG_DIRECTORY = "distribution-catalog"
     private const val DIAGNOSTIC_CACHE_DIRECTORY = "maintenance-diagnostics"
     private const val MAINTENANCE_SESSION_FILE = "maintenance-session.json"
     private const val DISCOVERY_READ_TIMEOUT_MILLIS = 900

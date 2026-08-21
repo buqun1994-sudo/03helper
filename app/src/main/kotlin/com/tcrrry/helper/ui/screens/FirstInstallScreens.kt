@@ -43,6 +43,7 @@ import com.tcrrry.helper.domain.session.DeviceConnectionStatus
 import com.tcrrry.helper.domain.session.InstallPhase
 import com.tcrrry.helper.domain.session.ResultKind
 import com.tcrrry.helper.ui.components.AnimatedEntry
+import com.tcrrry.helper.ui.components.ComponentLogo
 import com.tcrrry.helper.ui.components.InstallStepIndicator
 import com.tcrrry.helper.ui.components.PressableSurface
 import com.tcrrry.helper.ui.components.PrimaryActionButton
@@ -381,9 +382,10 @@ private fun SelectionUnavailable(
 @Composable
 private fun ComponentChoiceRow(component: ComponentRow, onToggle: (Boolean) -> Unit) {
     val selected = component.required || component.selected
+    val supported = component.compatibilityState != com.tcrrry.helper.domain.session.ComponentCompatibility.UNSUPPORTED
     PressableSurface(
-        onClick = { if (!component.required) onToggle(!selected) },
-        enabled = !component.required,
+        onClick = { if (!component.required && supported) onToggle(!selected) },
+        enabled = !component.required && supported,
         minHeight = InstallerDimensions.ComponentItemMinHeight,
         modifier = Modifier
             .testTag("component_${component.id}")
@@ -394,6 +396,11 @@ private fun ComponentChoiceRow(component: ComponentRow, onToggle: (Boolean) -> U
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            ComponentLogo(
+                iconKey = component.iconKey,
+                contentDescription = component.displayName,
+                size = 40.dp,
+            )
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(text = component.displayName, style = MaterialTheme.typography.bodyLarge, color = InstallerColors.White)
@@ -410,17 +417,30 @@ private fun ComponentChoiceRow(component: ComponentRow, onToggle: (Boolean) -> U
                     }
                 }
                 Text(
-                    text = listOfNotNull(component.versionLabel, component.sizeLabel, component.compatibilityLabel)
-                        .joinToString(" · ")
-                        .ifBlank { stringResource(R.string.unknown_value) },
+                    text = when (component.compatibilityState) {
+                        com.tcrrry.helper.domain.session.ComponentCompatibility.UNSUPPORTED ->
+                            stringResource(R.string.component_unsupported)
+                        com.tcrrry.helper.domain.session.ComponentCompatibility.UNKNOWN ->
+                            listOfNotNull(component.versionLabel, component.sizeLabel)
+                                .joinToString(" · ")
+                                .ifBlank { stringResource(R.string.component_compatibility_unknown) }
+                        com.tcrrry.helper.domain.session.ComponentCompatibility.SUPPORTED ->
+                            listOfNotNull(component.versionLabel, component.sizeLabel)
+                                .joinToString(" · ")
+                                .ifBlank { stringResource(R.string.unknown_value) }
+                    },
                     style = MaterialTheme.typography.bodySmall,
-                    color = InstallerColors.AuxiliaryWhite,
+                    color = if (component.compatibilityState == com.tcrrry.helper.domain.session.ComponentCompatibility.UNSUPPORTED) {
+                        InstallerColors.Warning
+                    } else {
+                        InstallerColors.AuxiliaryWhite
+                    },
                 )
             }
             Checkbox(
                 checked = selected,
-                onCheckedChange = if (component.required) null else onToggle,
-                enabled = !component.required,
+                onCheckedChange = if (component.required || !supported) null else onToggle,
+                enabled = !component.required && supported,
                 colors = CheckboxDefaults.colors(
                     checkedColor = InstallerColors.White,
                     uncheckedColor = InstallerColors.WhiteBorder,

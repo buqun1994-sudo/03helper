@@ -132,7 +132,21 @@ private fun DeviceStatusHeader(
                 Text(text = stringResource(R.string.maintenance_disconnected), style = MaterialTheme.typography.bodySmall, color = InstallerColors.AuxiliaryWhite)
             }
         }
-        if (state.connected) {
+        if (state.reconnecting) {
+            PressableSurface(
+                onClick = {},
+                enabled = false,
+                modifier = Modifier.width(112.dp),
+                minHeight = 48.dp,
+                containerColor = InstallerColors.PageBlue,
+                pressedColor = InstallerColors.PageBlue,
+                borderColor = InstallerColors.White,
+            ) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                    Text(text = stringResource(R.string.maintenance_reconnecting), style = MaterialTheme.typography.bodySmall, color = InstallerColors.White)
+                }
+            }
+        } else if (state.connected) {
             PressableSurface(
                 onClick = onDisconnect,
                 enabled = !busy,

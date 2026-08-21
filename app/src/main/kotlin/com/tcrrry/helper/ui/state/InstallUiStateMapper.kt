@@ -1,6 +1,7 @@
 package com.tcrrry.helper.ui.state
 
 import com.tcrrry.helper.domain.session.ComponentDescriptor
+import com.tcrrry.helper.domain.session.ComponentCompatibility
 import com.tcrrry.helper.domain.session.DeviceConnectionStatus
 import com.tcrrry.helper.domain.session.FailureCategory
 import com.tcrrry.helper.domain.session.InstallPhase
@@ -9,7 +10,22 @@ import com.tcrrry.helper.domain.session.InstallationSessionState
 import com.tcrrry.helper.domain.session.ResultKind
 
 object InstallUiStateMapper {
-    fun map(snapshot: InstallationSessionSnapshot): InstallUiState = when (snapshot.state) {
+    fun map(snapshot: InstallationSessionSnapshot): InstallUiState {
+        if (
+            snapshot.maintenanceReconnectPending &&
+            snapshot.state in setOf(InstallationSessionState.DISCOVERING, InstallationSessionState.CONNECTING)
+        ) {
+            return maintenanceState(snapshot, reconnecting = true)
+        }
+        if (
+            snapshot.installationReconnectPending &&
+            snapshot.state in setOf(InstallationSessionState.DISCOVERING, InstallationSessionState.CONNECTING)
+        ) {
+            return installingState(
+                snapshot.copy(state = snapshot.checkpoint?.state ?: InstallationSessionState.RESOLVING_SOURCE),
+            )
+        }
+        return when (snapshot.state) {
         InstallationSessionState.IDLE -> connectionState(ConnectionVariant.NOT_FOUND, snapshot)
         InstallationSessionState.DISCOVERING -> connectionState(
             if (snapshot.discoveredDevices.isEmpty()) ConnectionVariant.SEARCHING else ConnectionVariant.FOUND,
@@ -38,9 +54,17 @@ object InstallUiStateMapper {
         } else {
             resultState(snapshot.failure.toResultKind(), snapshot)
         }
-        InstallationSessionState.MAINTENANCE -> InstallUiState.Maintenance(
+        InstallationSessionState.MAINTENANCE -> maintenanceState(snapshot)
+        }
+    }
+
+    private fun maintenanceState(
+        snapshot: InstallationSessionSnapshot,
+        reconnecting: Boolean = false,
+    ): InstallUiState.Maintenance = InstallUiState.Maintenance(
             deviceName = snapshot.device?.displayName,
             connected = snapshot.device?.connectionStatus == DeviceConnectionStatus.CONFIRMED,
+            reconnecting = reconnecting,
             feedback = snapshot.maintenance.lastAction?.let { action ->
                 MaintenanceFeedback(
                     actionId = action.actionId,
@@ -59,7 +83,6 @@ object InstallUiStateMapper {
                 )
             },
         )
-    }
 
     private fun connectionState(
         variant: ConnectionVariant,
@@ -100,10 +123,11 @@ object InstallUiStateMapper {
             summarySizeLabel = sizeLabel,
             canStart = snapshot.device?.connectionStatus == DeviceConnectionStatus.CONFIRMED &&
                 selectedRows.isNotEmpty() &&
-                selectedRows.all {
-                    !it.versionLabel.isNullOrBlank() &&
-                        !it.sizeLabel.isNullOrBlank() &&
-                        !it.compatibilityLabel.isNullOrBlank()
+            selectedRows.all {
+                !it.versionLabel.isNullOrBlank() &&
+                    !it.sizeLabel.isNullOrBlank() &&
+                    !it.compatibilityLabel.isNullOrBlank() &&
+                    it.compatibilityState == ComponentCompatibility.SUPPORTED
                 },
         )
     }
@@ -168,6 +192,8 @@ object InstallUiStateMapper {
         versionLabel = versionLabel,
         sizeLabel = sizeLabel,
         compatibilityLabel = compatibilityLabel,
+        compatibilityState = compatibilityState,
+        iconKey = iconKey,
     )
 
     private fun com.tcrrry.helper.domain.session.SessionFailure?.toResultKind(): ResultKind = when (this?.category) {

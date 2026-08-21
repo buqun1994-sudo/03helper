@@ -33,6 +33,12 @@ interface AdbCommandGateway {
 interface MaintenanceCommandGateway {
     suspend fun repairAuthorization(manifests: List<ArtifactManifest>): MaintenanceDeviceResult
 
+    /** Optional declaration receipt from the verified install; implementations may use it to avoid re-pulling APKs. */
+    suspend fun repairAuthorization(
+        manifests: List<ArtifactManifest>,
+        declarationsByComponent: Map<String, ApkDeclarationMetadata>,
+    ): MaintenanceDeviceResult = repairAuthorization(manifests)
+
     suspend fun inspectManagedApplications(): ManagedApplicationsResult
 
     suspend fun launchManagedComponent(componentId: String): MaintenanceDeviceResult
@@ -86,6 +92,7 @@ data class InstalledArtifactEvidence(
     val apkSizeBytes: Long,
     val apkSha256: String,
     val certificateSha256: String,
+    val declarations: ApkDeclarationMetadata? = null,
 )
 
 sealed interface DeviceAuthorizationResult {

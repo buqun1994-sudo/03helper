@@ -8,6 +8,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.painterResource
+import androidx.compose.foundation.Image
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.foundation.layout.size
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -41,6 +43,47 @@ fun InstallerIcon(
             modifier = sizedModifier,
         )
     }
+}
+
+/** Renders a product-owned component logo with a Lucide fallback for legacy fixtures. */
+@Composable
+fun ComponentLogo(
+    iconKey: String,
+    contentDescription: String?,
+    modifier: Modifier = Modifier,
+    size: Dp = 40.dp,
+) {
+    val drawableId = remember(iconKey) { componentLogoDrawable(iconKey) }
+    if (drawableId != 0) {
+        Image(
+            painter = painterResource(drawableId),
+            contentDescription = contentDescription,
+            contentScale = ContentScale.Fit,
+            modifier = modifier.size(size),
+        )
+    } else {
+        InstallerIcon(
+            name = componentFallbackIcon(iconKey),
+            contentDescription = contentDescription,
+            modifier = modifier,
+            tint = Color.White,
+            size = size,
+        )
+    }
+}
+
+private fun componentLogoDrawable(iconKey: String): Int = when (iconKey) {
+    "desktop" -> com.tcrrry.helper.R.drawable.desktop_logo
+    "lyrics" -> com.tcrrry.helper.R.drawable.lyrics_logo
+    "file-manager" -> com.tcrrry.helper.R.drawable.file_manager_logo
+    else -> 0
+}
+
+private fun componentFallbackIcon(iconKey: String): String = when (iconKey) {
+    "desktop" -> "panels_top_left"
+    "lyrics" -> "music_2"
+    "file-manager" -> "folder_plus"
+    else -> "package_x"
 }
 
 private fun lucideDrawable(name: String): Int = when (name) {

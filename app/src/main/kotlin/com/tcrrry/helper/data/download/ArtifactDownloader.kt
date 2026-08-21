@@ -1,12 +1,14 @@
 package com.tcrrry.helper.data.download
 
 import android.util.Log
+import com.tcrrry.helper.data.artifact.sha256
 import com.tcrrry.helper.domain.artifact.ArtifactFailure
 import com.tcrrry.helper.domain.artifact.ArtifactFailurePhase
 import com.tcrrry.helper.domain.artifact.ArtifactManifest
 import com.tcrrry.helper.domain.artifact.ResolvedDownloadRequest
 import com.tcrrry.helper.domain.artifact.ReleaseSourcePolicy
 import java.io.Closeable
+import java.io.File
 import java.io.FileOutputStream
 import java.io.InputStream
 import kotlinx.coroutines.CancellationException
@@ -169,5 +171,91 @@ class ArtifactDownloader(
 
     private companion object {
         const val TAG = "03helper.Download"
+    }
+}
+
+data class DynamicArchiveDownload(
+    val file: File,
+    val sizeBytes: Long,
+    val sha256: String,
+)
+
+sealed interface DynamicArchiveDownloadResult {
+    data class Completed(val archive: DynamicArchiveDownload) : DynamicArchiveDownloadResult
+    data class Failed(val reasonCode: String, val retryable: Boolean) : DynamicArchiveDownloadResult
+}
+
+/** Downloads an archive whose identity is learned from the APK inside the archive. */
+class DynamicArtifactDownloader(
+    private val transport: ArtifactTransport,
+    private val sourcePolicy: ReleaseSourcePolicy = ReleaseSourcePolicy(),
+    private val maxBytes: Long = 1L shl 30,
+) {
+    suspend fun download(
+        request: ResolvedDownloadRequest,
+        destination: File,
+    ): DynamicArchiveDownloadResult = withContext(Dispatchers.IO) {
+        val validation = sourcePolicy.validateResolvedRequest(request)
+        if (validation is com.tcrrry.helper.domain.artifact.SourcePolicyValidation.Rejected) {
+            return@withContext DynamicArchiveDownloadResult.Failed(validation.reasonCode, retryable = false)
+        }
+        destination.parentFile?.let { parent ->
+            if (!parent.mkdirs() && !parent.isDirectory) {
+                return@withContext DynamicArchiveDownloadResult.Failed("dynamic_archive_cache_unavailable", retryable = true)
+            }
+        }
+        val part = destination.resolveSibling("${destination.name}.part")
+        part.delete()
+        var response: ArtifactTransportResponse? = null
+        try {
+            response = transport.open(request, 0L)
+            if (response.statusCode !in 200..299) {
+                return@withContext DynamicArchiveDownloadResult.Failed(
+                    "dynamic_archive_http_${response.statusCode}",
+                    retryable = response.statusCode >= 500,
+                )
+            }
+            val contentType = response.contentType?.lowercase().orEmpty()
+            if (contentType.startsWith("text/html") || contentType.startsWith("application/json")) {
+                return@withContext DynamicArchiveDownloadResult.Failed("dynamic_archive_non_binary", retryable = true)
+            }
+            response.contentLength?.let { length ->
+                if (length < 1L || length > maxBytes) {
+                    return@withContext DynamicArchiveDownloadResult.Failed("dynamic_archive_size_invalid", retryable = false)
+                }
+            }
+            var written = 0L
+            FileOutputStream(part).use { output ->
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                while (true) {
+                    currentCoroutineContext().ensureActive()
+                    val count = response.body.read(buffer)
+                    if (count < 0) break
+                    written += count
+                    if (written > maxBytes) {
+                        return@withContext DynamicArchiveDownloadResult.Failed("dynamic_archive_size_exceeds_limit", retryable = false)
+                    }
+                    output.write(buffer, 0, count)
+                }
+                output.fd.sync()
+            }
+            if (written <= 0L) {
+                return@withContext DynamicArchiveDownloadResult.Failed("dynamic_archive_empty", retryable = false)
+            }
+            part.renameTo(destination)
+            if (!destination.isFile || destination.length() != written) {
+                return@withContext DynamicArchiveDownloadResult.Failed("dynamic_archive_finalize_failed", retryable = true)
+            }
+            DynamicArchiveDownloadResult.Completed(
+                DynamicArchiveDownload(destination, written, sha256(destination)),
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            DynamicArchiveDownloadResult.Failed("dynamic_archive_io_failed", retryable = true)
+        } finally {
+            response?.close()
+            part.delete()
+        }
     }
 }

@@ -198,3 +198,13 @@ F2 Debug APK 已按用户授权安装到指定手机。该段记录的是 F2 交
 5. 自动化验证通过：`91` 项 JVM 单测、`:app:lintDebug`、`:app:assembleDebug`、`:app:assembleDebugAndroidTest`、`check-local-environment.mjs`、`check-project-docs.mjs`、`check-skills.mjs` 和 `git diff --check` 均通过。
 6. 使用显式测试手机完成主包和 AndroidTest 包保留数据覆盖安装；随后运行既有 `connectedDebugAndroidTest`，生产入口与 Debug 维护场景 `2/2` 通过。测试框架移除目标包后，已再次覆盖安装最新 Debug 主包并核对 `com.tcrrry.helper`、Debug、`0.1.0 (1)`、`INTERNET` 已授予以及 `MainActivity` 的 `MAIN/LAUNCHER` 入口。最终 Debug APK SHA-256 为 `9eb6a842b393220e081ed3eca11440b01956efa116f56802ba1fdf13bc48bb2f`，AndroidTest APK SHA-256 为 `f56066697ff7dd1a435b77c30e8559d61744f3c4f9704fa6f87f4a5e21cef3a1`。
 7. 本轮未提交、未推送、未发布，未清数据、卸载、降级或重启设备，也未对真实车机执行维护写入。真实目标车机的检查更新、重装、修复授权、应用状态、断线重连和冷启动人工主测仍待执行；卸载、清除数据、降级、重启和任意 shell 仍不在 V1 主链，正式 Cloud / Release 资料阻断保持不变。
+
+## 2026-08-21 根文件夹分发契约与安装恢复边界
+
+1. 用户确认采用单一蓝奏密码根文件夹作为当前版本真值：Cloud 只需后台配置根文件夹地址和密码，文件夹内固定放 `03desktop-debug.zip`、`03lyrics-debug.zip` 和 `fossify-file-manager-car-debug.zip`；人工替换 ZIP 后，客户端下一次检查更新重新枚举目录并从 APK 动态读取版本、大小和 SHA-256。
+2. 已将当前产品、架构、安全、计划和验证文档的现行口径切换为签名 `android-config` 控制面：HTTPS 接口返回 detached-signature envelope，密码只运行时驻留内存；未知、缺失、重复或额外文件、签名失败、过期或包身份不符时整次目录拒绝。此前每组件无密码分享页和 R2 / GitHub 自动备用仅保留为历史方案或未来受控扩展。
+3. 客户端动态目录主链已落地为 `CloudInstallerDistributionConfigAdapter` -> `LanzouFolderSourceAdapter` -> `FolderArtifactCatalogAdapter` -> 原有安装 / 维护会话；根目录只作为发现和版本控制面，短时 ZIP URL、Cookie、Referer 和密码不进入持久状态。
+4. 修正安装重连边界：`CONNECTED + checkpoint` 现在与其它可恢复安装阶段统一走安装重连，锁屏 / ADB 短暂断开后重新确认同一车机可恢复到原 `CONNECTED` 检查点，不再退回普通初始化发现或出现无响应的继续按钮。新增领域回归用例已通过。
+5. 本轮新增代码后的完整验证已完成：`testDebugUnitTest` 共 `96` 项通过，`compileDebugKotlin`、`compileReleaseKotlin`、`lintDebug`、`assembleDebug` 和 `assembleDebugAndroidTest` 均通过；`check-project-docs.mjs`、`check-skills.mjs`、`check-local-environment.mjs` 和 `git diff --check` 均通过。
+6. 已在显式测试手机 `SM-F946B` 上先安装主包和 AndroidTest 包并运行既有 `connectedDebugAndroidTest`，生产入口与 Debug 维护场景 `2/2` 通过；测试框架结束后再次覆盖安装最新 Debug 主包。最终包身份为 `com.tcrrry.helper`、Debug、`versionName=0.1.0`、`versionCode=1`，Launcher 为 `MainActivity`，APK SHA-256 为 `575511baf998b2dab7d0dce3d8f3c7fadcbde46e4d75b80281ac42fffa243f79`，系统返回 `Success`。
+7. 本轮未提交、未推送、未发布；未清数据、卸载、降级或重启设备，也未对真实车机执行维护写入。真实 Cloud staging 配置 / 根文件夹替换、切网与断线恢复的人工主测仍待执行；正式 Release 资料阻断保持不变。

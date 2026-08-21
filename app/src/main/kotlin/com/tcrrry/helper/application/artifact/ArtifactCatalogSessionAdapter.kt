@@ -1,15 +1,18 @@
 package com.tcrrry.helper.application.artifact
 
 import com.tcrrry.helper.data.catalog.CatalogLoadResult
-import com.tcrrry.helper.data.catalog.CloudReleaseCatalogAdapter
 import com.tcrrry.helper.domain.session.InstallationSessionEvent
 
+fun interface InstallerCatalogLoader {
+    suspend fun load(): CatalogLoadResult
+}
+
 class ArtifactCatalogSessionAdapter(
-    private val catalogAdapter: CloudReleaseCatalogAdapter,
+    private val catalogLoader: InstallerCatalogLoader,
     private val eventPort: ArtifactSessionEventPort,
 ) {
     suspend fun load(): CatalogLoadResult {
-        val result = catalogAdapter.load()
+        val result = catalogLoader.load()
         when (result) {
             is CatalogLoadResult.Success -> eventPort.emit(
                 InstallationSessionEvent.CatalogResolved(

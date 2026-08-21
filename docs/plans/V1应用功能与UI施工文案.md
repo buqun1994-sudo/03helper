@@ -185,9 +185,9 @@
 物理边界与入口：
 
 1. 先冻结 `ArtifactManifest`、`ResolvedDownloadRequest`、来源切换结果和结构化错误的最小 schema；清单只能声明签名发布物、哈希、包身份、版本和兼容范围，不能携带任意 shell、动态权限或运行时任意 URL。
-2. 按长期总纲的 owner 建立 `ReleaseSourcePolicy`、`CloudReleaseCatalogAdapter`、`LanzouWebSourceAdapter`、`ArtifactDownloader`、`ArchiveIdentityVerifier`、`ArtifactArchiveExtractor` 和 `ArtifactIdentityVerifier`；它们通过端口把结构化结果送入 `InstallationSession`，不直接操作 Compose 状态。
-3. 来源固定为“蓝奏云单组件 ZIP 分享页 -> Cloudflare R2 同字节 ZIP -> GitHub Releases 同字节 ZIP”；密码文件夹、三应用合并 ZIP、夸克和第三方直链转换器不进入自动会话。
-4. 隐藏 WebView 使用 Android 默认手机端标识，挂载在当前安装页面背后并由不透明进度层遮挡；不启动外部浏览器、不接收用户触摸 / 焦点、不暴露 JavaScript bridge。取得下载回调或失败后立即停止加载并销毁。
+2. 按长期总纲的 owner 建立 `ReleaseSourcePolicy`、`CloudInstallerDistributionConfigAdapter`、`FolderArtifactCatalogAdapter`、`LanzouFolderSourceAdapter`、`LanzouWebSourceAdapter`、`ArtifactDownloader`、`ArchiveIdentityVerifier`、`ArtifactArchiveExtractor` 和 `ArtifactIdentityVerifier`；它们通过端口把结构化结果送入 `InstallationSession`，不直接操作 Compose 状态。
+3. 当前来源固定为“签名配置 -> 蓝奏密码根文件夹 -> 三个 ZIP 单文件分享页”；根文件夹集合和 ZIP 内 APK 是版本唯一真值，R2 / GitHub 不参与当前版本判断，密码文件夹、三应用合并 ZIP 和第三方直链转换器不进入自动会话。
+4. 隐藏 WebView 使用 Android 默认手机端标识，挂载在当前安装页面背后并由不透明进度层遮挡；完成密码验证、目录枚举和下载回调后立即停止加载并销毁。不启动外部浏览器、不接收用户触摸 / 焦点、不暴露 JavaScript bridge。
 5. 下载器只写入应用私有缓存的 `.zip.part`；ZIP 大小与 SHA-256 通过后才允许受控解压。唯一 APK 的 entry 名称、大小、SHA-256、包名、版本和签名证书全部通过后，才向会话发送产物校验成功，并立即删除 ZIP。
 6. F2 实际文件边界固定为 `domain/artifact/`（清单、类型和策略）、`data/catalog/`（Cloud 验签与解析）、`data/web/`（隐藏 WebView）、`data/download/`（私有缓存与下载）、`data/artifact/`（ZIP / APK 校验）和 `application/artifact/`（事件编排）；事件只经 `InstallationSessionArtifactEventPort` 进入 F1 会话。
 7. `ArtifactsVerified` 只记录完整性成功并停在 `VERIFYING_ARTIFACTS`；F2 不发送 `InstallationStarted`、安装、授权或车机可用性事件。
@@ -195,8 +195,8 @@
 F2 验证门槛：
 
 1. 先用确定性 fixture 覆盖清单签名 / 字段缺失、来源切换、HTML 假响应、解析超时、断点 / 重试、ZIP 哈希不符、ZIP 结构异常、路径穿越、多个 APK、APK 哈希 / 包身份 / 证书不符和缓存清理；任何失败都必须 fail closed，并把结构化原因送入现有会话。
-2. 在真实 Android System WebView 和真实单组件 ZIP 证据具备前，不把模拟 User-Agent、桌面浏览器或 Debug fixture 记录为真实主源通过。
-3. F2 完成后，F1 的页面仍只消费 `InstallUiStateMapper`；下载与校验进度、失败原因和备用源切换不得通过页面内特判表达。
+2. 在真实 Android System WebView、密码根文件夹和三个动态 ZIP 证据具备前，不把模拟 User-Agent、桌面浏览器或 Debug fixture 记录为真实主源通过。
+3. F2 完成后，F1 的页面仍只消费 `InstallUiStateMapper`；目录枚举、版本变化、下载与校验进度、失败原因不得通过页面内特判表达。
 4. 本轮按用户确认的最简自动化口径，只执行上述确定性 fixture、编译和直接相关单测；真实 WebView、真实 ZIP、网络切换和页面可见性由用户按 `docs/testing/验证矩阵.md` 的 F2 人工用例主测，不将未执行 smoke 计作失败或通过。
 
 当前施工起点：先读取 `docs/architecture/项目长期总纲.md` 第 2、5、7 节、`docs/plans/03helper首版安装流程计划.md` 的 ZIP 自动处理契约、`docs/architecture/Cloud项目能力接线.md` 和 `docs/testing/验证矩阵.md`，再给出文件级物理锚点；未冻结清单 schema 前禁止自由创建外部协议。

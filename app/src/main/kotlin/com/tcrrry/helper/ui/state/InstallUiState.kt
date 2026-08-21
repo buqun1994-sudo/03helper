@@ -1,6 +1,7 @@
 package com.tcrrry.helper.ui.state
 
 import com.tcrrry.helper.domain.session.DeviceConnectionStatus
+import com.tcrrry.helper.domain.session.ComponentCompatibility
 import com.tcrrry.helper.domain.session.InstallPhase
 import com.tcrrry.helper.domain.session.MaintenanceActionId
 import com.tcrrry.helper.domain.session.MaintenanceActionStatus
@@ -50,6 +51,7 @@ sealed interface InstallUiState {
     data class Maintenance(
         val deviceName: String?,
         val connected: Boolean,
+        val reconnecting: Boolean = false,
         val feedback: MaintenanceFeedback? = null,
         val applications: List<MaintenanceApplicationRow> = emptyList(),
         val groups: List<MaintenanceGroupId> = listOf(
@@ -99,7 +101,10 @@ data class ComponentRow(
     val selected: Boolean,
     val versionLabel: String?,
     val sizeLabel: String?,
+    /** Retained for state/test compatibility; never rendered as raw Android API text. */
     val compatibilityLabel: String?,
+    val compatibilityState: ComponentCompatibility,
+    val iconKey: String,
 )
 
 data class UiProgress(

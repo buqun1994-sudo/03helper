@@ -39,6 +39,8 @@ data class InstallationSessionSnapshot(
     val maintenance: MaintenanceSnapshot = MaintenanceSnapshot(),
     /** True only while discovery was started to restore a disconnected maintenance lease. */
     val maintenanceReconnectPending: Boolean = false,
+    /** True only while discovery is restoring an interrupted installation lease. */
+    val installationReconnectPending: Boolean = false,
 )
 
 data class DeviceSummary(
@@ -57,7 +59,17 @@ data class ComponentDescriptor(
     val versionLabel: String? = null,
     val sizeLabel: String? = null,
     val compatibilityLabel: String? = null,
+    /** Compatibility is evaluated internally; raw Android API numbers stay out of the UI. */
+    val compatibilityState: ComponentCompatibility = ComponentCompatibility.SUPPORTED,
+    /** Stable local asset key; remote data cannot select an arbitrary drawable. */
+    val iconKey: String = id,
 )
+
+enum class ComponentCompatibility {
+    SUPPORTED,
+    UNSUPPORTED,
+    UNKNOWN,
+}
 
 data class SessionProgress(
     val completedCount: Int = 0,

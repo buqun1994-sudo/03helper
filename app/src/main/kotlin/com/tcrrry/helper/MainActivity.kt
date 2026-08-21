@@ -8,18 +8,17 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.tcrrry.helper.application.InstallerRuntime
-import com.tcrrry.helper.application.ProductionInstallerRuntimeFactory
 import com.tcrrry.helper.domain.session.InstallationSessionCommand
 import com.tcrrry.helper.ui.InstallApp
 import com.tcrrry.helper.ui.state.InstallUiIntent
 
 class MainActivity : ComponentActivity() {
-    private lateinit var installerRuntime: InstallerRuntime
+    private val installerRuntime: InstallerRuntime
+        get() = (application as InstallerApplication).installerRuntime
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        installerRuntime = ProductionInstallerRuntimeFactory.create(applicationContext)
         // Seed the first frame with the same bounded discovery used on foreground re-entry.
         installerRuntime.onForeground()
         setContent {
@@ -29,15 +28,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onStart() {
         super.onStart()
-        if (::installerRuntime.isInitialized) {
-            installerRuntime.onForeground()
-        }
+        installerRuntime.onForeground()
     }
 
-    override fun onDestroy() {
-        installerRuntime.close()
-        super.onDestroy()
-    }
 }
 
 @Composable

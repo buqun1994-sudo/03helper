@@ -13,6 +13,7 @@ class ReleaseSourcePolicy(
     private val automaticOrder = when (mode) {
         ReleaseSourceMode.PRODUCTION -> ArtifactSourceKind.AUTOMATIC_ORDER
         ReleaseSourceMode.DEBUG_REAL_COMPONENTS -> listOf(ArtifactSourceKind.LANZOU_SHARE)
+        ReleaseSourceMode.FOLDER_CONFIG -> listOf(ArtifactSourceKind.LANZOU_SHARE)
     }
 
     fun plan(manifest: ArtifactManifest): SourcePlan {
@@ -75,6 +76,8 @@ class ReleaseSourcePolicy(
 enum class ReleaseSourceMode {
     PRODUCTION,
     DEBUG_REAL_COMPONENTS,
+    /** A signed folder config is the catalog owner; each manifest has one Lanzou source. */
+    FOLDER_CONFIG,
 }
 
 sealed interface SourcePlan {

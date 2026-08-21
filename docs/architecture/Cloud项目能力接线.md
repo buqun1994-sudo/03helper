@@ -22,14 +22,14 @@
 
 ### 3.1 控制面与对象流分离
 
-1. 03helper 需要一个很小的组件发布清单作为控制面，清单只描述组件版本、包身份、兼容范围、ZIP 与 APK 的大小和 SHA-256、证书摘要和来源顺序。
-2. 安装包对象流不经过 03helper 自有服务器：国内自动主源使用每个组件独立的无密码蓝奏云 ZIP 分享页，第一备用使用 R2 ZIP 对象，第二备用使用 GitHub Releases ZIP 对象；三个自动来源必须镜像同一 ZIP 字节。密码聚合文件夹、三应用合并 ZIP 和夸克只保留人工或离线兜底。
-3. 清单可以由 Cloud 的公开 release index 能力承载，也可以在 Android 发布契约完成前由 03helper 的受控静态入口承载。两种方式都必须保持一个清单真值，不能让三个下载源各自决定“最新版本”。
+1. 03helper 需要一个很小的签名配置作为控制面，配置只描述蓝奏根文件夹地址、运行时密码、组件文件名、包身份、兼容范围和配置版本；包体版本、大小和摘要由客户端从当前 ZIP 内的 APK 读取。
+2. 安装包对象流不经过 03helper 自有服务器。客户端每次从配置取得同一个受密码保护的蓝奏根文件夹，在隐藏 WebView 中完成验证并枚举文件，再按组件文件名下载三个 ZIP；根文件夹是唯一的“最新版本”真值，人工替换 ZIP 即可发布更新。
+3. R2 / GitHub Releases 不参与当前根文件夹自动版本判断；后续若增加备用对象，必须继续由同一签名配置声明并保持组件版本一致，不能让多个来源各自决定“最新版本”。
 4. 600GB/月额度只用于评估对象流量，不用于否定小清单控制面；几 KB 的清单请求不构成 APK 直链流量。
 
 ### 3.2 Android 清单适配边界
 
-F2 已冻结独立的 Android artifact schema；Cloud Android profile 仍需按此契约在 Cloud 侧落地。领域对象和签名 envelope 的本地实现位于 `com.tcrrry.helper.domain.artifact` 与 `data/catalog`，不代表 Cloud 生产清单已经发布：
+F2 已冻结独立的 Android artifact schema；当前 Cloud 侧需要先落地一个 Android distribution-config 接口。领域对象和签名 envelope 的本地实现位于 `com.tcrrry.helper.domain.artifact` 与 `data/catalog`，不代表 Cloud 生产配置已经发布：
 
 ```text
 schemaVersion
@@ -48,36 +48,34 @@ apkSha256
 packageName
 apkVersion { name, code }
 certificateSha256
-sources[]
 rollbackId
 ```
 
-清单由 `SignedCatalogEnvelope` 包裹，固定包含 `schemaVersion`、`catalogVersion`、`keyId`、`signatureAlgorithm`、`payloadBase64` 和 `signatureBase64`；客户端先用受信公钥验证 payload 的 detached signature，再严格解码字段。当前实现支持 `SHA256withECDSA` 和运行环境可用时的 `Ed25519`，未知算法、未知 key、字段缺失或摘要 / 版本不合法均 fail closed。
+控制面由 `SignedInstallerConfigEnvelope` 包裹，固定包含 `schemaVersion`、`configVersion`、`keyId`、`signatureAlgorithm`、`payloadBase64` 和 `signatureBase64`。payload 固定包含 `channel`、`expiresAt`、`folderUrl`、`folderPassword` 和三个 `components[]` 文件身份。客户端先用内置受信公钥验证 detached signature，再严格解码字段；未知算法、未知 key、字段缺失、过期或身份白名单不合法均 fail closed。
 
-`sources[]` 只允许固定的三类来源：
+组件配置项只允许固定的三个组件：
 
-1. `lanzou-share`：单组件 ZIP 分享页 URL，由 `LanzouWebSourceAdapter` 在进度页面背后用 Android System WebView 的默认手机端标识打开页面并截获当次最终 ZIP 下载地址。
-2. `r2`：Cloud R2 的公开 ZIP 对象 URL，由应用自有普通 HTTPS 下载器获取。
-3. `github`：GitHub Releases 的公开 ZIP 对象 URL，由应用自有普通 HTTPS 下载器获取。
+1. `desktop`：`03desktop-debug.zip`，唯一必装组件。
+2. `lyrics`：`03lyrics-debug.zip`，可选组件。
+3. `file-manager`：`fossify-file-manager-car-debug.zip`，可选组件。
 
-清单不得携带任意 shell、脚本、第三方直链转换服务、动态权限或运行时任意 URL。Cloud 只提供受审查的清单和对象发布能力；发现设备、ADB、安装、授权、解压和运行验证仍由 03helper 自己负责。
+配置不得携带任意 shell、脚本、第三方直链转换服务、动态权限或任意包体 URL。Cloud 只提供签名配置和受控文件夹发布能力；发现设备、ADB、安装、授权、解压和运行验证仍由 03helper 自己负责。
 
 ### 3.3 Android ZIP 发布流程
 
 1. 各产品仓库先生成已签名 APK，分别由 03 歌词、03桌面和文件管理器仓库负责包身份、版本和证书；03helper 不复制产品源码，也不重新签名。
-2. Cloud release 流程为每个组件生成一个单组件 ZIP，归档根目录只放一个预期 APK；生成后计算 ZIP 大小 / SHA-256 和 APK 大小 / SHA-256，写入 Android profile 的签名清单。
-3. 同一 ZIP 字节复制到蓝奏云、R2 和 GitHub Releases，不能分别重新压缩，否则外层 ZIP 摘要会变化。蓝奏云分享页 URL 只作为主源页面地址写入 `sources[]`，不把短时最终地址写入清单。
-4. 只有正式 staging 下载、解压、APK 包身份 / 证书校验、ADB 安装验证和回滚指针全部通过，才允许把清单候选切到公开状态。当前真实组件 Debug 包只进入 03helper Debug 变体的本地签名验证 profile；它们可以证明客户端完整工程链，但不代表 Cloud Android profile、生产签名或公开发布候选通过。
-5. Cloud 不向客户端下发压缩包密码、网盘账号、R2 密钥、GitHub PAT 或任意命令；蓝奏云密码聚合文件夹和三应用合并 ZIP 不进入 Android 自动清单。
+2. Cloud release 流程为每个组件生成一个 ZIP，归档根目录只放一个预期 APK；服务端记录文件名、包名和证书白名单，但不预先写死包体版本、大小或摘要。
+3. 三个 ZIP 上传到同一个受密码保护的蓝奏根文件夹。文件夹只能包含这三个 ZIP，不能放 APK、说明文件、重复文件或未知文件；人工替换 ZIP 是唯一发布动作。
+4. 客户端每次检查更新重新打开根文件夹，按文件名映射三个组件，逐个下载 ZIP、解压唯一 APK，并读取 APK 版本、大小和 SHA-256 生成本次 `ArtifactManifest`。任一组件身份、文件集合或归档结构不符合约束，整次配置拒绝。
+5. 只有正式 staging 下载、解压、APK 包身份 / 证书校验和 ADB 安装验证全部通过，才允许把签名配置切到公开状态。当前真实组件 Debug 包只进入 03helper Debug 变体的本地签名验证 profile；它们可以证明客户端完整工程链，但不代表 Cloud production 配置或公开候选通过。
+6. 密码只作为签名 payload 的运行时字段下发给客户端；Cloud 不向客户端下发网盘账号、R2 密钥、GitHub PAT 或任意命令，客户端不记录密码和短时下载上下文。
 
 ### 3.4 当前 F3 真实 Debug 验证资料
 
-1. `desktop`：`https://wwatl.lanzouw.com/iCdE743g9zve`，ZIP `03desktop-debug.zip`，APK 包名 `com.tcrrry.desktop`。
-2. `lyrics`：`https://wwatl.lanzouw.com/ipRbT43g9zzi`，ZIP `03lyrics-debug.zip`，APK 包名 `com.tcrrry.desktoplyrics`。
-3. `file-manager`：`https://wwatl.lanzouw.com/itMa843ga0la`，ZIP `fossify-file-manager-car-debug.zip`，APK 包名 `org.fossify.filemanager.debug`。
-4. 每份 ZIP 的根目录均只有一个预期 APK；链接、ZIP / APK 大小与 SHA-256、包名、版本、兼容范围和 Debug 证书已经写入 `app/src/debug/assets/real-debug/android-profile.json` 并由同目录公钥验签。Debug 使用完整安装、一次统一授权和可用性主链，不存在安装专用成功态；03桌面是唯一必装核心，其他组件可选。
-5. 蓝奏云分享页不是长期直链。页面验证后产生的 `zipN.webgetstore.com` 地址带短时上下文，只在内存中交给原生下载器，不能写入清单或文档作为固定对象地址。
-6. 这些资料只用于 F3 工程验证，不进入 Cloud 正式发布。Cloud 当前仍没有 03helper Android production profile、正式组件对象和生产信任资料；它们须由后续发布流程独立提供，不能把本地 Debug profile 直接公开。
+1. Debug 配置的根文件夹地址由服务端签名 payload 提供；客户端只按 `archiveFileName` 映射 `03desktop-debug.zip`、`03lyrics-debug.zip` 和 `fossify-file-manager-car-debug.zip`。
+2. 三份 ZIP 的根目录均只能有一个预期 APK；APK 包名、版本和 Debug 证书由客户端从归档读取并与配置白名单比对。Debug 使用完整安装、一次统一授权和可用性主链，不存在安装专用成功态；03桌面是唯一必装核心，其他组件可选。
+3. 蓝奏页面验证后产生的 `zipN.webgetstore.com` 地址带短时上下文，只在内存中交给原生下载器，不能写入配置、文档或诊断。
+4. 这些资料只用于 Debug 工程验证，不代表 Cloud production 配置、正式签名或公开候选已经发布；根文件夹密码不写入仓库文档。
 
 ## 4. 官网视觉复用边界
 
@@ -95,15 +93,15 @@ Cloud 最新 iCAR 03 官网已确认的可复用语言：
 
 1. Cloud 不执行手机或车机 ADB，不保存设备地址，不接收任意 shell，也不替安装助手决定授权命令。
 2. 03helper 不直接读取 Cloud 的服务端密钥，不把 R2 Access Key、GitHub PAT、Cloudflare token 或发布私钥打进 APK。
-3. Cloud 现有 TileLauncher 更新协议不能被描述成 Android 组件发布已经完成；必须先完成 Android profile、清单字段、APK 发布脚本和 staging 验证。
+3. Cloud 现有 TileLauncher 更新协议不能被描述成 Android 组件发布已经完成；必须先完成 Android distribution-config 接口、签名字段、根文件夹发布脚本和 staging 验证。
 4. 官网当前下载链接、Cloud 当前线上版本和 R2 当前对象状态都不能仅凭源码宣称已上线；必须以 Cloud 的 release / deployment 文档和固定候选证据为准。
 5. V1 不接账号、支付、权益、Telemetry 或车辆控制；这些能力即使在 Cloud 已存在，也必须由新的产品需求和协议单独授权。
 
 ## 6. 后续施工顺序
 
-1. M0：Cloud 侧继续冻结 release index 映射，确认三个产品仓库的包名、版本、签名身份、ZIP entry 名称和发布责任；03helper 本地 schema 已完成。
-2. M1：03helper 本地隐藏 WebView 来源适配器、ZIP 下载器、完整性校验、设备动作和 `InstallationSession` 事件接线已完成；当前三条真实 Debug 链接只用于 F3 完整工程验证，不升级为 Cloud 正式候选。
-3. M2：待 Cloud R2 ZIP 对象和 GitHub Releases 真实候选具备后，执行断点、失败切源、ZIP / APK 双重摘要、回滚和版本一致性人工验证。
+1. M0：Cloud 侧完成 Android distribution-config API、公钥轮换、三个产品仓库的包名 / 签名身份确认、根文件夹文件名和发布责任；03helper 本地 schema 已完成。
+2. M1：03helper 本地密码根文件夹 WebView、动态 ZIP 下载器、完整性校验、设备动作和 `InstallationSession` 事件接线已完成；当前 Debug 根文件夹只用于 F3 完整工程验证，不升级为 Cloud production 候选。
+3. M2：待 Cloud 提供 staging 配置和根文件夹替换流程后，执行密码验证、目录集合、动态版本识别、ZIP / APK 双重摘要、缓存清理和回滚指针人工验证；若未来增加 R2 / GitHub 备用，再另行验证切源。
 4. M3：如需由 Cloud 官网提供“下载安装助手”入口，再在 `cloud/apps/website-next/` 增加安装助手产品入口；官网入口只指向助手 APK，不在官网复制车机安装流程。
 5. 每次 Cloud 侧涉及 release index、R2、官网入口、API 或生产部署时，先读取 Cloud 仓库对应专项文档；部署和上线仍按 Cloud 的固定候选与人工授权规则执行。
 
