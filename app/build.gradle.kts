@@ -1,9 +1,28 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.plugin.serialization")
 }
+
+val localProperties = Properties().apply {
+    val file = rootProject.file("local.properties")
+    if (file.isFile) {
+        file.inputStream().use { load(it) }
+    }
+}
+
+fun localProperty(name: String): String = localProperties.getProperty(name).orEmpty()
+
+fun escapeBuildConfigString(value: String): String = value
+    .replace("\\", "\\\\")
+    .replace("\"", "\\\"")
+    .replace("\r", "\\r")
+    .replace("\n", "\\n")
+
+val debugFolderPassword = localProperty("03helper.debug.folderPassword")
 
 android {
     namespace = "com.tcrrry.helper"
@@ -26,6 +45,13 @@ android {
                 "proguard-rules.pro",
             )
         }
+        debug {
+            buildConfigField(
+                "String",
+                "DEBUG_FOLDER_PASSWORD",
+                "\"${escapeBuildConfigString(debugFolderPassword)}\"",
+            )
+        }
     }
 
     compileOptions {
@@ -39,7 +65,9 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
+
 
     testOptions {
         unitTests.isReturnDefaultValues = true

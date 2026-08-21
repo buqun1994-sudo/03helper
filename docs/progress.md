@@ -208,3 +208,9 @@ F2 Debug APK 已按用户授权安装到指定手机。该段记录的是 F2 交
 5. 本轮新增代码后的完整验证已完成：`testDebugUnitTest` 共 `96` 项通过，`compileDebugKotlin`、`compileReleaseKotlin`、`lintDebug`、`assembleDebug` 和 `assembleDebugAndroidTest` 均通过；`check-project-docs.mjs`、`check-skills.mjs`、`check-local-environment.mjs` 和 `git diff --check` 均通过。
 6. 已在显式测试手机 `SM-F946B` 上先安装主包和 AndroidTest 包并运行既有 `connectedDebugAndroidTest`，生产入口与 Debug 维护场景 `2/2` 通过；测试框架结束后再次覆盖安装最新 Debug 主包。最终包身份为 `com.tcrrry.helper`、Debug、`versionName=0.1.0`、`versionCode=1`，Launcher 为 `MainActivity`，APK SHA-256 为 `575511baf998b2dab7d0dce3d8f3c7fadcbde46e4d75b80281ac42fffa243f79`，系统返回 `Success`。
 7. 本轮未提交、未推送、未发布；未清数据、卸载、降级或重启设备，也未对真实车机执行维护写入。真实 Cloud staging 配置 / 根文件夹替换、切网与断线恢复的人工主测仍待执行；正式 Release 资料阻断保持不变。
+
+## 2026-08-21 Debug 临时根文件夹旁路
+
+1. 因 Cloud 接口仍在开发，Debug 构建临时跳过云端配置，固定使用 `https://wwatl.lanzouw.com/b0fqlrcyb`；密码只从被 Git 忽略的本机 `local.properties` 注入，不进入源码、提交或日志。Release 构建和正式 Cloud 主链不受影响。
+2. 旁路只替换分发配置来源，仍复用密码根文件夹 WebView、三个 ZIP 枚举、下载、ZIP / APK 身份校验和原有安装状态机；不新增安装专用流程。
+3. 本轮 Debug 构建、96 项单测、编译、Lint 和 `connectedDebugAndroidTest` 的 `2/2` smoke 已通过，并已覆盖安装测试手机。真实根文件夹请求尚未在 UI 中完成，因为测试手机当前处于锁屏状态，保留为用户解锁后的最小人工验证。

@@ -80,8 +80,10 @@ class CloudInstallerDistributionConfigAdapter(
     private val expectedChannel: String,
     private val now: () -> Instant = Instant::now,
     private val json: Json = CloudReleaseCatalogAdapter.STRICT_JSON,
+    private val staticConfig: InstallerDistributionConfig? = null,
 ) {
     suspend fun load(): DistributionConfigLoadResult {
+        staticConfig?.let { return DistributionConfigLoadResult.Success(it) }
         val response = try {
             transport.fetch()
         } catch (cancelled: CancellationException) {
