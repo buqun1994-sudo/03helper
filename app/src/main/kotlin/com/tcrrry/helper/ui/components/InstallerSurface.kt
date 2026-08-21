@@ -9,6 +9,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -40,6 +41,7 @@ fun PressableSurface(
     pressedColor: Color = InstallerColors.PressedBlue,
     borderColor: Color = InstallerColors.WhiteBorder,
     shape: Shape = RoundedCornerShape(InstallerDimensions.SurfaceRadius),
+    contentPadding: PaddingValues = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
     content: @Composable RowScope.() -> Unit,
 ) {
     val interactionSource = remember { MutableInteractionSource() }
@@ -71,7 +73,7 @@ fun PressableSurface(
                 onClick = onClick,
             )
             .semantics { role = Role.Button }
-            .padding(horizontal = 16.dp, vertical = 12.dp),
+            .padding(contentPadding),
         content = {
             androidx.compose.foundation.layout.Row(content = content)
         },

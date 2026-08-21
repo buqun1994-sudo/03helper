@@ -49,6 +49,7 @@ class InstallerRuntime(
     private var connectionAdapter: DeviceConnectionSessionAdapter? = null
     private var connectionJob: Job? = null
     private var activeConnection: DeviceConnectionLease? = null
+    private var lastConfirmedDevice: ConnectedDevice? = null
     private var connectionHealthJob: Job? = null
     private var catalogJob: Job? = null
     private var artifactJob: Job? = null
@@ -56,6 +57,11 @@ class InstallerRuntime(
     private var eventDispatcherSessionId: Long? = null
     private var eventDispatcher: InstallationSessionEventPort? = null
     private var automaticReconnectSessionId: Long? = null
+    /** Session generation currently attempting the last confirmed endpoint. */
+    private var knownReconnectAttemptSessionId: Long? = null
+    private var foregroundGeneration = 0L
+    private var maintenanceReconnectGeneration: Long? = null
+    private var manualMaintenanceDisconnect = false
     private var closed = false
 
     init {
@@ -88,14 +94,52 @@ class InstallerRuntime(
     fun dispatch(command: InstallationSessionCommand): InstallationSessionSnapshot {
         if (closed) return session.currentSnapshot()
         val before = session.currentSnapshot()
-        val after = session.dispatch(command)
+        val effectiveCommand = if (
+            command == InstallationSessionCommand.Reconnect &&
+            canFastReconnect(before)
+        ) {
+            InstallationSessionCommand.ReconnectKnownDevice
+        } else {
+            command
+        }
+        val after = session.dispatch(effectiveCommand)
 
-        when (command) {
+        when (effectiveCommand) {
             InstallationSessionCommand.StartDiscovery,
             InstallationSessionCommand.Reconnect,
-            -> if (enteredNewGeneration(before, after, InstallationSessionState.DISCOVERING)) {
-                cancelAllWork(closeConnection = true)
-                launchDiscovery(after)
+            -> {
+                knownReconnectAttemptSessionId = null
+                if (before.state == InstallationSessionState.MAINTENANCE) {
+                    manualMaintenanceDisconnect = false
+                    maintenanceReconnectGeneration = foregroundGeneration
+                }
+                if (enteredNewGeneration(before, after, InstallationSessionState.DISCOVERING)) {
+                    cancelAllWork(closeConnection = true)
+                    launchDiscovery(after)
+                }
+            }
+
+            InstallationSessionCommand.ReconnectKnownDevice -> {
+                knownReconnectAttemptSessionId = after.sessionId
+                if (before.state == InstallationSessionState.MAINTENANCE) {
+                    manualMaintenanceDisconnect = false
+                    maintenanceReconnectGeneration = foregroundGeneration
+                }
+                if (enteredNewGeneration(before, after, InstallationSessionState.CONNECTING)) {
+                    cancelAllWork(closeConnection = true)
+                    val knownDevice = lastConfirmedDevice
+                    if (knownDevice == null || after.device?.id != knownDevice.identity.stableId) {
+                        eventPortFor(after).emit(
+                            InstallationSessionEvent.DeviceConnectionFailed(
+                                deviceId = after.device?.id.orEmpty(),
+                                reasonCode = "known_device_endpoint_missing",
+                                retryable = true,
+                            ),
+                        )
+                    } else {
+                        launchConnection(after, knownDevice)
+                    }
+                }
             }
 
             InstallationSessionCommand.StopDiscovery -> {
@@ -108,12 +152,12 @@ class InstallerRuntime(
 
             is InstallationSessionCommand.SelectDevice -> {
                 if (enteredNewGeneration(before, after, InstallationSessionState.CONNECTING)) {
-                    val selectedDevice = discoveryAdapter?.confirmedDevice(command.deviceId)
+                    val selectedDevice = discoveryAdapter?.confirmedDevice(effectiveCommand.deviceId)
                     cancelDiscovery()
                     if (selectedDevice == null) {
                         eventPortFor(after).emit(
                             InstallationSessionEvent.DeviceConnectionFailed(
-                                deviceId = command.deviceId,
+                                deviceId = effectiveCommand.deviceId,
                                 reasonCode = "device_connection_target_missing",
                                 retryable = false,
                             ),
@@ -149,6 +193,9 @@ class InstallerRuntime(
             }
 
             InstallationSessionCommand.DisconnectDevice -> {
+                knownReconnectAttemptSessionId = null
+                manualMaintenanceDisconnect = true
+                maintenanceReconnectGeneration = foregroundGeneration
                 maintenanceJob?.cancel()
                 closeDeviceConnection()
             }
@@ -164,12 +211,12 @@ class InstallerRuntime(
                     after.state == InstallationSessionState.SELECTION_CONFIRMED -> beginArtifactPreparation(after)
 
                 before.state == InstallationSessionState.MAINTENANCE &&
-                    after.maintenance.activeAction == command.actionId &&
-                    before.maintenance.activeAction != command.actionId -> launchMaintenanceAction(command.actionId, after)
+                    after.maintenance.activeAction == effectiveCommand.actionId &&
+                    before.maintenance.activeAction != effectiveCommand.actionId -> launchMaintenanceAction(effectiveCommand.actionId, after)
             }
 
             is InstallationSessionCommand.AdapterEvent -> {
-                if (command.event is InstallationSessionEvent.DeviceDisconnected) {
+                if (effectiveCommand.event is InstallationSessionEvent.DeviceDisconnected) {
                     maintenanceJob?.cancel()
                     maintenanceJob = null
                     closeDeviceConnection()
@@ -182,6 +229,7 @@ class InstallerRuntime(
     /** Starts a bounded discovery pass when the app returns to the foreground on the connection page. */
     @Synchronized
     fun onForeground(): InstallationSessionSnapshot {
+        foregroundGeneration += 1L
         val current = session.currentSnapshot()
         return when {
             current.state == InstallationSessionState.IDLE -> dispatch(InstallationSessionCommand.StartDiscovery)
@@ -193,6 +241,13 @@ class InstallerRuntime(
             current.state in INSTALL_RECONCILE_STATES && activeConnection == null -> {
                 reconcile(current)
                 session.currentSnapshot()
+            }
+            current.state == InstallationSessionState.MAINTENANCE &&
+                current.device?.connectionStatus == DeviceConnectionStatus.DISCONNECTED &&
+                !manualMaintenanceDisconnect &&
+                maintenanceReconnectGeneration != foregroundGeneration -> {
+                maintenanceReconnectGeneration = foregroundGeneration
+                dispatch(InstallationSessionCommand.Reconnect)
             }
             current.state in CONNECTION_HELD_STATES &&
                 current.device?.connectionStatus == DeviceConnectionStatus.CONFIRMED &&
@@ -265,11 +320,7 @@ class InstallerRuntime(
 
     private fun beginAutomaticInstallReconnect(snapshot: InstallationSessionSnapshot) {
         if (snapshot.checkpoint == null) return
-        val reconnecting = session.dispatch(InstallationSessionCommand.Reconnect)
-        if (reconnecting.state == InstallationSessionState.DISCOVERING) {
-            cancelDiscovery()
-            launchDiscovery(reconnecting)
-        }
+        dispatch(InstallationSessionCommand.Reconnect)
     }
 
     private fun beginArtifactPreparation(snapshot: InstallationSessionSnapshot) {
@@ -308,6 +359,31 @@ class InstallerRuntime(
      */
     @Synchronized
     private fun reconcileDisconnectedInstallation(snapshot: InstallationSessionSnapshot) {
+        if (
+            !closed &&
+            snapshot.state == InstallationSessionState.MAINTENANCE &&
+            snapshot.device?.connectionStatus == DeviceConnectionStatus.DISCONNECTED &&
+            snapshot.failure?.category == FailureCategory.CONNECTION &&
+            knownReconnectAttemptSessionId != null &&
+            knownReconnectAttemptSessionId != snapshot.sessionId
+        ) {
+            // The remembered endpoint failed. Fall back once to the bounded LAN
+            // discovery path; the generation guard below prevents a retry loop.
+            knownReconnectAttemptSessionId = null
+            dispatch(InstallationSessionCommand.StartDiscovery)
+            return
+        }
+        if (
+            !closed &&
+            snapshot.state == InstallationSessionState.MAINTENANCE &&
+            snapshot.device?.connectionStatus == DeviceConnectionStatus.DISCONNECTED &&
+            !manualMaintenanceDisconnect &&
+            maintenanceReconnectGeneration != foregroundGeneration
+        ) {
+            maintenanceReconnectGeneration = foregroundGeneration
+            dispatch(InstallationSessionCommand.Reconnect)
+            return
+        }
         if (
             closed ||
             snapshot.state != InstallationSessionState.PAUSED ||
@@ -378,6 +454,10 @@ class InstallerRuntime(
                 }
                 activeConnection?.close()
                 activeConnection = connection
+                lastConfirmedDevice = connection.device
+                knownReconnectAttemptSessionId = null
+                manualMaintenanceDisconnect = false
+                maintenanceReconnectGeneration = null
                 if (confirmedSnapshot.state == InstallationSessionState.CONNECTED) {
                     launchCatalog(confirmedSnapshot)
                 } else {
@@ -580,6 +660,15 @@ class InstallerRuntime(
         after: InstallationSessionSnapshot,
         expectedState: InstallationSessionState,
     ): Boolean = after.state == expectedState && after.sessionId != before.sessionId
+
+    private fun canFastReconnect(snapshot: InstallationSessionSnapshot): Boolean {
+        val known = lastConfirmedDevice ?: return false
+        if (snapshot.device?.id != known.identity.stableId) return false
+        return snapshot.state == InstallationSessionState.MAINTENANCE ||
+            snapshot.state in INSTALL_RECONCILE_STATES && snapshot.checkpoint != null ||
+            snapshot.state in setOf(InstallationSessionState.PAUSED, InstallationSessionState.FAILED) &&
+            snapshot.checkpoint != null
+    }
 
     private companion object {
         val CONNECTION_HELD_STATES = setOf(

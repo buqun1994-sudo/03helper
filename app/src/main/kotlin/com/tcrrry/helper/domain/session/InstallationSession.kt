@@ -74,6 +74,7 @@ class InstallationSession(
             InstallationSessionCommand.RestartFromCheckpoint -> restartFromCheckpoint()
 
             InstallationSessionCommand.Reconnect -> startReconnect()
+            InstallationSessionCommand.ReconnectKnownDevice -> startKnownReconnect()
             InstallationSessionCommand.DisconnectDevice -> disconnectDevice()
             InstallationSessionCommand.EnterMaintenance -> enterMaintenance()
             is InstallationSessionCommand.MaintenanceAction -> handleMaintenanceAction(command)
@@ -180,6 +181,70 @@ class InstallationSession(
                 current.checkpoint != null -> startInstallationReconnect(current)
             else -> startDiscovery()
         }
+    }
+
+    /**
+     * Starts a reconnect handshake against the last verified endpoint. The
+     * application runtime owns that endpoint; this state transition keeps the
+     * same reconnect guards and evidence boundaries as a scanned candidate.
+     */
+    private fun startKnownReconnect() {
+        val current = _snapshot.value
+        val device = current.device ?: return
+        val connectingDevice = device.copy(
+            connectionStatus = DeviceConnectionStatus.CONNECTING,
+            lastConfirmedLabel = null,
+        )
+        when {
+            current.state == InstallationSessionState.MAINTENANCE -> {
+                val maintenance = current.maintenance.copy(
+                    activeAction = null,
+                    lastAction = current.maintenance.activeAction?.let { actionId ->
+                        MaintenanceActionRecord(
+                            actionId = actionId,
+                            status = MaintenanceActionStatus.FAILED,
+                            reasonCode = "reconnect_started",
+                            retryable = true,
+                        )
+                    } ?: current.maintenance.lastAction,
+                )
+                startNewGeneration(
+                    current.copy(
+                        state = InstallationSessionState.CONNECTING,
+                        device = connectingDevice,
+                        discoveredDevices = listOf(connectingDevice),
+                        failure = null,
+                        checkpoint = null,
+                        maintenance = maintenance,
+                        maintenanceReconnectPending = true,
+                        installationReconnectPending = false,
+                    ),
+                )
+            }
+
+            current.state == InstallationSessionState.CONNECTED && current.checkpoint != null ->
+                startKnownInstallationReconnect(current, connectingDevice)
+
+            current.state in ACTIVE_INSTALL_STATES ||
+                current.state in setOf(InstallationSessionState.PAUSED, InstallationSessionState.FAILED) &&
+                current.checkpoint != null -> startKnownInstallationReconnect(current, connectingDevice)
+        }
+    }
+
+    private fun startKnownInstallationReconnect(
+        current: InstallationSessionSnapshot,
+        connectingDevice: DeviceSummary,
+    ) {
+        startNewGeneration(
+            current.copy(
+                state = InstallationSessionState.CONNECTING,
+                device = connectingDevice,
+                discoveredDevices = listOf(connectingDevice),
+                failure = null,
+                maintenanceReconnectPending = false,
+                installationReconnectPending = true,
+            ),
+        )
     }
 
     private fun startInstallationReconnect(current: InstallationSessionSnapshot) {

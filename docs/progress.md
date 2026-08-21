@@ -214,3 +214,21 @@ F2 Debug APK 已按用户授权安装到指定手机。该段记录的是 F2 交
 1. 因 Cloud 接口仍在开发，Debug 构建临时跳过云端配置，固定使用 `https://wwatl.lanzouw.com/b0fqlrcyb`；密码只从被 Git 忽略的本机 `local.properties` 注入，不进入源码、提交或日志。Release 构建和正式 Cloud 主链不受影响。
 2. 旁路只替换分发配置来源，仍复用密码根文件夹 WebView、三个 ZIP 枚举、下载、ZIP / APK 身份校验和原有安装状态机；不新增安装专用流程。
 3. 本轮 Debug 构建、96 项单测、编译、Lint 和 `connectedDebugAndroidTest` 的 `2/2` smoke 已通过，并已覆盖安装测试手机。真实根文件夹请求尚未在 UI 中完成，因为测试手机当前处于锁屏状态，保留为用户解锁后的最小人工验证。
+
+## 2026-08-21 维护二级页面与解锁快速重连
+
+1. 用户确认产品名改为 `03车机助手`，安装成功主按钮改为 `完成！`；资源文案、Debug / Release 合并清单显示名称和 V1 成功结果表已同步。
+2. 维护首页的九个功能入口现在统一由 `InstallApp` 持有二级页路由：普通维护动作向左进入独立动作页，顶部返回 / 系统返回向右回到首页；目标车机、影响范围、运行中、结果和下一步均在动作页呈现，不再把反馈插入维护首页顶部。重新安装和安装文件管理器离开维护态进入安装主链时仍保留同一动作页路由和横向转场；安装成功点击“完成！”会清掉动作路由并回到维护首页。
+3. 锁屏断 ADB 不再被当作必须持续保持的产品承诺。运行时保留上一次已确认的车机端点；回到前台或健康检查发现断线时，先对该端点做一次快速身份握手，失败才回退到有界局域网发现；用户主动点击“断开车机连接”后不自动拉回。
+4. 通过测试手机只读核对确认第三方 `com.reathin.adbassist` 没有注册 Android `Service`、前台服务或 `WAKE_LOCK` 权限，属于 Activity / 进程持有连接模式，不能直接照搬成常驻服务。
+5. 本轮代码验证已通过：`testDebugUnitTest` 共 `97` 项、`compileReleaseKotlin`、`lintDebug`、`assembleDebug`、`assembleDebugAndroidTest`、`check-project-docs.mjs`、`check-skills.mjs` 和 `git diff --check`。重连态已加入持续旋转的进度环，动作反馈进入 / 退出使用淡入淡出，二级页结果区明确展示下一步。最新 Debug APK `com.tcrrry.helper` / `0.1.0 (1)` 的 SHA-256 为 `203cbd76765e2e888ff5cc18fe01313fc1ba11401c5e39d245e728c22e9d7f93`，资源标签为 `03车机助手`。
+6. `MainActivity` 仅在 `onResume` 进入前台恢复入口，覆盖首次进入和解锁回前台，避免同一生命周期重复触发发现 / 重连。既有 `connectedDebugAndroidTest` 在本轮代码改动前曾以 `2/2` 通过；本轮重跑时测试手机仍可 ping 但无线 ADB TLS 端口返回 `connection refused`，未把这次设备缺失误报为测试失败。最新 APK 尚未能在该次设备阻断后覆盖安装，待无线调试恢复后只需执行最终覆盖安装和同一 `2/2` smoke。
+7. 收尾复核补齐维护二级页返回时的向右转场，并在动作运行中保留当前页面以持续展示状态；改动后的 97 项单测、Debug / Release 编译、Lint、APK 构建和文档护栏均重新通过。
+
+## 2026-08-22 收尾复核
+
+1. 新增“已确认端点握手失败后回退一次有界发现”的运行时回归用例后，重新执行 `testDebugUnitTest`、Debug / Release 编译、`lintDebug`、`assembleDebug` 和 `assembleDebugAndroidTest`；98 项单测为 0 failures / 0 errors，全部构建成功。
+2. 当前 Debug APK 已核对为 `com.tcrrry.helper`、`0.1.0 (1)`、显示名 `03车机助手`，APK Signature Scheme v2 验证通过；主包 SHA-256 为 `3905405b2494abad7c6ac4a0d78e1ff285e19af4d7fbd7c2edbc5ef2b3889526`，AndroidTest 包 SHA-256 为 `08cb79ccd0fbc59e9f3fc709c6d0f07d7b593b21506a7c14df68772a0a43ac0d`。
+3. 无线 ADB 恢复后，使用本机上下文指定的 `SM-F946B` 测试手机完成既有 `InstallAppActivitySmokeTest`；生产入口和 Debug 维护场景 `2/2` 通过。Gradle 入口仍会读取其它在线设备的只读属性，因此后续应继续收紧测试设备隔离；本轮测试结果只报告测试手机，且只读核对确认车机没有安装 `com.tcrrry.helper`。
+4. smoke 结束后已再次对测试手机保留数据覆盖安装最新 Debug 主包，系统返回 `Success`；最终包身份为 `com.tcrrry.helper`、Debug、`0.1.0 (1)`，`MAIN` / `LAUNCHER` 解析到 `com.tcrrry.helper/.MainActivity`。本轮未清数据、卸载、降级、重启、提交、推送或对车机执行维护写入。
+5. 待用户最小人工主测：真实 Cloud 根文件夹下载与安装、维护态九个入口逐页进入 / 返回、锁屏后解锁自动快速重连、以及真实车机上的检查更新、重装、修复授权和受控应用管理。任一动作出现意外跳回首页、静态状态突变、连接未恢复或车机写入范围异常时停止该条并保留当前界面与时间点。

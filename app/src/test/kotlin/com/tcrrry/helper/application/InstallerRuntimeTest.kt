@@ -31,6 +31,7 @@ import com.tcrrry.helper.domain.session.DeviceConnectionStatus
 import com.tcrrry.helper.domain.session.InstallationSession
 import com.tcrrry.helper.domain.session.InstallationSessionCommand
 import com.tcrrry.helper.domain.session.InstallationSessionEvent
+import com.tcrrry.helper.domain.session.InstallationSessionSnapshot
 import com.tcrrry.helper.domain.session.InstallationSessionState
 import java.io.File
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -46,9 +47,13 @@ import org.junit.Test
 class InstallerRuntimeTest {
     @Test
     fun `foreground entry starts discovery from the initial connection page`() = runTest {
+        var discoveryStarts = 0
         val runtime = InstallerRuntime(
             session = InstallationSession(),
-            createDiscoveryAdapter = { port -> DeviceDiscoverySessionAdapter(fakeDiscovery(), port) },
+            createDiscoveryAdapter = { port ->
+                discoveryStarts += 1
+                DeviceDiscoverySessionAdapter(fakeDiscovery(), port)
+            },
             createConnectionAdapter = { port -> fakeConnectionAdapter(port) },
             loadCatalog = { error("catalog must not start before a device is selected") },
             prepareArtifacts = { _, _ -> error("artifact preparation must not start") },
@@ -61,9 +66,11 @@ class InstallerRuntimeTest {
         val firstForegroundSnapshot = runtime.session.currentSnapshot()
         assertEquals(InstallationSessionState.DISCOVERING, firstForegroundSnapshot.state)
         assertEquals("adb:vehicle-1", firstForegroundSnapshot.discoveredDevices.single().id)
+        assertEquals(1, discoveryStarts)
 
         runtime.onForeground()
         assertEquals(firstForegroundSnapshot.sessionId, runtime.session.currentSnapshot().sessionId)
+        assertEquals(1, discoveryStarts)
 
         runtime.close()
     }
@@ -105,6 +112,87 @@ class InstallerRuntimeTest {
 
         runtime.close()
         seed.close()
+    }
+
+    @Test
+    fun `foreground automatically reconnects a disconnected maintenance session`() = runTest {
+        val runtime = InstallerRuntime(
+            session = InstallationSession(
+                initialSnapshot = InstallationSessionSnapshot(
+                    state = InstallationSessionState.MAINTENANCE,
+                    device = fakeVehicle().toDeviceSummary().copy(
+                        connectionStatus = DeviceConnectionStatus.DISCONNECTED,
+                    ),
+                ),
+            ),
+            createDiscoveryAdapter = { port -> DeviceDiscoverySessionAdapter(fakeDiscovery(), port) },
+            createConnectionAdapter = { port -> fakeConnectionAdapter(port) },
+            loadCatalog = {},
+            coroutineContext = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        runtime.onForeground()
+        advanceUntilIdle()
+
+        assertEquals(InstallationSessionState.MAINTENANCE, runtime.session.currentSnapshot().state)
+        assertEquals(
+            DeviceConnectionStatus.CONFIRMED,
+            runtime.session.currentSnapshot().device?.connectionStatus,
+        )
+        runtime.close()
+    }
+
+    @Test
+    fun `known maintenance reconnect falls back to one bounded discovery pass`() = runTest {
+        var discoveryPasses = 0
+        var connectionAttempts = 0
+        val runtime = InstallerRuntime(
+            session = InstallationSession(
+                initialSnapshot = InstallationSessionSnapshot(
+                    state = InstallationSessionState.MAINTENANCE,
+                    device = fakeVehicle().toDeviceSummary().copy(
+                        connectionStatus = DeviceConnectionStatus.DISCONNECTED,
+                    ),
+                ),
+            ),
+            createDiscoveryAdapter = { port ->
+                discoveryPasses += 1
+                DeviceDiscoverySessionAdapter(fakeDiscovery(), port)
+            },
+            createConnectionAdapter = { port ->
+                DeviceConnectionSessionAdapter(
+                    connectionFactory = DeviceConnectionFactory {
+                        connectionAttempts += 1
+                        if (connectionAttempts == 2) {
+                            DeviceConnectionAttempt.Failed("known_endpoint_unavailable")
+                        } else {
+                            DeviceConnectionAttempt.Connected(
+                                TrackingConnectionLease(),
+                            )
+                        }
+                    },
+                    eventPort = port,
+                )
+            },
+            loadCatalog = {},
+            coroutineContext = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        runtime.onForeground()
+        advanceUntilIdle()
+        assertEquals(InstallationSessionState.MAINTENANCE, runtime.session.currentSnapshot().state)
+        assertEquals(DeviceConnectionStatus.CONFIRMED, runtime.session.currentSnapshot().device?.connectionStatus)
+
+        runtime.session.dispatchEvent(InstallationSessionEvent.DeviceDisconnected("adb:vehicle-1"))
+        advanceUntilIdle()
+
+        val restored = runtime.session.currentSnapshot()
+        assertEquals(2, discoveryPasses)
+        assertEquals(3, connectionAttempts)
+        assertEquals(InstallationSessionState.MAINTENANCE, restored.state)
+        assertEquals(DeviceConnectionStatus.CONFIRMED, restored.device?.connectionStatus)
+        assertEquals(null, restored.failure)
+        runtime.close()
     }
 
     @Test

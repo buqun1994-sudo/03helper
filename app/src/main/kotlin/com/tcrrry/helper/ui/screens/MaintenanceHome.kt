@@ -1,10 +1,13 @@
 package com.tcrrry.helper.ui.screens
 
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.Crossfade
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.ContentTransform
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -14,9 +17,12 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -31,10 +37,13 @@ import com.tcrrry.helper.R
 import com.tcrrry.helper.domain.session.MaintenanceActionId
 import com.tcrrry.helper.domain.session.MaintenanceGroupId
 import com.tcrrry.helper.domain.session.MaintenanceActionStatus
+import com.tcrrry.helper.domain.session.InstallPhase
+import com.tcrrry.helper.domain.session.ResultKind
 import com.tcrrry.helper.domain.session.requiresConnectedDevice
 import com.tcrrry.helper.ui.components.AnimatedEntry
 import com.tcrrry.helper.ui.components.DividerLine
 import com.tcrrry.helper.ui.components.PressableSurface
+import com.tcrrry.helper.ui.components.PrimaryActionButton
 import com.tcrrry.helper.ui.components.StatusIcon
 import com.tcrrry.helper.ui.components.TaskTopBar
 import com.tcrrry.helper.ui.state.InstallUiIntent
@@ -50,58 +59,522 @@ fun MaintenanceHome(
     state: InstallUiState.Maintenance,
     onIntent: (InstallUiIntent) -> Unit,
     modifier: Modifier = Modifier,
+    selectedAction: MaintenanceActionId? = null,
+    onSelectedActionChange: (MaintenanceActionId?) -> Unit = {},
 ) {
+    val selectedActionRunning = selectedAction != null &&
+        state.feedback?.actionId == selectedAction &&
+        state.feedback?.status == MaintenanceActionStatus.RUNNING
+    BackHandler(enabled = selectedAction != null && !selectedActionRunning) {
+        onSelectedActionChange(null)
+    }
+
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
         val columns = maintenanceColumnCount(maxWidth.value)
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(horizontal = InstallerDimensions.PageHorizontalPadding),
-        ) {
-            TaskTopBar(title = stringResource(R.string.task_maintenance))
-            DeviceStatusHeader(
+        AnimatedContent(
+            targetState = selectedAction,
+            modifier = Modifier.fillMaxSize(),
+            transitionSpec = {
+                if (targetState != null) {
+                    ContentTransform(
+                        targetContentEnter = fadeIn(InstallerMotion.pageEnter()) +
+                            slideInHorizontally(
+                                animationSpec = InstallerMotion.pageEnter(),
+                                initialOffsetX = { width -> width },
+                            ),
+                        initialContentExit = fadeOut(InstallerMotion.pageExit()) +
+                            slideOutHorizontally(
+                                animationSpec = InstallerMotion.pageExit(),
+                                targetOffsetX = { width -> -width },
+                            ),
+                        sizeTransform = null,
+                    )
+                } else {
+                    ContentTransform(
+                        targetContentEnter = fadeIn(InstallerMotion.pageEnter()) +
+                            slideInHorizontally(
+                                animationSpec = InstallerMotion.pageEnter(),
+                                initialOffsetX = { width -> -width },
+                            ),
+                        initialContentExit = fadeOut(InstallerMotion.pageExit()) +
+                            slideOutHorizontally(
+                                animationSpec = InstallerMotion.pageExit(),
+                                targetOffsetX = { width -> width },
+                            ),
+                        sizeTransform = null,
+                    )
+                }
+            },
+            contentKey = { it ?: "maintenance_home" },
+            label = "maintenancePage",
+        ) { action ->
+            if (action == null) {
+                MaintenanceOverview(
+                    state = state,
+                    columns = columns,
+                    onReconnect = { onIntent(InstallUiIntent.Reconnect) },
+                    onDisconnect = { onIntent(InstallUiIntent.DisconnectDevice) },
+                    onAction = { onSelectedActionChange(it) },
+                    onRunAction = { onIntent(InstallUiIntent.MaintenanceAction(it)) },
+                )
+            } else {
+                MaintenanceActionPage(
+                    action = action,
+                    state = state,
+                    onBack = { onSelectedActionChange(null) },
+                )
+            }
+        }
+    }
+}
+
+/** Keeps maintenance-originated installs inside the same secondary-page route. */
+@Composable
+fun MaintenanceActionFlowPage(
+    action: MaintenanceActionId,
+    state: InstallUiState,
+    onIntent: (InstallUiIntent) -> Unit,
+    onBack: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val canNavigateBack = state !is InstallUiState.Installing
+    BackHandler(enabled = canNavigateBack, onBack = onBack)
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(horizontal = InstallerDimensions.PageHorizontalPadding)
+            .testTag("maintenance_action_flow_${action.name.lowercase()}"),
+    ) {
+        TaskTopBar(
+            title = stringResource(actionTitle(action)),
+            onBack = onBack.takeIf { canNavigateBack },
+        )
+        when (state) {
+            is InstallUiState.Installing -> MaintenanceInstallProgress(
                 state = state,
-                onReconnect = { onIntent(InstallUiIntent.Reconnect) },
-                onDisconnect = { onIntent(InstallUiIntent.DisconnectDevice) },
+                onIntent = onIntent,
             )
-            AnimatedVisibility(
-                visible = state.feedback != null,
-                enter = fadeIn(InstallerMotion.stateChange()),
-                exit = fadeOut(InstallerMotion.stateChange()),
-            ) {
-                state.feedback?.let { feedback ->
-                    Column {
-                        Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
-                        Crossfade(
-                            targetState = feedback,
-                            animationSpec = InstallerMotion.stateChange(),
-                            label = "maintenanceFeedback",
-                        ) { target ->
-                            MaintenanceFeedbackBlock(target, state.applications)
-                        }
+
+            is InstallUiState.Result -> MaintenanceInstallResult(
+                state = state,
+                onIntent = onIntent,
+                onBack = onBack,
+            )
+
+            else -> MaintenanceActionWaiting()
+        }
+    }
+}
+
+@Composable
+private fun MaintenanceInstallProgress(
+    state: InstallUiState.Installing,
+    onIntent: (InstallUiIntent) -> Unit,
+) {
+    val phases = listOf(
+        InstallPhase.FETCH to R.string.phase_fetch,
+        InstallPhase.CHECK to R.string.phase_check,
+        InstallPhase.SEND to R.string.phase_send,
+        InstallPhase.CONFIGURE to R.string.phase_configure,
+        InstallPhase.VERIFY to R.string.phase_verify,
+    )
+    Column(modifier = Modifier.fillMaxSize()) {
+        Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
+        Text(
+            text = stringResource(R.string.installing_device, state.deviceName),
+            style = MaterialTheme.typography.bodyLarge,
+            color = InstallerColors.AuxiliaryWhite,
+        )
+        state.currentComponentName?.let { current ->
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(text = current, style = MaterialTheme.typography.headlineSmall, color = InstallerColors.White)
+        }
+        Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
+        MaintenanceNextStep(stringResource(R.string.maintenance_next_step_running))
+        Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
+        LazyColumn(
+            modifier = Modifier
+                .weight(1f)
+                .testTag("maintenance_action_phases"),
+            verticalArrangement = Arrangement.spacedBy(InstallerDimensions.ListSpacing),
+        ) {
+            items(phases, key = { it.first }) { (phase, label) ->
+                MaintenancePhaseRow(
+                    phase = phase,
+                    label = stringResource(label),
+                    state = state,
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
+        PressableSurface(
+            onClick = { onIntent(InstallUiIntent.CancelInstallation) },
+            enabled = state.canCancel,
+            modifier = Modifier.fillMaxWidth(),
+            minHeight = InstallerDimensions.PrimaryActionHeight,
+            containerColor = InstallerColors.PageBlue,
+            pressedColor = InstallerColors.PressedBlue,
+        ) {
+            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                Text(text = stringResource(R.string.install_cancel), style = MaterialTheme.typography.bodyLarge, color = InstallerColors.White)
+            }
+        }
+        Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
+    }
+}
+
+@Composable
+private fun MaintenancePhaseRow(
+    phase: InstallPhase,
+    label: String,
+    state: InstallUiState.Installing,
+) {
+    val completed = phase in state.completedStages
+    val current = phase == state.currentPhase
+    val animatedProgress by animateFloatAsState(
+        targetValue = state.progress.fraction ?: 0f,
+        animationSpec = InstallerMotion.progress(),
+        label = "maintenancePhaseProgress",
+    )
+    PressableSurface(
+        onClick = {},
+        enabled = false,
+        minHeight = InstallerDimensions.ListItemMinHeight,
+        containerColor = if (current) InstallerColors.WhiteSurface else InstallerColors.PageBlue,
+        borderColor = if (current) InstallerColors.WhiteBorder else InstallerColors.WhiteBorder,
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            StatusIcon(
+                name = when {
+                    completed -> "circle_check"
+                    current -> "loader_circle"
+                    else -> "circle"
+                },
+                contentDescription = label,
+                tint = if (completed) InstallerColors.Success else InstallerColors.White,
+                size = InstallerDimensions.SmallIconSize,
+            )
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text(
+                    text = label,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = if (current || completed) InstallerColors.White else InstallerColors.AuxiliaryWhite,
+                )
+                if (current) {
+                    if (state.progress.indeterminate || state.progress.fraction == null) {
+                        LinearProgressIndicator(
+                            color = InstallerColors.White,
+                            trackColor = InstallerColors.WhiteBorder,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    } else {
+                        LinearProgressIndicator(
+                            progress = { animatedProgress },
+                            color = InstallerColors.White,
+                            trackColor = InstallerColors.WhiteBorder,
+                            modifier = Modifier.fillMaxWidth(),
+                        )
                     }
                 }
             }
-            Spacer(modifier = Modifier.height(InstallerDimensions.SectionVerticalSpacing))
-            LazyColumn(
-                modifier = Modifier
-                    .weight(1f)
-                    .testTag("maintenance_groups"),
-                verticalArrangement = Arrangement.spacedBy(InstallerDimensions.SectionVerticalSpacing),
-            ) {
-                items(state.groups, key = { it }) { group ->
-                    MaintenanceGroup(
-                        group = group,
-                        columns = columns,
-                        connected = state.connected,
-                        busy = state.feedback?.status == MaintenanceActionStatus.RUNNING,
-                        onAction = { action -> onIntent(InstallUiIntent.MaintenanceAction(action)) },
-                    )
-                }
-            }
-            Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
         }
     }
+}
+
+@Composable
+private fun MaintenanceInstallResult(
+    state: InstallUiState.Result,
+    onIntent: (InstallUiIntent) -> Unit,
+    onBack: () -> Unit,
+) {
+    val (title, description, icon, tint, actionText, action) = when (state.kind) {
+        ResultKind.SUCCESS -> ResultFlowCopy(
+            R.string.result_success_title,
+            R.string.result_success_description,
+            "circle_check",
+            InstallerColors.Success,
+            R.string.result_enter_maintenance,
+            InstallUiIntent.EnterMaintenance,
+        )
+        ResultKind.PAUSED -> ResultFlowCopy(
+            R.string.result_paused_title,
+            R.string.result_paused_description,
+            "circle_pause",
+            InstallerColors.Warning,
+            R.string.result_continue,
+            InstallUiIntent.ContinueInstallation,
+        )
+        ResultKind.DOWNLOAD_FAILED -> ResultFlowCopy(
+            R.string.result_download_failed_title,
+            R.string.result_download_failed_description,
+            "cloud_off",
+            InstallerColors.Error,
+            R.string.result_retry,
+            InstallUiIntent.RetryInstallation,
+        )
+        ResultKind.INSTALLATION_FAILED -> ResultFlowCopy(
+            R.string.result_install_failed_title,
+            R.string.result_install_failed_description,
+            "triangle_alert",
+            InstallerColors.Error,
+            R.string.result_continue,
+            InstallUiIntent.ContinueInstallation,
+        )
+        ResultKind.CONFIGURATION_FAILED -> ResultFlowCopy(
+            R.string.result_configuration_failed_title,
+            R.string.result_configuration_failed_description,
+            "settings_2",
+            InstallerColors.Warning,
+            R.string.result_reconfigure,
+            InstallUiIntent.Reconfigure,
+        )
+    }
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .testTag("maintenance_action_result"),
+        verticalArrangement = Arrangement.spacedBy(InstallerDimensions.ContentSpacing),
+    ) {
+        Spacer(modifier = Modifier.height(InstallerDimensions.SectionVerticalSpacing))
+        StatusIcon(
+            name = icon,
+            contentDescription = stringResource(title),
+            tint = tint,
+            modifier = Modifier.align(Alignment.CenterHorizontally),
+        )
+        Text(text = stringResource(title), style = MaterialTheme.typography.headlineSmall, color = InstallerColors.White)
+        Text(text = stringResource(description), style = MaterialTheme.typography.bodyLarge, color = InstallerColors.AuxiliaryWhite)
+        LazyColumn(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(InstallerDimensions.ListSpacing),
+        ) {
+            items(state.componentResults, key = { it.componentName }) { result ->
+                PressableSurface(onClick = {}, enabled = false, containerColor = InstallerColors.WhiteSurface) {
+                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text(text = result.componentName, style = MaterialTheme.typography.bodyLarge, color = InstallerColors.White)
+                            Text(
+                                text = listOf(
+                                    stringResource(if (result.installed) R.string.result_status_installed else R.string.result_status_not_installed),
+                                    stringResource(if (result.configured) R.string.result_status_configured else R.string.result_status_not_configured),
+                                    stringResource(if (result.available) R.string.result_status_available else R.string.result_status_not_available),
+                                ).joinToString(" · "),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = InstallerColors.AuxiliaryWhite,
+                            )
+                        }
+                        StatusIcon(
+                            name = if (result.installed && result.configured && result.available) "circle_check" else "circle_alert",
+                            contentDescription = result.componentName,
+                            tint = if (result.installed && result.configured && result.available) InstallerColors.Success else InstallerColors.Warning,
+                            size = InstallerDimensions.SmallIconSize,
+                        )
+                    }
+                }
+            }
+        }
+        MaintenanceNextStep(stringResource(maintenanceResultNextStep(state.kind)))
+        PrimaryActionButton(
+            text = stringResource(actionText),
+            onClick = {
+                onIntent(action)
+                if (action == InstallUiIntent.EnterMaintenance) {
+                    onBack()
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
+    }
+}
+
+private data class ResultFlowCopy(
+    val title: Int,
+    val description: Int,
+    val icon: String,
+    val tint: androidx.compose.ui.graphics.Color,
+    val actionText: Int,
+    val action: InstallUiIntent,
+)
+
+@Composable
+private fun MaintenanceOverview(
+    state: InstallUiState.Maintenance,
+    columns: Int,
+    onReconnect: () -> Unit,
+    onDisconnect: () -> Unit,
+    onAction: (MaintenanceActionId) -> Unit,
+    onRunAction: (MaintenanceActionId) -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = InstallerDimensions.PageHorizontalPadding)
+            .testTag("maintenance_home"),
+    ) {
+        TaskTopBar(title = stringResource(R.string.task_maintenance))
+        DeviceStatusHeader(
+            state = state,
+            onReconnect = onReconnect,
+            onDisconnect = onDisconnect,
+        )
+        Spacer(modifier = Modifier.height(InstallerDimensions.SectionVerticalSpacing))
+        LazyColumn(
+            modifier = Modifier
+                .weight(1f)
+                .testTag("maintenance_groups"),
+            verticalArrangement = Arrangement.spacedBy(InstallerDimensions.SectionVerticalSpacing),
+        ) {
+            items(state.groups, key = { it }) { group ->
+                MaintenanceGroup(
+                    group = group,
+                    columns = columns,
+                    connected = state.connected,
+                    busy = state.feedback?.status == MaintenanceActionStatus.RUNNING,
+                    onAction = { action ->
+                        onAction(action)
+                        onRunAction(action)
+                    },
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
+    }
+}
+
+@Composable
+private fun MaintenanceActionPage(
+    action: MaintenanceActionId,
+    state: InstallUiState.Maintenance,
+    onBack: () -> Unit,
+) {
+    val feedback = state.feedback?.takeIf { it.actionId == action }
+    val canNavigateBack = feedback?.status != MaintenanceActionStatus.RUNNING
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = InstallerDimensions.PageHorizontalPadding)
+            .testTag("maintenance_action_page_${action.name.lowercase()}"),
+    ) {
+        TaskTopBar(
+            title = stringResource(actionTitle(action)),
+            onBack = onBack.takeIf { canNavigateBack },
+        )
+        LazyColumn(
+            modifier = Modifier
+                .weight(1f)
+                .testTag("maintenance_action_content"),
+            verticalArrangement = Arrangement.spacedBy(InstallerDimensions.ContentSpacing),
+        ) {
+            item {
+                MaintenanceActionHeader(action = action, state = state)
+            }
+            item {
+                AnimatedContent(
+                    targetState = feedback,
+                    transitionSpec = {
+                        ContentTransform(
+                            targetContentEnter = fadeIn(InstallerMotion.stateChange()),
+                            initialContentExit = fadeOut(InstallerMotion.stateChange()),
+                            sizeTransform = null,
+                        )
+                    },
+                    contentKey = { target ->
+                        target?.let {
+                            "${it.actionId}:${it.status}:${it.resultCode ?: ""}:${it.reasonCode ?: ""}"
+                        } ?: "waiting"
+                    },
+                    label = "maintenanceActionState",
+                ) { target ->
+                    if (target == null) {
+                        MaintenanceActionWaiting()
+                    } else {
+                        MaintenanceFeedbackBlock(target, state.applications)
+                    }
+                }
+            }
+            item {
+                MaintenanceNextStep(
+                    text = stringResource(
+                        if (feedback == null) {
+                            R.string.maintenance_next_step_preparing
+                        } else {
+                            maintenanceNextStep(feedback.status)
+                        },
+                    ),
+                )
+            }
+        }
+        Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
+    }
+}
+
+@Composable
+private fun MaintenanceActionHeader(
+    action: MaintenanceActionId,
+    state: InstallUiState.Maintenance,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        StatusIcon(
+            name = actionIcon(action),
+            contentDescription = stringResource(actionTitle(action)),
+            tint = InstallerColors.White,
+            size = InstallerDimensions.IconSize,
+        )
+        Text(
+            text = stringResource(actionDescription(action)),
+            style = MaterialTheme.typography.bodyLarge,
+            color = InstallerColors.AuxiliaryWhite,
+        )
+        DividerLine()
+        Text(
+            text = stringResource(
+                R.string.maintenance_action_target,
+                state.deviceName ?: stringResource(R.string.maintenance_disconnected),
+            ),
+            style = MaterialTheme.typography.bodyMedium,
+            color = InstallerColors.White,
+        )
+        Text(
+            text = stringResource(R.string.maintenance_action_scope, stringResource(actionTitle(action))),
+            style = MaterialTheme.typography.bodySmall,
+            color = InstallerColors.AuxiliaryWhite,
+        )
+    }
+}
+
+@Composable
+private fun MaintenanceActionWaiting() {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        CircularProgressIndicator(
+            modifier = Modifier
+                .size(28.dp)
+                .testTag("maintenance_action_progress"),
+            color = InstallerColors.White,
+            strokeWidth = 2.dp,
+        )
+        Text(
+            text = stringResource(R.string.maintenance_action_preparing),
+            style = MaterialTheme.typography.bodyLarge,
+            color = InstallerColors.White,
+        )
+    }
+}
+
+@Composable
+private fun MaintenanceNextStep(text: String) {
+    Text(
+        text = stringResource(R.string.maintenance_next_step_label, text),
+        style = MaterialTheme.typography.bodySmall,
+        color = InstallerColors.AuxiliaryWhite,
+    )
 }
 
 @Composable
@@ -142,7 +615,18 @@ private fun DeviceStatusHeader(
                 pressedColor = InstallerColors.PageBlue,
                 borderColor = InstallerColors.White,
             ) {
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    CircularProgressIndicator(
+                        modifier = Modifier
+                            .size(16.dp)
+                            .testTag("maintenance_reconnect_progress"),
+                        color = InstallerColors.White,
+                        strokeWidth = 2.dp,
+                    )
                     Text(text = stringResource(R.string.maintenance_reconnecting), style = MaterialTheme.typography.bodySmall, color = InstallerColors.White)
                 }
             }
@@ -215,7 +699,17 @@ private fun MaintenanceFeedbackBlock(
             horizontalArrangement = Arrangement.spacedBy(12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            StatusIcon(name = icon, contentDescription = title, tint = tint)
+            if (feedback.status == MaintenanceActionStatus.RUNNING) {
+                CircularProgressIndicator(
+                    modifier = Modifier
+                        .size(28.dp)
+                        .testTag("maintenance_action_progress"),
+                    color = InstallerColors.White,
+                    strokeWidth = 2.dp,
+                )
+            } else {
+                StatusIcon(name = icon, contentDescription = title, tint = tint)
+            }
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(text = title, style = MaterialTheme.typography.bodyLarge, color = InstallerColors.White)
                 maintenanceFeedbackDescription(feedback)?.let { description ->
@@ -264,6 +758,22 @@ private fun MaintenanceFeedbackBlock(
             }
         }
     }
+}
+
+private fun maintenanceNextStep(status: MaintenanceActionStatus): Int = when (status) {
+    MaintenanceActionStatus.RUNNING -> R.string.maintenance_next_step_running
+    MaintenanceActionStatus.SUCCEEDED -> R.string.maintenance_next_step_succeeded
+    MaintenanceActionStatus.FAILED -> R.string.maintenance_next_step_failed
+}
+
+private fun maintenanceResultNextStep(kind: ResultKind): Int = when (kind) {
+    ResultKind.SUCCESS -> R.string.maintenance_next_step_succeeded
+    ResultKind.PAUSED,
+    ResultKind.INSTALLATION_FAILED,
+    -> R.string.maintenance_next_step_continue
+
+    ResultKind.DOWNLOAD_FAILED -> R.string.maintenance_next_step_retry
+    ResultKind.CONFIGURATION_FAILED -> R.string.maintenance_next_step_reconfigure
 }
 
 @Composable

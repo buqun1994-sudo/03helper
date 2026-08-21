@@ -33,6 +33,8 @@ sealed interface InstallationSessionCommand {
     /** Internal recovery command: restart from the saved selection after an uncertain write stage. */
     data object RestartFromCheckpoint : InstallationSessionCommand
     data object Reconnect : InstallationSessionCommand
+    /** Internal fast path: retry the last verified device endpoint without a subnet scan. */
+    data object ReconnectKnownDevice : InstallationSessionCommand
     data object DisconnectDevice : InstallationSessionCommand
     data object EnterMaintenance : InstallationSessionCommand
     data class MaintenanceAction(val actionId: MaintenanceActionId) : InstallationSessionCommand

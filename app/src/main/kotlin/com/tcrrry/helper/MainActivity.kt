@@ -19,15 +19,15 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        // Seed the first frame with the same bounded discovery used on foreground re-entry.
-        installerRuntime.onForeground()
         setContent {
             InstallerRoot(installerRuntime)
         }
     }
 
-    override fun onStart() {
-        super.onStart()
+    override fun onResume() {
+        super.onResume()
+        // onResume is the single foreground boundary: it covers first entry and
+        // the fast recovery path after a lock-screen pause without duplicate work.
         installerRuntime.onForeground()
     }
 

@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
@@ -35,6 +36,7 @@ import com.tcrrry.helper.ui.theme.InstallerMotion
 fun TaskTopBar(
     title: String,
     modifier: Modifier = Modifier,
+    onBack: (() -> Unit)? = null,
 ) {
     Row(
         modifier = modifier
@@ -42,10 +44,34 @@ fun TaskTopBar(
             .height(InstallerDimensions.TopBarHeight),
         verticalAlignment = Alignment.CenterVertically,
     ) {
+        if (onBack != null) {
+            PressableSurface(
+                onClick = onBack,
+                modifier = Modifier.size(48.dp),
+                minHeight = 48.dp,
+                containerColor = InstallerColors.PageBlue,
+                pressedColor = InstallerColors.PressedBlue,
+                borderColor = InstallerColors.WhiteBorder,
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.Center,
+                ) {
+                    InstallerIcon(
+                        name = "arrow_left",
+                        contentDescription = stringResource(R.string.navigation_back),
+                        tint = InstallerColors.White,
+                        size = 24.dp,
+                    )
+                }
+            }
+        }
         Text(
             text = title,
             style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
             color = InstallerColors.White,
+            modifier = if (onBack != null) Modifier.padding(start = 12.dp) else Modifier,
         )
     }
 }

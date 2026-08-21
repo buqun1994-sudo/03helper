@@ -87,6 +87,7 @@ private fun componentFallbackIcon(iconKey: String): String = when (iconKey) {
 }
 
 private fun lucideDrawable(name: String): Int = when (name) {
+    "arrow_left" -> LucideR.drawable.lucide_ic_arrow_left
     "car_front" -> LucideR.drawable.lucide_ic_car_front
     "chevron_right" -> LucideR.drawable.lucide_ic_chevron_right
     "circle" -> LucideR.drawable.lucide_ic_circle
