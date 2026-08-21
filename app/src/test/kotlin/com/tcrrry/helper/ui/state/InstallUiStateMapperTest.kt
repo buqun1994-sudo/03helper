@@ -7,6 +7,11 @@ import com.tcrrry.helper.domain.session.FailureCategory
 import com.tcrrry.helper.domain.session.InstallPhase
 import com.tcrrry.helper.domain.session.InstallationSessionSnapshot
 import com.tcrrry.helper.domain.session.InstallationSessionState
+import com.tcrrry.helper.domain.session.MaintenanceActionId
+import com.tcrrry.helper.domain.session.MaintenanceActionRecord
+import com.tcrrry.helper.domain.session.MaintenanceActionStatus
+import com.tcrrry.helper.domain.session.MaintenanceSnapshot
+import com.tcrrry.helper.domain.session.ManagedApplicationStatus
 import com.tcrrry.helper.domain.session.ResultKind
 import com.tcrrry.helper.domain.session.SessionFailure
 import com.tcrrry.helper.domain.session.SessionProgress
@@ -175,6 +180,38 @@ class InstallUiStateMapperTest {
             ),
         ) as InstallUiState.Selection
         assertFalse(incomplete.canStart)
+    }
+
+    @Test
+    fun `maintenance feedback and managed application rows come from the session snapshot`() {
+        val state = InstallUiStateMapper.map(
+            InstallationSessionSnapshot(
+                state = InstallationSessionState.MAINTENANCE,
+                device = device.copy(connectionStatus = DeviceConnectionStatus.DISCONNECTED),
+                components = listOf(
+                    component("desktop", required = true, size = "12 MB"),
+                    component("lyrics", required = false, size = "18 MB"),
+                ),
+                maintenance = MaintenanceSnapshot(
+                    lastAction = MaintenanceActionRecord(
+                        actionId = MaintenanceActionId.MANAGE_APPS,
+                        status = MaintenanceActionStatus.SUCCEEDED,
+                        resultCode = "applications_checked",
+                    ),
+                    managedApplications = listOf(
+                        ManagedApplicationStatus("desktop", "com.tcrrry.desktop", true),
+                        ManagedApplicationStatus("lyrics", "com.tcrrry.desktoplyrics", false),
+                    ),
+                ),
+            ),
+        ) as InstallUiState.Maintenance
+
+        assertEquals(MaintenanceActionId.MANAGE_APPS, state.feedback?.actionId)
+        assertEquals(MaintenanceActionStatus.SUCCEEDED, state.feedback?.status)
+        assertEquals(listOf("desktop", "lyrics"), state.applications.map { it.componentId })
+        assertEquals(listOf("desktop", "lyrics"), state.applications.map { it.displayName })
+        assertEquals(listOf(true, false), state.applications.map { it.installed })
+        assertFalse(state.connected)
     }
 
     private fun selectionSnapshot(

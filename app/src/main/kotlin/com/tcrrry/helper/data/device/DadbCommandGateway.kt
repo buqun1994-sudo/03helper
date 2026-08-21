@@ -6,6 +6,7 @@ import com.tcrrry.helper.domain.artifact.ArtifactManifestValidator
 import com.tcrrry.helper.domain.artifact.ManifestValidation
 import com.tcrrry.helper.domain.device.AdbCommandGateway
 import com.tcrrry.helper.domain.device.AuthorizationActionEvidence
+import com.tcrrry.helper.domain.device.AuthorizationDeclarationValidator
 import com.tcrrry.helper.domain.device.AuthorizationPlanBuildResult
 import com.tcrrry.helper.domain.device.AuthorizationPlanFactory
 import com.tcrrry.helper.domain.device.AuthorizationValueState
@@ -17,6 +18,10 @@ import com.tcrrry.helper.domain.device.DeviceAvailabilityEvidence
 import com.tcrrry.helper.domain.device.DeviceInstallResult
 import com.tcrrry.helper.domain.device.InstallableArtifact
 import com.tcrrry.helper.domain.device.InstalledArtifactEvidence
+import com.tcrrry.helper.domain.device.ManagedApplicationProbe
+import com.tcrrry.helper.domain.device.ManagedApplicationsResult
+import com.tcrrry.helper.domain.device.MaintenanceCommandGateway
+import com.tcrrry.helper.domain.device.MaintenanceDeviceResult
 import android.util.Log
 import dadb.AdbShellResponse
 import dadb.Dadb
@@ -39,7 +44,7 @@ internal class DadbCommandGateway(
     private val ioMutex: Mutex,
     private val installedApkCacheDirectory: File?,
     private val installedApkMetadataReader: ApkMetadataReader?,
-) : AdbCommandGateway {
+) : AdbCommandGateway, MaintenanceCommandGateway {
     override suspend fun install(artifacts: List<InstallableArtifact>): DeviceInstallResult = withLease(
         whenClosed = DeviceInstallResult.Failed(
             DeviceActionFailure("adb_connection_closed", retryable = true),
@@ -169,6 +174,117 @@ internal class DadbCommandGateway(
         result
     }
 
+    override suspend fun repairAuthorization(
+        manifests: List<com.tcrrry.helper.domain.artifact.ArtifactManifest>,
+    ): MaintenanceDeviceResult = withLease(
+        whenClosed = MaintenanceDeviceResult.Failed(
+            DeviceActionFailure("adb_connection_closed", retryable = true),
+        ),
+    ) {
+        if (ArtifactManifestValidator.validateCatalog(manifests) !is ManifestValidation.Valid) {
+            return@withLease MaintenanceDeviceResult.Failed(
+                DeviceActionFailure("maintenance_manifest_invalid", retryable = false),
+            )
+        }
+        val components = manifests.map {
+            com.tcrrry.helper.domain.device.ManagedComponent(it.componentId, it.packageName)
+        }
+        val plan = when (val result = AuthorizationPlanFactory.createForComponents(components)) {
+            is AuthorizationPlanBuildResult.Ready -> result.plan
+            is AuthorizationPlanBuildResult.Rejected -> return@withLease MaintenanceDeviceResult.Failed(
+                DeviceActionFailure(result.reasonCode, retryable = false),
+            )
+        }
+        val verificationDirectory = installedApkCacheDirectory
+            ?: return@withLease MaintenanceDeviceResult.Failed(
+                DeviceActionFailure("install_apk_verifier_unavailable", retryable = false),
+            )
+        val metadataReader = installedApkMetadataReader
+            ?: return@withLease MaintenanceDeviceResult.Failed(
+                DeviceActionFailure("install_apk_verifier_unavailable", retryable = false),
+            )
+        if (!verificationDirectory.mkdirs() && !verificationDirectory.isDirectory) {
+            return@withLease MaintenanceDeviceResult.Failed(
+                DeviceActionFailure("installed_apk_verification_cache_unavailable", retryable = true),
+            )
+        }
+        val declarations = linkedMapOf<String, com.tcrrry.helper.domain.device.ApkDeclarationMetadata?>()
+        manifests.forEach { manifest ->
+            when (val result = verifyInstalledArtifactForMaintenance(manifest, metadataReader, verificationDirectory)) {
+                is MaintenanceInstalledIdentity.Completed -> declarations[manifest.componentId] = result.declarations
+                is MaintenanceInstalledIdentity.Failed -> return@withLease MaintenanceDeviceResult.Failed(result.failure)
+            }
+        }
+        AuthorizationDeclarationValidator.validateDeclarations(plan, declarations)?.let { failure ->
+            return@withLease MaintenanceDeviceResult.Failed(failure)
+        }
+        val response = try {
+            adb.shell(CombinedAuthorizationCommand.build(manifests.map { it.componentId }.toSet(), repairOnly = true))
+        } catch (_: IOException) {
+            null
+        } catch (_: Exception) {
+            null
+        }
+        CombinedAuthorizationResponseParser.parseRepair(response, plan)
+    }
+
+    override suspend fun inspectManagedApplications(): ManagedApplicationsResult = withLease(
+        whenClosed = ManagedApplicationsResult.Failed(
+            DeviceActionFailure("adb_connection_closed", retryable = true),
+        ),
+    ) {
+        val applications = mutableListOf<ManagedApplicationProbe>()
+        AuthorizationPlanFactory.allManagedComponents().forEach { component ->
+            when (val result = inspectInstalledPackage(component.componentId, component.packageName)) {
+                is PackageInspection.Completed -> applications += ManagedApplicationProbe(
+                    componentId = component.componentId,
+                    packageName = component.packageName,
+                    installed = result.installed,
+                )
+
+                is PackageInspection.Failed -> return@withLease ManagedApplicationsResult.Failed(result.failure)
+            }
+        }
+        ManagedApplicationsResult.Completed(applications)
+    }
+
+    override suspend fun launchManagedComponent(componentId: String): MaintenanceDeviceResult = withLease(
+        whenClosed = MaintenanceDeviceResult.Failed(
+            DeviceActionFailure("adb_connection_closed", retryable = true),
+        ),
+    ) {
+        val component = AuthorizationPlanFactory.allManagedComponents().firstOrNull {
+            it.componentId == componentId
+        } ?: return@withLease MaintenanceDeviceResult.Failed(
+            DeviceActionFailure("maintenance_component_unapproved", componentId, retryable = false),
+        )
+        val launchComponent = AuthorizationPlanFactory.fixedLaunchComponent(component)
+            ?: return@withLease MaintenanceDeviceResult.Failed(
+                DeviceActionFailure("maintenance_launch_unavailable", componentId, retryable = false),
+            )
+        when (val installed = inspectInstalledPackage(component.componentId, component.packageName)) {
+            is PackageInspection.Failed -> return@withLease MaintenanceDeviceResult.Failed(installed.failure)
+            is PackageInspection.Completed -> if (!installed.installed) {
+                return@withLease MaintenanceDeviceResult.Failed(
+                    DeviceActionFailure("maintenance_component_not_installed", componentId, retryable = false),
+                )
+            }
+        }
+        val launch = shell("am start -n $launchComponent")
+        if (!isSuccessful(launch)) {
+            return@withLease MaintenanceDeviceResult.Failed(
+                DeviceActionFailure("maintenance_launch_failed", componentId, retryable = true),
+            )
+        }
+        val process = shell("pidof ${component.packageName}")
+        if (!isSuccessful(process) || process?.output?.trim().isNullOrBlank()) {
+            return@withLease MaintenanceDeviceResult.Failed(
+                DeviceActionFailure("maintenance_process_not_running", componentId, retryable = true),
+            )
+        }
+        MaintenanceDeviceResult.Completed("component_launched")
+    }
+
     private fun validateInstallableArtifact(artifact: InstallableArtifact): DeviceActionFailure? {
         if (ArtifactManifestValidator.validate(artifact.manifest) !is ManifestValidation.Valid) {
             return DeviceActionFailure("install_manifest_invalid", artifact.manifest.componentId, retryable = false)
@@ -273,6 +389,87 @@ internal class DadbCommandGateway(
         }
     }
 
+    private fun verifyInstalledArtifactForMaintenance(
+        manifest: com.tcrrry.helper.domain.artifact.ArtifactManifest,
+        metadataReader: ApkMetadataReader,
+        verificationDirectory: File,
+    ): MaintenanceInstalledIdentity {
+        val remoteApkPath = readInstalledApkPath(manifest.packageName)
+            ?: return MaintenanceInstalledIdentity.Failed(
+                DeviceActionFailure("maintenance_package_path_missing", manifest.componentId, retryable = false),
+            )
+        val pulledApk = verificationDirectory.resolve(
+            "maintenance-${manifest.componentId}-${manifest.apkSha256.lowercase().take(16)}.apk",
+        )
+        pulledApk.delete()
+        return try {
+            adb.pull(pulledApk, remoteApkPath)
+            val metadata = metadataReader.read(pulledApk)
+                ?: return MaintenanceInstalledIdentity.Failed(
+                    DeviceActionFailure(
+                        "maintenance_installed_apk_metadata_unreadable",
+                        manifest.componentId,
+                        retryable = true,
+                    ),
+                )
+            val digest = sha256(pulledApk)
+            val certificateMatches = metadata.certificateSha256s.any { candidate ->
+                candidate.equals(manifest.certificateSha256, ignoreCase = true)
+            }
+            if (
+                pulledApk.length() != manifest.apkSizeBytes ||
+                !digest.equals(manifest.apkSha256, ignoreCase = true) ||
+                metadata.packageName != manifest.packageName ||
+                metadata.version != manifest.apkVersion ||
+                !certificateMatches
+            ) {
+                MaintenanceInstalledIdentity.Failed(
+                    DeviceActionFailure(
+                        "maintenance_installed_identity_mismatch",
+                        manifest.componentId,
+                        retryable = false,
+                    ),
+                )
+            } else {
+                MaintenanceInstalledIdentity.Completed(metadata.declarations)
+            }
+        } catch (_: IOException) {
+            MaintenanceInstalledIdentity.Failed(
+                DeviceActionFailure("maintenance_installed_apk_read_failed", manifest.componentId, retryable = true),
+            )
+        } catch (_: Exception) {
+            MaintenanceInstalledIdentity.Failed(
+                DeviceActionFailure("maintenance_installed_apk_verify_failed", manifest.componentId, retryable = true),
+            )
+        } finally {
+            pulledApk.delete()
+        }
+    }
+
+    private fun inspectInstalledPackage(componentId: String, packageName: String): PackageInspection {
+        val response = shell("pm path $packageName")
+            ?: return PackageInspection.Failed(
+                DeviceActionFailure("maintenance_package_check_failed", componentId, retryable = true),
+            )
+        if (response.exitCode != 0 || response.errorOutput.isNotBlank()) {
+            return PackageInspection.Failed(
+                DeviceActionFailure("maintenance_package_check_failed", componentId, retryable = true),
+            )
+        }
+        val paths = response.output.lineSequence()
+            .map(String::trim)
+            .filter { it.startsWith("package:") }
+            .map { it.removePrefix("package:") }
+            .toList()
+        if (paths.isEmpty()) return PackageInspection.Completed(installed = false)
+        if (paths.size != 1 || !INSTALLED_APK_PATH_PATTERN.matches(paths.single())) {
+            return PackageInspection.Failed(
+                DeviceActionFailure("maintenance_package_identity_invalid", componentId, retryable = false),
+            )
+        }
+        return PackageInspection.Completed(installed = true)
+    }
+
     private fun remoteApkPath(artifact: InstallableArtifact): String? {
         val componentId = artifact.manifest.componentId
         val digestPrefix = artifact.manifest.apkSha256.lowercase().take(16)
@@ -321,6 +518,20 @@ internal class DadbCommandGateway(
         data class Verified(val evidence: InstalledArtifactEvidence) : InstalledArtifactIdentityResult
 
         data class Failed(val failure: DeviceActionFailure) : InstalledArtifactIdentityResult
+    }
+
+    private sealed interface MaintenanceInstalledIdentity {
+        data class Completed(
+            val declarations: com.tcrrry.helper.domain.device.ApkDeclarationMetadata,
+        ) : MaintenanceInstalledIdentity
+
+        data class Failed(val failure: DeviceActionFailure) : MaintenanceInstalledIdentity
+    }
+
+    private sealed interface PackageInspection {
+        data class Completed(val installed: Boolean) : PackageInspection
+
+        data class Failed(val failure: DeviceActionFailure) : PackageInspection
     }
 
     private companion object {
@@ -412,6 +623,52 @@ internal object CombinedAuthorizationResponseParser {
         )
     }
 
+    fun parseRepair(
+        response: AdbShellResponse?,
+        plan: com.tcrrry.helper.domain.device.AuthorizationPlan,
+    ): MaintenanceDeviceResult {
+        if (response == null) {
+            return MaintenanceDeviceResult.Failed(
+                DeviceActionFailure("adb_combined_command_failed", retryable = true),
+            )
+        }
+        val lines = response.output.lineSequence()
+            .map(String::trim)
+            .filter { it.startsWith(CombinedAuthorizationCommand.MARKER) }
+            .toList()
+        val failure = lines.firstOrNull { it.startsWith("${CombinedAuthorizationCommand.MARKER}|FAIL|") }
+        if (failure != null || response.exitCode != 0) {
+            val parts = failure?.split('|').orEmpty()
+            val reasonCode = parts.getOrNull(2).takeUnless { it.isNullOrBlank() }
+                ?: "adb_combined_command_failed"
+            val componentId = parts.getOrNull(3).takeUnless { it.isNullOrBlank() }
+            return MaintenanceDeviceResult.Failed(
+                DeviceActionFailure(
+                    reasonCode = reasonCode,
+                    componentId = componentId,
+                    retryable = reasonCode !in setOf("desktop_missing", "selected_component_missing"),
+                ),
+            )
+        }
+        if (lines.none { it == "${CombinedAuthorizationCommand.MARKER}|DONE|OK" }) {
+            return MaintenanceDeviceResult.Failed(
+                DeviceActionFailure("combined_command_result_missing", retryable = false),
+            )
+        }
+        val evidence = lines.mapNotNull(::parseAuthorizationEvidence)
+        if (!AuthorizationPlanFactory.validateEvidence(plan, evidence)) {
+            return MaintenanceDeviceResult.Failed(
+                DeviceActionFailure("authorization_evidence_invalid", retryable = false),
+            )
+        }
+        if (lines.any { it.startsWith("${CombinedAuthorizationCommand.MARKER}|LAUNCH|") }) {
+            return MaintenanceDeviceResult.Failed(
+                DeviceActionFailure("maintenance_unexpected_launch", retryable = false),
+            )
+        }
+        return MaintenanceDeviceResult.Completed("authorization_repaired")
+    }
+
     private fun parseAuthorizationEvidence(line: String): AuthorizationActionEvidence? {
         val parts = line.split('|')
         if (parts.size < 8 || parts[1] != "AUTH") return null
@@ -441,12 +698,18 @@ internal object CombinedAuthorizationResponseParser {
 internal object CombinedAuthorizationCommand {
     const val MARKER = "03HELPER"
 
-    fun build(selectedComponentIds: Set<String>): String {
+    fun build(
+        selectedComponentIds: Set<String>,
+        repairOnly: Boolean = false,
+    ): String {
         val ordered = AuthorizationPlanFactory.allManagedComponents()
             .map { it.componentId }
             .filter { it in selectedComponentIds }
         require(ordered.toSet() == selectedComponentIds) { "unapproved_component" }
-        val arguments = ordered.joinToString(" ")
+        val arguments = buildList {
+            if (repairOnly) add("--repair")
+            addAll(ordered)
+        }.joinToString(" ")
         return "sh -c ${shellQuote(SCRIPT)} 03helper $arguments"
     }
 
@@ -456,6 +719,8 @@ internal object CombinedAuthorizationCommand {
     private val SCRIPT = """
         set -u
         marker='03HELPER'
+        repair_only=0
+        if [ "${'$'}{1:-}" = --repair ]; then repair_only=1; shift; fi
         selected() { wanted="${'$'}1"; shift; for value in "${'$'}@"; do [ "${'$'}value" = "${'$'}wanted" ] && return 0; done; return 1; }
         emit() { printf '%s|%s\n' "${'$'}marker" "${'$'}*"; }
         fail() { emit "FAIL|${'$'}1|${'$'}{2:-}"; exit 1; }
@@ -627,6 +892,7 @@ internal object CombinedAuthorizationCommand {
         fi
 
         [ "${'$'}skipped" -eq 0 ] || fail selected_component_missing
+        if [ "${'$'}repair_only" -eq 1 ]; then emit "DONE|OK"; exit 0; fi
         launch_component='${AuthorizationPlanFactory.DESKTOP_MAIN_ACTIVITY}'
         am start -n "${'$'}launch_component" >/dev/null 2>&1 || fail desktop_launch_failed desktop
         process_state=STOPPED; attempt=1

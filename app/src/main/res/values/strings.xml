@@ -81,6 +81,23 @@
     <string name="maintenance_cleanup_description">删除安装缓存和过期会话</string>
     <string name="maintenance_diagnostics">导出诊断</string>
     <string name="maintenance_diagnostics_description">生成脱敏的安装记录</string>
+    <string name="maintenance_action_running">正在处理：%1$s</string>
+    <string name="maintenance_action_completed">%1$s已完成</string>
+    <string name="maintenance_action_failed">%1$s暂时未完成</string>
+    <string name="maintenance_result_updates_available">发现可用更新</string>
+    <string name="maintenance_result_up_to_date">当前已是最新版本</string>
+    <string name="maintenance_result_authorization_repaired">授权已修复</string>
+    <string name="maintenance_result_applications_checked">应用状态已更新</string>
+    <string name="maintenance_result_component_launched">已在车机启动</string>
+    <string name="maintenance_result_cache_cleared">安装缓存已清理</string>
+    <string name="maintenance_result_diagnostics_ready">诊断记录已生成</string>
+    <string name="maintenance_failure_disconnected">请先重新连接车机</string>
+    <string name="maintenance_failure_catalog">暂时无法获取更新资料</string>
+    <string name="maintenance_failure_identity">车机应用身份不一致，已停止操作</string>
+    <string name="maintenance_failure_generic">暂时无法完成，请稍后重试</string>
+    <string name="maintenance_installed_apps">受控应用状态</string>
+    <string name="maintenance_app_installed">已安装</string>
+    <string name="maintenance_app_not_installed">未安装</string>
     <string name="unknown_value">待准备</string>
     <string name="device_not_connected">车机未连接</string>
 </resources>

@@ -4,6 +4,7 @@ import com.tcrrry.helper.application.device.DeviceDiscoverySessionAdapter
 import com.tcrrry.helper.application.device.DeviceConnectionSessionAdapter
 import com.tcrrry.helper.application.session.InstallationSessionEventDispatcher
 import com.tcrrry.helper.application.session.InstallationSessionEventPort
+import com.tcrrry.helper.application.maintenance.MaintenanceController
 import com.tcrrry.helper.domain.artifact.ArtifactManifest
 import com.tcrrry.helper.application.artifact.ArtifactPreparationResult
 import com.tcrrry.helper.application.artifact.PreparedArtifact
@@ -22,6 +23,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 
 /**
@@ -36,6 +38,8 @@ class InstallerRuntime(
     private val prepareArtifacts: suspend (List<ArtifactManifest>, InstallationSessionEventPort) -> Unit = { _, _ -> },
     private val prepareArtifactsWithResult: (suspend (List<ArtifactManifest>, InstallationSessionEventPort) -> ArtifactPreparationResult)? = null,
     private val executeDeviceInstallation: (suspend (DeviceConnectionLease, List<PreparedArtifact>, InstallationSessionEventPort) -> Unit)? = null,
+    private val maintenanceController: MaintenanceController? = null,
+    private val persistMaintenanceSnapshot: (suspend (InstallationSessionSnapshot) -> Unit)? = null,
     coroutineContext: CoroutineContext,
 ) : AutoCloseable {
     private val runtimeJob = SupervisorJob(coroutineContext[Job])
@@ -48,9 +52,31 @@ class InstallerRuntime(
     private var connectionHealthJob: Job? = null
     private var catalogJob: Job? = null
     private var artifactJob: Job? = null
+    private var maintenanceJob: Job? = null
     private var eventDispatcherSessionId: Long? = null
     private var eventDispatcher: InstallationSessionEventPort? = null
     private var closed = false
+
+    init {
+        persistMaintenanceSnapshot?.let { persist ->
+            scope.launch {
+                session.snapshots.collect { snapshot ->
+                    if (
+                        snapshot.state == InstallationSessionState.MAINTENANCE ||
+                        snapshot.state == InstallationSessionState.SUCCEEDED
+                    ) {
+                        try {
+                            persist(snapshot)
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (_: Exception) {
+                            // Persistence is best effort; the in-memory session remains authoritative.
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     @Synchronized
     fun dispatch(command: InstallationSessionCommand): InstallationSessionSnapshot {
@@ -114,16 +140,29 @@ class InstallerRuntime(
                 reconcile(after)
             }
 
-            InstallationSessionCommand.DisconnectDevice -> closeDeviceConnection()
+            InstallationSessionCommand.DisconnectDevice -> {
+                maintenanceJob?.cancel()
+                closeDeviceConnection()
+            }
 
             is InstallationSessionCommand.ToggleOptionalComponent,
             InstallationSessionCommand.BeginPipeline,
             InstallationSessionCommand.EnterMaintenance,
-            is InstallationSessionCommand.MaintenanceAction,
             -> Unit
+
+            is InstallationSessionCommand.MaintenanceAction -> when {
+                before.state == InstallationSessionState.MAINTENANCE &&
+                    after.state == InstallationSessionState.SELECTION_CONFIRMED -> beginArtifactPreparation(after)
+
+                before.state == InstallationSessionState.MAINTENANCE &&
+                    after.maintenance.activeAction == command.actionId &&
+                    before.maintenance.activeAction != command.actionId -> launchMaintenanceAction(command.actionId, after)
+            }
 
             is InstallationSessionCommand.AdapterEvent -> {
                 if (command.event is InstallationSessionEvent.DeviceDisconnected) {
+                    maintenanceJob?.cancel()
+                    maintenanceJob = null
                     closeDeviceConnection()
                 }
             }
@@ -218,15 +257,25 @@ class InstallerRuntime(
         connectionJob = scope.launch {
             try {
                 val connection = adapter.connect(device) ?: return@launch
-                if (session.currentSnapshot().state != InstallationSessionState.CONNECTED ||
-                    session.currentSnapshot().device?.id != device.identity.stableId
+                val confirmedSnapshot = session.currentSnapshot()
+                if (
+                    confirmedSnapshot.sessionId != snapshot.sessionId ||
+                    (
+                        confirmedSnapshot.state != InstallationSessionState.CONNECTED &&
+                            confirmedSnapshot.state != InstallationSessionState.MAINTENANCE
+                        ) ||
+                    confirmedSnapshot.device?.id != device.identity.stableId
                 ) {
                     connection.close()
                     return@launch
                 }
                 activeConnection?.close()
                 activeConnection = connection
-                launchCatalog(session.currentSnapshot())
+                if (confirmedSnapshot.state == InstallationSessionState.CONNECTED) {
+                    launchCatalog(confirmedSnapshot)
+                } else {
+                    scheduleConnectionHealthCheck(confirmedSnapshot)
+                }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
@@ -278,10 +327,16 @@ class InstallerRuntime(
                     prepareArtifacts(manifests, port)
                 } else if (result is ArtifactPreparationResult.Prepared) {
                     val connection = activeConnection
-                    if (
-                        connection == null ||
-                        session.currentSnapshot().state != InstallationSessionState.VERIFYING_ARTIFACTS
-                    ) {
+                    if (session.currentSnapshot().state != InstallationSessionState.VERIFYING_ARTIFACTS) {
+                        return@launch
+                    }
+                    if (connection == null) {
+                        port.emit(
+                            InstallationSessionEvent.FatalError(
+                                category = FailureCategory.INSTALLATION,
+                                reasonCode = "device_action_gateway_unavailable",
+                            ),
+                        )
                         return@launch
                     }
                     val execute = executeDeviceInstallation
@@ -303,6 +358,41 @@ class InstallerRuntime(
                     InstallationSessionEvent.FatalError(
                         category = FailureCategory.VERIFICATION,
                         reasonCode = "artifact_preparation_failed",
+                    ),
+                )
+            }
+        }
+    }
+
+    private fun launchMaintenanceAction(
+        actionId: com.tcrrry.helper.domain.session.MaintenanceActionId,
+        snapshot: InstallationSessionSnapshot,
+    ) {
+        maintenanceJob?.cancel()
+        val port = eventPortFor(snapshot)
+        val controller = maintenanceController
+        if (controller == null) {
+            port.emit(
+                InstallationSessionEvent.MaintenanceActionFailed(
+                    actionId = actionId,
+                    reasonCode = "maintenance_controller_unavailable",
+                    retryable = false,
+                ),
+            )
+            return
+        }
+        val connection = activeConnection
+        maintenanceJob = scope.launch {
+            try {
+                controller.execute(actionId, snapshot, connection, port)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                port.emit(
+                    InstallationSessionEvent.MaintenanceActionFailed(
+                        actionId = actionId,
+                        reasonCode = "maintenance_action_failed",
+                        retryable = true,
                     ),
                 )
             }
@@ -335,8 +425,10 @@ class InstallerRuntime(
         cancelConnectionAttempt()
         catalogJob?.cancel()
         artifactJob?.cancel()
+        maintenanceJob?.cancel()
         catalogJob = null
         artifactJob = null
+        maintenanceJob = null
     }
 
     private fun cancelAllWork(closeConnection: Boolean) {

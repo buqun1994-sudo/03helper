@@ -41,6 +41,23 @@ object InstallUiStateMapper {
         InstallationSessionState.MAINTENANCE -> InstallUiState.Maintenance(
             deviceName = snapshot.device?.displayName,
             connected = snapshot.device?.connectionStatus == DeviceConnectionStatus.CONFIRMED,
+            feedback = snapshot.maintenance.lastAction?.let { action ->
+                MaintenanceFeedback(
+                    actionId = action.actionId,
+                    status = action.status,
+                    resultCode = action.resultCode,
+                    reasonCode = action.reasonCode,
+                    retryable = action.retryable,
+                )
+            },
+            applications = snapshot.maintenance.managedApplications.map { application ->
+                MaintenanceApplicationRow(
+                    componentId = application.componentId,
+                    displayName = snapshot.components.firstOrNull { it.id == application.componentId }
+                        ?.displayName ?: application.componentId,
+                    installed = application.installed,
+                )
+            },
         )
     }
 

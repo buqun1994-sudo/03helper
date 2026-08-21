@@ -10,6 +10,10 @@ import java.io.File
  */
 interface DeviceActionConnectionLease : DeviceConnectionLease {
     val commandGateway: AdbCommandGateway
+
+    /** Optional F4 port; old connection fakes remain valid and fail closed. */
+    val maintenanceGateway: MaintenanceCommandGateway?
+        get() = commandGateway as? MaintenanceCommandGateway
 }
 
 interface AdbCommandGateway {
@@ -23,6 +27,33 @@ interface AdbCommandGateway {
         shortcut: DeviceShortcut,
         selectedComponentIds: Set<String>,
     ): DeviceShortcutResult
+}
+
+/** Fixed, non-shell maintenance operations available after a confirmed lease. */
+interface MaintenanceCommandGateway {
+    suspend fun repairAuthorization(manifests: List<ArtifactManifest>): MaintenanceDeviceResult
+
+    suspend fun inspectManagedApplications(): ManagedApplicationsResult
+
+    suspend fun launchManagedComponent(componentId: String): MaintenanceDeviceResult
+}
+
+sealed interface MaintenanceDeviceResult {
+    data class Completed(val resultCode: String = "completed") : MaintenanceDeviceResult
+
+    data class Failed(val failure: DeviceActionFailure) : MaintenanceDeviceResult
+}
+
+data class ManagedApplicationProbe(
+    val componentId: String,
+    val packageName: String,
+    val installed: Boolean,
+)
+
+sealed interface ManagedApplicationsResult {
+    data class Completed(val applications: List<ManagedApplicationProbe>) : ManagedApplicationsResult
+
+    data class Failed(val failure: DeviceActionFailure) : ManagedApplicationsResult
 }
 
 /** Capabilities read from an APK Manifest before any device-side write. */
@@ -403,7 +434,7 @@ object AuthorizationPlanFactory {
                 packageName = LYRICS_PACKAGE_NAME,
                 order = 1,
                 requiredRuntimeServices = listOf(LYRICS_NOTIFICATION_LISTENER, LYRICS_ACCESSIBILITY_SERVICE),
-                fixedLaunchComponent = null,
+                fixedLaunchComponent = LYRICS_MAIN_ACTIVITY,
             )
 
             DESKTOP_COMPONENT_ID -> ManagedComponentContract(
@@ -437,6 +468,7 @@ object AuthorizationPlanFactory {
     const val DESKTOP_PACKAGE_NAME = "com.tcrrry.desktop"
     const val FILE_MANAGER_PACKAGE_NAME = "org.fossify.filemanager.debug"
     const val DESKTOP_MAIN_ACTIVITY = "com.tcrrry.desktop/.MainActivity"
+    const val LYRICS_MAIN_ACTIVITY = "com.tcrrry.desktoplyrics/.MainActivity"
     const val FILE_MANAGER_MAIN_ACTIVITY =
         "org.fossify.filemanager.debug/org.fossify.filemanager.activities.MainActivity"
     const val LYRICS_NOTIFICATION_LISTENER =
@@ -457,10 +489,21 @@ object AuthorizationDeclarationValidator {
         if (byComponent.size != artifacts.size || byComponent.keys != plan.components.map { it.componentId }.toSet()) {
             return DeviceActionFailure("authorization_artifacts_mismatch", retryable = false)
         }
+        return validateDeclarations(
+            plan = plan,
+            declarationsByComponent = byComponent.mapValues { (_, artifact) -> artifact.declarations },
+        )
+    }
+
+    fun validateDeclarations(
+        plan: AuthorizationPlan,
+        declarationsByComponent: Map<String, ApkDeclarationMetadata?>,
+    ): DeviceActionFailure? {
+        if (declarationsByComponent.keys != plan.components.map { it.componentId }.toSet()) {
+            return DeviceActionFailure("authorization_artifacts_mismatch", retryable = false)
+        }
         plan.actions.forEach { action ->
-            val artifact = byComponent[action.componentId]
-                ?: return DeviceActionFailure("authorization_artifact_missing", action.componentId, retryable = false)
-            val declarations = artifact.declarations
+            val declarations = declarationsByComponent[action.componentId]
                 ?: return DeviceActionFailure(
                     "authorization_capability_metadata_missing",
                     action.componentId,

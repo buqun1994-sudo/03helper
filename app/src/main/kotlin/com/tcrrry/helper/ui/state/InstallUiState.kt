@@ -3,6 +3,7 @@ package com.tcrrry.helper.ui.state
 import com.tcrrry.helper.domain.session.DeviceConnectionStatus
 import com.tcrrry.helper.domain.session.InstallPhase
 import com.tcrrry.helper.domain.session.MaintenanceActionId
+import com.tcrrry.helper.domain.session.MaintenanceActionStatus
 import com.tcrrry.helper.domain.session.MaintenanceGroupId
 import com.tcrrry.helper.domain.session.ResultKind
 
@@ -49,6 +50,8 @@ sealed interface InstallUiState {
     data class Maintenance(
         val deviceName: String?,
         val connected: Boolean,
+        val feedback: MaintenanceFeedback? = null,
+        val applications: List<MaintenanceApplicationRow> = emptyList(),
         val groups: List<MaintenanceGroupId> = listOf(
             MaintenanceGroupId.COMMON,
             MaintenanceGroupId.APPS,
@@ -111,6 +114,20 @@ data class ComponentResultRow(
     val installed: Boolean,
     val configured: Boolean,
     val available: Boolean,
+)
+
+data class MaintenanceFeedback(
+    val actionId: MaintenanceActionId,
+    val status: MaintenanceActionStatus,
+    val resultCode: String? = null,
+    val reasonCode: String? = null,
+    val retryable: Boolean = false,
+)
+
+data class MaintenanceApplicationRow(
+    val componentId: String,
+    val displayName: String,
+    val installed: Boolean,
 )
 
 sealed interface InstallUiIntent {

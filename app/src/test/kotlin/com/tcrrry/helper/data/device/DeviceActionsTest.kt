@@ -121,6 +121,49 @@ class DeviceActionsTest {
     }
 
     @Test
+    fun `repair command never launches an application and still requires terminal evidence`() {
+        val command = CombinedAuthorizationCommand.build(setOf("desktop", "lyrics"), repairOnly = true)
+
+        assertTrue(command.endsWith("03helper --repair desktop lyrics"))
+        assertTrue(command.contains("repair_only=0"))
+        assertTrue(command.contains("if [ \"${'$'}{1:-}\" = --repair ]"))
+        val repairExit = command.indexOf("if [ \"${'$'}repair_only\" -eq 1 ]; then emit \"DONE|OK\"; exit 0; fi")
+        val launchPath = command.indexOf("launch_component=")
+        assertTrue(repairExit >= 0)
+        assertTrue(launchPath > repairExit)
+    }
+
+    @Test
+    fun `repair response rejects an unexpected launch marker`() {
+        val plan = AuthorizationPlanFactory.createForComponents(
+            AuthorizationPlanFactory.allManagedComponents(),
+        ) as AuthorizationPlanBuildResult.Ready
+        val authorizationLines = validAuthorizationEvidence(plan.plan).joinToString("\n") { evidence ->
+            listOf(
+                CombinedAuthorizationCommand.MARKER,
+                "AUTH",
+                evidence.componentId,
+                evidence.actionId,
+                evidence.before.name,
+                if (evidence.writeApplied) "1" else "0",
+                evidence.after.name,
+                evidence.preservedEntryCount?.toString() ?: "-",
+            ).joinToString("|")
+        }
+        val response = CombinedAuthorizationResponseParser.parseRepair(
+            AdbShellResponse(
+                "${authorizationLines}\n03HELPER|LAUNCH|desktop|OK|RUNNING|BOUND\n03HELPER|DONE|OK",
+                "",
+                0,
+            ),
+            plan.plan,
+        )
+
+        assertTrue(response is com.tcrrry.helper.domain.device.MaintenanceDeviceResult.Failed)
+        assertEquals("maintenance_unexpected_launch", (response as com.tcrrry.helper.domain.device.MaintenanceDeviceResult.Failed).failure.reasonCode)
+    }
+
+    @Test
     fun `combined response requires pipe-delimited terminal markers`() {
         val plan = AuthorizationPlanFactory.createForComponents(
             AuthorizationPlanFactory.allManagedComponents(),

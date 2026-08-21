@@ -15,6 +15,7 @@ import com.tcrrry.helper.domain.device.DeviceAvailabilityEvidence
 import com.tcrrry.helper.domain.device.DeviceCapability
 import com.tcrrry.helper.domain.device.InstalledArtifactEvidence
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -445,6 +446,124 @@ class InstallationSessionTest {
         assertEquals(InstallationSessionState.MAINTENANCE, session.currentSnapshot().state)
     }
 
+    @Test
+    fun `disconnected maintenance keeps only local actions available`() {
+        val session = maintenanceSession(connected = false)
+
+        session.dispatch(InstallationSessionCommand.MaintenanceAction(MaintenanceActionId.LAUNCH_DESKTOP))
+        assertEquals(MaintenanceActionStatus.FAILED, session.currentSnapshot().maintenance.lastAction?.status)
+        assertEquals("device_disconnected", session.currentSnapshot().maintenance.lastAction?.reasonCode)
+
+        val local = maintenanceSession(connected = false)
+        local.dispatch(InstallationSessionCommand.MaintenanceAction(MaintenanceActionId.CLEANUP))
+        assertEquals(MaintenanceActionId.CLEANUP, local.currentSnapshot().maintenance.activeAction)
+    }
+
+    @Test
+    fun `maintenance reconnect returns to maintenance and preserves installation evidence`() {
+        val session = maintenanceSession(connected = false)
+        val before = session.currentSnapshot()
+
+        session.dispatch(InstallationSessionCommand.Reconnect)
+        assertEquals(InstallationSessionState.DISCOVERING, session.currentSnapshot().state)
+        assertTrue(session.currentSnapshot().maintenanceReconnectPending)
+        assertEquals(before.components, session.currentSnapshot().components)
+        assertEquals(before.evidence, session.currentSnapshot().evidence)
+
+        session.dispatchEvent(InstallationSessionEvent.DeviceDiscovered(confirmedDevice))
+        session.dispatch(InstallationSessionCommand.SelectDevice(confirmedDevice.id))
+        val connecting = session.currentSnapshot()
+        assertEquals(InstallationSessionState.CONNECTING, connecting.state)
+        assertTrue(connecting.maintenanceReconnectPending)
+
+        session.dispatchEvent(
+            InstallationSessionEvent.DeviceConnectionConfirmed(confirmedDevice),
+            sessionId = connecting.sessionId,
+            sequence = connecting.lastEventSequence + 1L,
+        )
+        val restored = session.currentSnapshot()
+        assertEquals(InstallationSessionState.MAINTENANCE, restored.state)
+        assertEquals(DeviceConnectionStatus.CONFIRMED, restored.device?.connectionStatus)
+        assertFalse(restored.maintenanceReconnectPending)
+        assertEquals(before.components, restored.components)
+        assertEquals(before.evidence, restored.evidence)
+    }
+
+    @Test
+    fun `maintenance reconnect with no device stays on disconnected maintenance page`() {
+        val session = maintenanceSession(connected = false)
+        session.dispatch(InstallationSessionCommand.StartDiscovery)
+        session.dispatchEvent(InstallationSessionEvent.DiscoveryFinished(4, 0, "no_devices_found"))
+
+        val snapshot = session.currentSnapshot()
+        assertEquals(InstallationSessionState.MAINTENANCE, snapshot.state)
+        assertEquals(DeviceConnectionStatus.DISCONNECTED, snapshot.device?.connectionStatus)
+        assertFalse(snapshot.maintenanceReconnectPending)
+        assertEquals("no_devices_found", snapshot.failure?.reasonCode)
+        assertEquals(3, snapshot.components.size)
+    }
+
+    @Test
+    fun `maintenance action is serialized and disconnect closes the running action`() {
+        val session = maintenanceSession()
+        session.dispatch(InstallationSessionCommand.MaintenanceAction(MaintenanceActionId.CHECK_UPDATES))
+        session.dispatch(InstallationSessionCommand.MaintenanceAction(MaintenanceActionId.EXPORT_DIAGNOSTICS))
+        assertEquals(MaintenanceActionId.CHECK_UPDATES, session.currentSnapshot().maintenance.activeAction)
+
+        session.dispatch(InstallationSessionCommand.DisconnectDevice)
+        assertEquals(null, session.currentSnapshot().maintenance.activeAction)
+        assertEquals(MaintenanceActionStatus.FAILED, session.currentSnapshot().maintenance.lastAction?.status)
+        assertEquals("device_disconnected", session.currentSnapshot().maintenance.lastAction?.reasonCode)
+    }
+
+    @Test
+    fun `invalid managed application evidence fails closed instead of completing`() {
+        val session = maintenanceSession()
+        session.dispatch(InstallationSessionCommand.MaintenanceAction(MaintenanceActionId.MANAGE_APPS))
+        session.dispatchEvent(
+            InstallationSessionEvent.MaintenanceApplicationsResolved(
+                applications = listOf(
+                    ManagedApplicationStatus(
+                        componentId = AuthorizationPlanFactory.DESKTOP_COMPONENT_ID,
+                        packageName = "com.attacker.app",
+                        installed = true,
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(null, session.currentSnapshot().maintenance.activeAction)
+        assertEquals("maintenance_applications_invalid", session.currentSnapshot().maintenance.lastAction?.reasonCode)
+        session.dispatchEvent(
+            InstallationSessionEvent.MaintenanceActionCompleted(
+                MaintenanceActionId.MANAGE_APPS,
+                "applications_checked",
+            ),
+        )
+        assertEquals(MaintenanceActionStatus.FAILED, session.currentSnapshot().maintenance.lastAction?.status)
+    }
+
+    @Test
+    fun `update candidate is retained separately from the installed manifest`() {
+        val installed = fullManifest("desktop", versionCode = 1)
+        val available = fullManifest("desktop", versionCode = 2)
+        val session = maintenanceSession(manifests = listOf(installed))
+        session.dispatch(InstallationSessionCommand.MaintenanceAction(MaintenanceActionId.CHECK_UPDATES))
+        session.dispatchEvent(
+            InstallationSessionEvent.MaintenanceCatalogRefreshed(
+                catalogVersion = "catalog-2",
+                keyId = "key-1",
+                signatureAlgorithm = "Ed25519",
+                manifests = listOf(available),
+            ),
+        )
+
+        assertEquals(installed, session.currentSnapshot().artifactManifests.single())
+        assertEquals(available, session.currentSnapshot().maintenance.availableManifests.single())
+        assertEquals("catalog-2", session.currentSnapshot().maintenance.availableCatalogVersion)
+        assertFalse(session.currentSnapshot().maintenance.availableManifests.isEmpty())
+    }
+
     private fun connectedSession(
         includeOptional: Boolean,
         catalog: List<ComponentDescriptor> = components,
@@ -469,6 +588,54 @@ class InstallationSessionTest {
         }
         return session
     }
+
+    private fun maintenanceSession(
+        connected: Boolean = true,
+        manifests: List<ArtifactManifest> = emptyList(),
+    ): InstallationSession {
+        val device = confirmedDevice.copy(
+            connectionStatus = if (connected) DeviceConnectionStatus.CONFIRMED else DeviceConnectionStatus.DISCONNECTED,
+            androidSdk = 28,
+            capabilities = setOf(DeviceCapability.ADB_TCP, DeviceCapability.IDENTITY_READ),
+        )
+        return InstallationSession(
+            initialSnapshot = InstallationSessionSnapshot(
+                state = InstallationSessionState.MAINTENANCE,
+                device = device,
+                components = if (manifests.isEmpty()) components else manifests.map { it.toComponentDescriptor() },
+                selectedOptionalComponentIds = emptySet(),
+                artifactManifests = manifests,
+                evidence = SessionEvidence(installed = manifests.map { it.componentId }.toSet()),
+            ),
+        )
+    }
+
+    private fun fullManifest(componentId: String, versionCode: Long): ArtifactManifest = ArtifactManifest(
+        schemaVersion = 1,
+        componentId = componentId,
+        displayName = componentId,
+        required = componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID,
+        version = ArtifactVersion("1.$versionCode", versionCode),
+        compatibility = CompatibilityRange(minAndroidSdk = 26, maxAndroidSdk = 30),
+        archiveFileName = "$componentId.zip",
+        archiveSizeBytes = 100L,
+        archiveSha256 = "11".repeat(32),
+        apkEntryName = "$componentId.apk",
+        apkSizeBytes = 50L,
+        apkSha256 = "22".repeat(32),
+        packageName = when (componentId) {
+            AuthorizationPlanFactory.DESKTOP_COMPONENT_ID -> AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME
+            AuthorizationPlanFactory.LYRICS_COMPONENT_ID -> AuthorizationPlanFactory.LYRICS_PACKAGE_NAME
+            else -> AuthorizationPlanFactory.FILE_MANAGER_PACKAGE_NAME
+        },
+        apkVersion = ArtifactVersion("1.$versionCode", versionCode),
+        certificateSha256 = "33".repeat(32),
+        sources = listOf(
+            ArtifactSource(ArtifactSourceKind.LANZOU_SHARE, "https://wwatl.lanzouw.com/i$componentId"),
+            ArtifactSource(ArtifactSourceKind.R2, "https://assets.r2.dev/$componentId.zip"),
+            ArtifactSource(ArtifactSourceKind.GITHUB_RELEASES, "https://github.com/example/repo/releases/download/v1/$componentId.zip"),
+        ),
+    )
 
     private fun startToDeviceVerification(session: InstallationSession) {
         session.dispatch(InstallationSessionCommand.StartInstallation)

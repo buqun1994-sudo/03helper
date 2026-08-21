@@ -87,7 +87,7 @@
 1. 由项目 / Cloud 发布方提供并接入可验证的 Android profile、公钥、组件映射、ZIP / APK 身份和正式签名资料；资料缺失时客户端继续保持 fail closed。
 2. 真实 Android System WebView 蓝奏云回调、真实 ZIP 和正常三组件主链已经通过；仍需补做切网 / Range 续传、主源失败清理以及 R2 / GitHub Releases 对象上传后的回滚链验证。
 3. 真实 `S56_HQX` 正常安装、统一授权和 03 桌面启动可用性已经通过；仍需补做断线恢复，并用独立设备验证异常和破坏性动作门禁。
-4. 完成维护态的检查更新、保留数据重装、修复授权、重启服务、缓存清理、受控安装 / 卸载和脱敏诊断。
+4. F4 常用维护动作已完成应用层接线（检查更新、保留数据重装、修复授权、受控应用状态、缓存清理和脱敏诊断）；卸载、清除数据、降级、重启和其它高级动作仍未施工，真实目标车机维护主测待执行。
 5. 为 03 歌词、03桌面和文件管理器取得可审计的包身份、兼容范围、发布签名和合规材料。
 
 ## F2 交接入口（历史记录，已由 F3 接线取代）
@@ -188,3 +188,13 @@ F2 Debug APK 已按用户授权安装到指定手机。该段记录的是 F2 交
 3. 文档、Skill、本机环境和差异检查均通过：`check-project-docs.mjs`、`check-skills.mjs`、`check-local-environment.mjs`、`git diff --check`。
 4. 所有自动化结束后，使用最新 `app-debug.apk` 对手机执行一次保留数据覆盖安装，系统返回 `Success`。最终包为 `com.tcrrry.helper`、Debug、`0.1.0 (1)`，`android.permission.INTERNET` 已授予；`MAIN` / `LAUNCHER` 解析到 `com.tcrrry.helper/.MainActivity`。APK SHA-256 为 `dc0bec47aa202ddefd840608d1dc072265d2fc49c2bb5f06637a50186240e45f`。
 5. 本轮不提交、不推送、不发布；未清数据、卸载、降级、重启手机或车机，也未从电脑端手工执行综合授权命令。剩余未覆盖项仅为切网 / Range / 断线恢复、R2 / GitHub 发布对象和正式 Release 资料，不影响本次 Debug 三组件正常主链目标。
+
+## 2026-08-20 F4 维护态施工与收尾
+
+1. 已将维护动作接入 `MaintenanceController` 与同一 `InstallationSession`：检查更新、保留数据重装、修复授权、管理已安装应用、安装文件管理器、启动受控组件、缓存清理和脱敏诊断均使用固定动作 ID 与结构化完成 / 失败事件；重装和安装文件管理器复用既有清单、下载、校验和安装主链。
+2. 会话已增加维护动作串行门禁、断线失败收口和断线本地动作白名单；维护 UI 显示运行中 / 完成 / 失败反馈，车机断开时禁用车机动作，并在“管理已安装应用”成功后投影 03 桌面、03 歌词和文件管理器三项状态。
+3. 已新增 `MaintenanceSessionStore`：使用应用私有文件、schema 版本、严格 JSON、原子替换、来源策略和固定包身份校验；只保存设备摘要、组件、安装 / 配置 / 可用证据、当前 / 候选清单和最近一次已完成或失败动作，不保存活动动作、Cookie、Referer、短时 URL 或 shell 输出。损坏、过大、过期或不受信记录加载为无快照；有效记录冷启动为 `MAINTENANCE + DISCONNECTED`。
+4. 维护重连已接入同一发现 / 连接租约主链：从维护态发起有界发现时保留原清单、选择和证据；停止、无设备、设备不一致或握手失败回到维护断线态；确认同一设备后恢复维护态，不重新加载首次安装清单。
+5. 自动化验证通过：`91` 项 JVM 单测、`:app:lintDebug`、`:app:assembleDebug`、`:app:assembleDebugAndroidTest`、`check-local-environment.mjs`、`check-project-docs.mjs`、`check-skills.mjs` 和 `git diff --check` 均通过。
+6. 使用显式测试手机完成主包和 AndroidTest 包保留数据覆盖安装；随后运行既有 `connectedDebugAndroidTest`，生产入口与 Debug 维护场景 `2/2` 通过。测试框架移除目标包后，已再次覆盖安装最新 Debug 主包并核对 `com.tcrrry.helper`、Debug、`0.1.0 (1)`、`INTERNET` 已授予以及 `MainActivity` 的 `MAIN/LAUNCHER` 入口。最终 Debug APK SHA-256 为 `9eb6a842b393220e081ed3eca11440b01956efa116f56802ba1fdf13bc48bb2f`，AndroidTest APK SHA-256 为 `f56066697ff7dd1a435b77c30e8559d61744f3c4f9704fa6f87f4a5e21cef3a1`。
+7. 本轮未提交、未推送、未发布，未清数据、卸载、降级或重启设备，也未对真实车机执行维护写入。真实目标车机的检查更新、重装、修复授权、应用状态、断线重连和冷启动人工主测仍待执行；卸载、清除数据、降级、重启和任意 shell 仍不在 V1 主链，正式 Cloud / Release 资料阻断保持不变。

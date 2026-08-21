@@ -53,6 +53,12 @@ enum class ResultKind {
     CONFIGURATION_FAILED,
 }
 
+enum class MaintenanceActionStatus {
+    RUNNING,
+    SUCCEEDED,
+    FAILED,
+}
+
 enum class MaintenanceActionId {
     CHECK_UPDATES,
     REINSTALL,
@@ -64,6 +70,23 @@ enum class MaintenanceActionId {
     CLEANUP,
     EXPORT_DIAGNOSTICS,
 }
+
+/** Whether the action needs the retained, confirmed car connection. */
+val MaintenanceActionId.requiresConnectedDevice: Boolean
+    get() = when (this) {
+        MaintenanceActionId.CHECK_UPDATES,
+        MaintenanceActionId.CLEANUP,
+        MaintenanceActionId.EXPORT_DIAGNOSTICS,
+        -> false
+
+        MaintenanceActionId.REINSTALL,
+        MaintenanceActionId.REPAIR_CONFIGURATION,
+        MaintenanceActionId.MANAGE_APPS,
+        MaintenanceActionId.INSTALL_FILE_MANAGER,
+        MaintenanceActionId.LAUNCH_LYRICS,
+        MaintenanceActionId.LAUNCH_DESKTOP,
+        -> true
+    }
 
 enum class MaintenanceGroupId {
     COMMON,

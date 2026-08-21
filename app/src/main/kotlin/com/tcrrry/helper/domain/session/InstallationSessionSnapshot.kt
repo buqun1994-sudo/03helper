@@ -36,6 +36,9 @@ data class InstallationSessionSnapshot(
     val archiveDownloads: Map<String, ArchiveDownloadEvidence> = emptyMap(),
     val archiveVerifications: Map<String, ArchiveVerificationEvidence> = emptyMap(),
     val apkExtractions: Map<String, ApkExtractionEvidence> = emptyMap(),
+    val maintenance: MaintenanceSnapshot = MaintenanceSnapshot(),
+    /** True only while discovery was started to restore a disconnected maintenance lease. */
+    val maintenanceReconnectPending: Boolean = false,
 )
 
 data class DeviceSummary(
@@ -88,6 +91,31 @@ data class SessionEvidence(
     val available: Set<String> = emptySet(),
     val authorizationActions: List<AuthorizationActionEvidence> = emptyList(),
     val availability: Map<String, DeviceAvailabilityEvidence> = emptyMap(),
+)
+
+/** Structured, non-sensitive status for the one maintenance action in flight. */
+data class MaintenanceSnapshot(
+    val activeAction: MaintenanceActionId? = null,
+    val lastAction: MaintenanceActionRecord? = null,
+    val managedApplications: List<ManagedApplicationStatus> = emptyList(),
+    val availableManifests: List<ArtifactManifest> = emptyList(),
+    val availableCatalogVersion: String? = null,
+    val availableCatalogKeyId: String? = null,
+    val availableCatalogSignatureAlgorithm: String? = null,
+)
+
+data class MaintenanceActionRecord(
+    val actionId: MaintenanceActionId,
+    val status: MaintenanceActionStatus,
+    val resultCode: String? = null,
+    val reasonCode: String? = null,
+    val retryable: Boolean = false,
+)
+
+data class ManagedApplicationStatus(
+    val componentId: String,
+    val packageName: String,
+    val installed: Boolean,
 )
 
 /** The last reliable point from which a paused installation can resume. */

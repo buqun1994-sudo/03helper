@@ -141,6 +141,28 @@ sealed interface InstallationSessionEvent {
 
     data class DeviceReconnected(val device: DeviceSummary) : InstallationSessionEvent
 
+    data class MaintenanceActionCompleted(
+        val actionId: MaintenanceActionId,
+        val resultCode: String = "completed",
+    ) : InstallationSessionEvent
+
+    data class MaintenanceActionFailed(
+        val actionId: MaintenanceActionId,
+        val reasonCode: String,
+        val retryable: Boolean = true,
+    ) : InstallationSessionEvent
+
+    data class MaintenanceApplicationsResolved(
+        val applications: List<ManagedApplicationStatus>,
+    ) : InstallationSessionEvent
+
+    data class MaintenanceCatalogRefreshed(
+        val catalogVersion: String,
+        val keyId: String,
+        val signatureAlgorithm: String,
+        val manifests: List<ArtifactManifest>,
+    ) : InstallationSessionEvent
+
     data class RecoverableError(
         val category: FailureCategory,
         val componentName: String? = null,

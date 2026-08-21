@@ -116,24 +116,51 @@ class InstallationSession(
         if (current.state !in DISCOVERY_ENTRY_STATES) {
             return
         }
+        val maintenanceReconnect = current.state == InstallationSessionState.MAINTENANCE
+        val maintenanceDevice = if (maintenanceReconnect) {
+            current.device?.copy(connectionStatus = DeviceConnectionStatus.DISCONNECTED)
+        } else {
+            null
+        }
+        val maintenance = if (maintenanceReconnect) {
+            current.maintenance.copy(
+                activeAction = null,
+                lastAction = current.maintenance.activeAction?.let { actionId ->
+                    MaintenanceActionRecord(
+                        actionId = actionId,
+                        status = MaintenanceActionStatus.FAILED,
+                        reasonCode = "reconnect_started",
+                        retryable = true,
+                    )
+                } ?: current.maintenance.lastAction,
+            )
+        } else {
+            MaintenanceSnapshot()
+        }
         startNewGeneration(
             current.copy(
                 state = InstallationSessionState.DISCOVERING,
-                device = null,
+                device = maintenanceDevice,
                 discoveredDevices = emptyList(),
-                selectedOptionalComponentIds = emptySet(),
-                currentComponentName = null,
-                progress = null,
+                selectedOptionalComponentIds = if (maintenanceReconnect) {
+                    current.selectedOptionalComponentIds
+                } else {
+                    emptySet()
+                },
+                currentComponentName = if (maintenanceReconnect) current.currentComponentName else null,
+                progress = if (maintenanceReconnect) current.progress else null,
                 failure = null,
                 checkpoint = null,
-                evidence = SessionEvidence(),
-                componentResults = emptyList(),
+                evidence = if (maintenanceReconnect) current.evidence else SessionEvidence(),
+                componentResults = if (maintenanceReconnect) current.componentResults else emptyList(),
                 components = current.components.ifEmpty { catalog },
-                selectedSources = emptyMap(),
-                sourceFailures = emptyList(),
-                archiveDownloads = emptyMap(),
-                archiveVerifications = emptyMap(),
-                apkExtractions = emptyMap(),
+                selectedSources = if (maintenanceReconnect) current.selectedSources else emptyMap(),
+                sourceFailures = if (maintenanceReconnect) current.sourceFailures else emptyList(),
+                archiveDownloads = if (maintenanceReconnect) current.archiveDownloads else emptyMap(),
+                archiveVerifications = if (maintenanceReconnect) current.archiveVerifications else emptyMap(),
+                apkExtractions = if (maintenanceReconnect) current.apkExtractions else emptyMap(),
+                maintenance = maintenance,
+                maintenanceReconnectPending = maintenanceReconnect,
             ),
         )
     }
@@ -141,6 +168,10 @@ class InstallationSession(
     private fun stopDiscovery() {
         val current = _snapshot.value
         if (current.state != InstallationSessionState.DISCOVERING) {
+            return
+        }
+        if (current.maintenanceReconnectPending) {
+            returnToMaintenanceDisconnected(current)
             return
         }
         startNewGeneration(
@@ -160,6 +191,7 @@ class InstallationSession(
                 archiveDownloads = emptyMap(),
                 archiveVerifications = emptyMap(),
                 apkExtractions = emptyMap(),
+                maintenanceReconnectPending = false,
             ),
         )
     }
@@ -171,15 +203,33 @@ class InstallationSession(
         }
         val device = current.discoveredDevices.firstOrNull { it.id == deviceId }
         when {
-            device == null -> fail(
-                category = FailureCategory.CONNECTION,
-                reasonCode = "device_not_discovered",
-            )
+            device == null -> {
+                if (current.maintenanceReconnectPending) {
+                    returnToMaintenanceDisconnected(current, reasonCode = "device_not_discovered")
+                } else {
+                    fail(
+                        category = FailureCategory.CONNECTION,
+                        reasonCode = "device_not_discovered",
+                    )
+                }
+            }
 
-            device.connectionStatus != DeviceConnectionStatus.CONFIRMED -> fail(
-                category = FailureCategory.CONNECTION,
-                reasonCode = "device_not_confirmed",
-            )
+            current.maintenanceReconnectPending &&
+                current.device?.id != null &&
+                current.device?.id != device.id -> {
+                returnToMaintenanceDisconnected(current, reasonCode = "maintenance_device_mismatch")
+            }
+
+            device.connectionStatus != DeviceConnectionStatus.CONFIRMED -> {
+                if (current.maintenanceReconnectPending) {
+                    returnToMaintenanceDisconnected(current, reasonCode = "device_not_confirmed")
+                } else {
+                    fail(
+                        category = FailureCategory.CONNECTION,
+                        reasonCode = "device_not_confirmed",
+                    )
+                }
+            }
 
             else -> {
                 val components = current.components.ifEmpty { catalog }
@@ -210,6 +260,10 @@ class InstallationSession(
         if (current.state != InstallationSessionState.CONNECTING) {
             return
         }
+        if (current.maintenanceReconnectPending) {
+            returnToMaintenanceDisconnected(current, reasonCode = "connection_cancelled")
+            return
+        }
         startNewGeneration(
             current.copy(
                 state = InstallationSessionState.IDLE,
@@ -227,6 +281,7 @@ class InstallationSession(
                 archiveDownloads = emptyMap(),
                 archiveVerifications = emptyMap(),
                 apkExtractions = emptyMap(),
+                maintenanceReconnectPending = false,
             ),
         )
     }
@@ -384,7 +439,14 @@ class InstallationSession(
             )
             return
         }
-        publish(current.copy(state = InstallationSessionState.MAINTENANCE, checkpoint = null))
+        publish(
+            current.copy(
+                state = InstallationSessionState.MAINTENANCE,
+                checkpoint = null,
+                maintenance = MaintenanceSnapshot(),
+                maintenanceReconnectPending = false,
+            ),
+        )
     }
 
     private fun disconnectDevice() {
@@ -392,19 +454,125 @@ class InstallationSession(
         if (current.state != InstallationSessionState.MAINTENANCE) {
             return
         }
+        val activeAction = current.maintenance.activeAction
         publish(
             current.copy(
                 device = current.device?.copy(connectionStatus = DeviceConnectionStatus.DISCONNECTED),
+                maintenance = current.maintenance.copy(
+                    activeAction = null,
+                    lastAction = activeAction?.let { actionId ->
+                        MaintenanceActionRecord(
+                            actionId = actionId,
+                            status = MaintenanceActionStatus.FAILED,
+                            reasonCode = "device_disconnected",
+                            retryable = true,
+                        )
+                    } ?: current.maintenance.lastAction,
+                ),
             ),
         )
     }
 
-    @Suppress("UNUSED_PARAMETER")
     private fun handleMaintenanceAction(command: InstallationSessionCommand.MaintenanceAction) {
-        if (_snapshot.value.state != InstallationSessionState.MAINTENANCE) {
+        val current = _snapshot.value
+        if (current.state != InstallationSessionState.MAINTENANCE) {
             return
         }
-        // F1 only owns the session boundary. F4 will attach the whitelisted action port.
+        if (current.maintenance.activeAction != null) {
+            return
+        }
+        if (
+            command.actionId.requiresConnectedDevice &&
+            current.device?.connectionStatus != DeviceConnectionStatus.CONFIRMED
+        ) {
+            publish(
+                current.copy(
+                    maintenance = current.maintenance.copy(
+                        lastAction = MaintenanceActionRecord(
+                            actionId = command.actionId,
+                            status = MaintenanceActionStatus.FAILED,
+                            reasonCode = "device_disconnected",
+                            retryable = true,
+                        ),
+                    ),
+                ),
+            )
+            return
+        }
+        if (command.actionId == MaintenanceActionId.REINSTALL ||
+            command.actionId == MaintenanceActionId.INSTALL_FILE_MANAGER
+        ) {
+            startMaintenanceInstallation(command.actionId)
+            return
+        }
+        publish(
+            current.copy(
+                maintenance = current.maintenance.copy(
+                    activeAction = command.actionId,
+                    lastAction = MaintenanceActionRecord(
+                        actionId = command.actionId,
+                        status = MaintenanceActionStatus.RUNNING,
+                    ),
+                ),
+            ),
+        )
+    }
+
+    private fun startMaintenanceInstallation(actionId: MaintenanceActionId) {
+        val current = _snapshot.value
+        val selectedOptional = when (actionId) {
+            MaintenanceActionId.REINSTALL -> current.selectedOptionalComponentIds
+            MaintenanceActionId.INSTALL_FILE_MANAGER ->
+                current.selectedOptionalComponentIds + AuthorizationPlanFactory.FILE_MANAGER_COMPONENT_ID
+
+            else -> return
+        }
+        val candidateManifests = current.maintenance.availableManifests.takeIf { it.isNotEmpty() }
+            ?: current.artifactManifests
+        val candidateComponents = candidateManifests.map { it.toComponentDescriptor() }
+            .takeIf { it.isNotEmpty() }
+            ?: current.components
+        val candidate = current.copy(
+            components = candidateComponents,
+            artifactManifests = candidateManifests,
+            catalogVersion = current.maintenance.availableCatalogVersion ?: current.catalogVersion,
+            catalogKeyId = current.maintenance.availableCatalogKeyId ?: current.catalogKeyId,
+            catalogSignatureAlgorithm = current.maintenance.availableCatalogSignatureAlgorithm
+                ?: current.catalogSignatureAlgorithm,
+            selectedOptionalComponentIds = selectedOptional,
+        )
+        val validationFailure = validateSelection(candidate)
+        if (validationFailure != null) {
+            publish(
+                current.copy(
+                    maintenance = current.maintenance.copy(
+                        activeAction = null,
+                        lastAction = MaintenanceActionRecord(
+                            actionId = actionId,
+                            status = MaintenanceActionStatus.FAILED,
+                            reasonCode = validationFailure,
+                            retryable = false,
+                        ),
+                    ),
+                ),
+            )
+            return
+        }
+        val selected = selectedComponents(candidate)
+        val next = candidate.copy(
+            state = InstallationSessionState.SELECTION_CONFIRMED,
+            currentComponentName = selected.firstOrNull()?.displayName,
+            progress = SessionProgress(
+                completedCount = 0,
+                totalCount = selected.size,
+                indeterminate = true,
+            ),
+            failure = null,
+            evidence = SessionEvidence(),
+            componentResults = buildComponentResults(SessionEvidence(), candidate),
+            maintenance = MaintenanceSnapshot(),
+        )
+        publish(withCheckpoint(next))
     }
 
     private fun applyAdapterEvent(command: InstallationSessionCommand.AdapterEvent) {
@@ -438,6 +606,11 @@ class InstallationSession(
             is InstallationSessionEvent.DeviceVerified -> handleDeviceVerified(event)
             is InstallationSessionEvent.DeviceDisconnected -> handleDeviceDisconnected(event)
             is InstallationSessionEvent.DeviceReconnected -> handleDeviceReconnected(event.device)
+            is InstallationSessionEvent.MaintenanceActionCompleted -> handleMaintenanceActionCompleted(event)
+            is InstallationSessionEvent.MaintenanceActionFailed -> handleMaintenanceActionFailed(event)
+            is InstallationSessionEvent.MaintenanceApplicationsResolved ->
+                handleMaintenanceApplicationsResolved(event)
+            is InstallationSessionEvent.MaintenanceCatalogRefreshed -> handleMaintenanceCatalogRefreshed(event)
             is InstallationSessionEvent.RecoverableError -> pause(
                 category = event.category,
                 componentName = event.componentName,
@@ -464,6 +637,10 @@ class InstallationSession(
             return
         }
         if (device.id.isBlank()) {
+            if (_snapshot.value.maintenanceReconnectPending) {
+                returnToMaintenanceDisconnected(_snapshot.value, reasonCode = "device_id_missing")
+                return
+            }
             fail(FailureCategory.CONNECTION, reasonCode = "device_id_missing")
             return
         }
@@ -478,6 +655,10 @@ class InstallationSession(
             return
         }
         if (devices.any { it.id.isBlank() }) {
+            if (_snapshot.value.maintenanceReconnectPending) {
+                returnToMaintenanceDisconnected(_snapshot.value, reasonCode = "device_id_missing")
+                return
+            }
             fail(FailureCategory.CONNECTION, reasonCode = "device_id_missing")
             return
         }
@@ -488,12 +669,23 @@ class InstallationSession(
     private fun handleDiscoveryFinished(event: InstallationSessionEvent.DiscoveryFinished) {
         if (!requireState(InstallationSessionState.DISCOVERING, "discovery_finished_out_of_order")) return
         if (event.scannedCount < 0 || event.confirmedCount < 0 || event.confirmedCount > event.scannedCount) {
+            if (_snapshot.value.maintenanceReconnectPending) {
+                returnToMaintenanceDisconnected(_snapshot.value, reasonCode = "discovery_result_invalid")
+                return
+            }
             fail(FailureCategory.CONNECTION, reasonCode = "discovery_result_invalid")
             return
         }
         val current = _snapshot.value
         if (current.discoveredDevices.isNotEmpty() || event.confirmedCount > 0) {
             publish(current, acceptedEventSequence)
+            return
+        }
+        if (current.maintenanceReconnectPending) {
+            returnToMaintenanceDisconnected(
+                current,
+                reasonCode = event.reasonCode ?: "no_devices_found",
+            )
             return
         }
         startNewGeneration(
@@ -517,24 +709,51 @@ class InstallationSession(
         }
         val pending = current.device
         when {
-            pending == null -> fail(FailureCategory.CONNECTION, reasonCode = "device_connection_target_missing")
-            pending.id != device.id -> fail(FailureCategory.CONNECTION, reasonCode = "device_connection_mismatch")
-            device.connectionStatus != DeviceConnectionStatus.CONFIRMED -> fail(
-                FailureCategory.CONNECTION,
-                reasonCode = "device_connection_confirmation_invalid",
-            )
+            pending == null -> {
+                if (current.maintenanceReconnectPending) {
+                    returnToMaintenanceDisconnected(current, reasonCode = "device_connection_target_missing")
+                } else {
+                    fail(FailureCategory.CONNECTION, reasonCode = "device_connection_target_missing")
+                }
+            }
 
-            else -> publish(
-                withCheckpoint(
-                    current.copy(
-                        state = InstallationSessionState.CONNECTED,
-                        device = device,
-                        discoveredDevices = mergeDevices(current.discoveredDevices, listOf(device)),
-                        failure = null,
-                    ),
-                ),
-                acceptedEventSequence,
-            )
+            pending.id != device.id -> {
+                if (current.maintenanceReconnectPending) {
+                    returnToMaintenanceDisconnected(current, reasonCode = "device_connection_mismatch")
+                } else {
+                    fail(FailureCategory.CONNECTION, reasonCode = "device_connection_mismatch")
+                }
+            }
+
+            device.connectionStatus != DeviceConnectionStatus.CONFIRMED -> {
+                if (current.maintenanceReconnectPending) {
+                    returnToMaintenanceDisconnected(current, reasonCode = "device_connection_confirmation_invalid")
+                } else {
+                    fail(
+                        FailureCategory.CONNECTION,
+                        reasonCode = "device_connection_confirmation_invalid",
+                    )
+                }
+            }
+
+            else -> {
+                val maintenanceReconnect = current.maintenanceReconnectPending
+                val next = current.copy(
+                    state = if (maintenanceReconnect) {
+                        InstallationSessionState.MAINTENANCE
+                    } else {
+                        InstallationSessionState.CONNECTED
+                    },
+                    device = device,
+                    discoveredDevices = mergeDevices(current.discoveredDevices, listOf(device)),
+                    failure = null,
+                    maintenanceReconnectPending = false,
+                )
+                publish(
+                    if (maintenanceReconnect) next else withCheckpoint(next),
+                    acceptedEventSequence,
+                )
+            }
         }
     }
 
@@ -545,11 +764,23 @@ class InstallationSession(
             return
         }
         if (event.deviceId.isBlank() || event.reasonCode.isBlank()) {
+            if (current.maintenanceReconnectPending) {
+                returnToMaintenanceDisconnected(current, reasonCode = "device_connection_failure_invalid")
+                return
+            }
             fail(FailureCategory.CONNECTION, reasonCode = "device_connection_failure_invalid")
             return
         }
         if (current.device?.id != event.deviceId) {
+            if (current.maintenanceReconnectPending) {
+                returnToMaintenanceDisconnected(current, reasonCode = "device_connection_failure_mismatch")
+                return
+            }
             fail(FailureCategory.CONNECTION, reasonCode = "device_connection_failure_mismatch")
+            return
+        }
+        if (current.maintenanceReconnectPending) {
+            returnToMaintenanceDisconnected(current, reasonCode = event.reasonCode)
             return
         }
         fail(
@@ -1142,6 +1373,17 @@ class InstallationSession(
                 publish(
                     current.copy(
                         device = device?.copy(connectionStatus = DeviceConnectionStatus.DISCONNECTED),
+                        maintenance = current.maintenance.copy(
+                            activeAction = null,
+                            lastAction = current.maintenance.activeAction?.let { actionId ->
+                                MaintenanceActionRecord(
+                                    actionId = actionId,
+                                    status = MaintenanceActionStatus.FAILED,
+                                    reasonCode = "device_disconnected",
+                                    retryable = true,
+                                )
+                            } ?: current.maintenance.lastAction,
+                        ),
                     ),
                     acceptedEventSequence,
                 )
@@ -1151,11 +1393,19 @@ class InstallationSession(
             return
         }
         if (current.state == InstallationSessionState.CONNECTING) {
+            if (current.maintenanceReconnectPending) {
+                returnToMaintenanceDisconnected(current, reasonCode = event.reasonCode)
+                return
+            }
             fail(
                 category = FailureCategory.CONNECTION,
                 reasonCode = event.reasonCode,
                 deviceOverride = current.device?.copy(connectionStatus = DeviceConnectionStatus.DISCONNECTED),
             )
+            return
+        }
+        if (current.state == InstallationSessionState.DISCOVERING && current.maintenanceReconnectPending) {
+            returnToMaintenanceDisconnected(current, reasonCode = event.reasonCode)
             return
         }
         if (current.state == InstallationSessionState.DISCOVERING ||
@@ -1170,6 +1420,166 @@ class InstallationSession(
             return
         }
         fail(FailureCategory.CONNECTION, reasonCode = event.reasonCode)
+    }
+
+    private fun handleMaintenanceActionCompleted(event: InstallationSessionEvent.MaintenanceActionCompleted) {
+        val current = _snapshot.value
+        if (current.state != InstallationSessionState.MAINTENANCE ||
+            current.maintenance.activeAction != event.actionId ||
+            event.resultCode.isBlank()
+        ) {
+            return
+        }
+        publish(
+            current.copy(
+                maintenance = current.maintenance.copy(
+                    activeAction = null,
+                    lastAction = MaintenanceActionRecord(
+                        actionId = event.actionId,
+                        status = MaintenanceActionStatus.SUCCEEDED,
+                        resultCode = event.resultCode,
+                    ),
+                ),
+            ),
+            acceptedEventSequence,
+        )
+    }
+
+    private fun handleMaintenanceActionFailed(event: InstallationSessionEvent.MaintenanceActionFailed) {
+        val current = _snapshot.value
+        if (current.state != InstallationSessionState.MAINTENANCE ||
+            current.maintenance.activeAction != event.actionId ||
+            event.reasonCode.isBlank()
+        ) {
+            return
+        }
+        publish(
+            current.copy(
+                maintenance = current.maintenance.copy(
+                    activeAction = null,
+                    lastAction = MaintenanceActionRecord(
+                        actionId = event.actionId,
+                        status = MaintenanceActionStatus.FAILED,
+                        reasonCode = event.reasonCode,
+                        retryable = event.retryable,
+                    ),
+                ),
+            ),
+            acceptedEventSequence,
+        )
+    }
+
+    private fun handleMaintenanceApplicationsResolved(
+        event: InstallationSessionEvent.MaintenanceApplicationsResolved,
+    ) {
+        val current = _snapshot.value
+        if (current.state != InstallationSessionState.MAINTENANCE ||
+            current.maintenance.activeAction != MaintenanceActionId.MANAGE_APPS ||
+            event.applications.any { application ->
+                val expectedPackage = MANAGED_COMPONENT_PACKAGES[application.componentId]
+                expectedPackage == null || application.packageName != expectedPackage
+            }
+        ) {
+            if (
+                current.state == InstallationSessionState.MAINTENANCE &&
+                current.maintenance.activeAction == MaintenanceActionId.MANAGE_APPS
+            ) {
+                failMaintenanceAction("maintenance_applications_invalid", retryable = false)
+            }
+            return
+        }
+        if (
+            event.applications.map { it.componentId }.toSet().size != event.applications.size ||
+            event.applications.map { it.componentId }.toSet() != MANAGED_COMPONENT_PACKAGES.keys
+        ) {
+            failMaintenanceAction("maintenance_applications_incomplete", retryable = false)
+            return
+        }
+        publish(
+            current.copy(
+                maintenance = current.maintenance.copy(managedApplications = event.applications),
+            ),
+            acceptedEventSequence,
+        )
+    }
+
+    private fun handleMaintenanceCatalogRefreshed(event: InstallationSessionEvent.MaintenanceCatalogRefreshed) {
+        val current = _snapshot.value
+        if (current.state != InstallationSessionState.MAINTENANCE ||
+            current.maintenance.activeAction != MaintenanceActionId.CHECK_UPDATES
+        ) {
+            return
+        }
+        if (
+            event.catalogVersion.isBlank() ||
+            event.keyId.isBlank() ||
+            event.signatureAlgorithm !in SUPPORTED_CATALOG_SIGNATURE_ALGORITHMS
+        ) {
+            failMaintenanceAction("maintenance_catalog_metadata_invalid", retryable = false)
+            return
+        }
+        when (val validation = ArtifactManifestValidator.validateCatalog(event.manifests)) {
+            is ManifestValidation.Invalid -> {
+                failMaintenanceAction(validation.reasonCode, retryable = false)
+                return
+            }
+            ManifestValidation.Valid -> Unit
+        }
+        if (event.manifests.any { sourcePolicy.plan(it) is com.tcrrry.helper.domain.artifact.SourcePlan.Rejected }) {
+            failMaintenanceAction("maintenance_catalog_source_invalid", retryable = false)
+            return
+        }
+        val androidSdk = current.device?.androidSdk
+        if (
+            androidSdk != null && event.manifests.any { manifest ->
+                androidSdk < manifest.compatibility.minAndroidSdk ||
+                    manifest.compatibility.maxAndroidSdk?.let { androidSdk > it } == true
+            }
+        ) {
+            failMaintenanceAction("component_incompatible", retryable = false)
+            return
+        }
+        val components = event.manifests.map { it.toComponentDescriptor() }
+        val optionalIds = components.filterNot { it.required }.map { it.id }.toSet()
+        val currentIds = current.artifactManifests.map { it.componentId }.toSet()
+        publish(
+            current.copy(
+                maintenance = current.maintenance.copy(
+                    availableManifests = event.manifests,
+                    availableCatalogVersion = event.catalogVersion,
+                    availableCatalogKeyId = event.keyId,
+                    availableCatalogSignatureAlgorithm = event.signatureAlgorithm,
+                ),
+                components = if (currentIds.isEmpty()) components else current.components,
+                artifactManifests = if (currentIds.isEmpty()) event.manifests else current.artifactManifests,
+                catalogVersion = if (currentIds.isEmpty()) event.catalogVersion else current.catalogVersion,
+                catalogKeyId = if (currentIds.isEmpty()) event.keyId else current.catalogKeyId,
+                catalogSignatureAlgorithm = if (currentIds.isEmpty()) event.signatureAlgorithm else current.catalogSignatureAlgorithm,
+                selectedOptionalComponentIds = current.selectedOptionalComponentIds.filterTo(mutableSetOf()) {
+                    it in optionalIds
+                },
+            ),
+            acceptedEventSequence,
+        )
+    }
+
+    private fun failMaintenanceAction(reasonCode: String, retryable: Boolean) {
+        val current = _snapshot.value
+        val actionId = current.maintenance.activeAction ?: return
+        publish(
+            current.copy(
+                maintenance = current.maintenance.copy(
+                    activeAction = null,
+                    lastAction = MaintenanceActionRecord(
+                        actionId = actionId,
+                        status = MaintenanceActionStatus.FAILED,
+                        reasonCode = reasonCode,
+                        retryable = retryable,
+                    ),
+                ),
+            ),
+            acceptedEventSequence,
+        )
     }
 
     private fun handleDeviceReconnected(device: DeviceSummary) {
@@ -1193,6 +1603,30 @@ class InstallationSession(
                 device = device,
                 failure = null,
                 checkpoint = checkpoint,
+            ),
+        )
+    }
+
+    /** Returns a failed reconnect attempt to the persisted maintenance boundary. */
+    private fun returnToMaintenanceDisconnected(
+        current: InstallationSessionSnapshot,
+        reasonCode: String? = null,
+    ) {
+        startNewGeneration(
+            current.copy(
+                state = InstallationSessionState.MAINTENANCE,
+                device = current.device?.copy(connectionStatus = DeviceConnectionStatus.DISCONNECTED),
+                discoveredDevices = emptyList(),
+                failure = reasonCode?.let {
+                    SessionFailure(
+                        category = FailureCategory.CONNECTION,
+                        retryable = true,
+                        reasonCode = it,
+                    )
+                },
+                checkpoint = null,
+                maintenance = current.maintenance.copy(activeAction = null),
+                maintenanceReconnectPending = false,
             ),
         )
     }
@@ -1470,6 +1904,11 @@ class InstallationSession(
     private companion object {
         const val MAX_SOURCE_FAILURE_RECORDS = 32
         val SUPPORTED_CATALOG_SIGNATURE_ALGORITHMS = setOf("SHA256withECDSA", "Ed25519")
+        val MANAGED_COMPONENT_PACKAGES = mapOf(
+            AuthorizationPlanFactory.DESKTOP_COMPONENT_ID to AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME,
+            AuthorizationPlanFactory.LYRICS_COMPONENT_ID to AuthorizationPlanFactory.LYRICS_PACKAGE_NAME,
+            AuthorizationPlanFactory.FILE_MANAGER_COMPONENT_ID to AuthorizationPlanFactory.FILE_MANAGER_PACKAGE_NAME,
+        )
 
         val CATALOG_ACCEPTING_STATES = setOf(
             InstallationSessionState.IDLE,

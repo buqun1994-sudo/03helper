@@ -1,5 +1,10 @@
 package com.tcrrry.helper.ui.screens
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -15,6 +20,8 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
@@ -23,14 +30,20 @@ import androidx.compose.ui.unit.dp
 import com.tcrrry.helper.R
 import com.tcrrry.helper.domain.session.MaintenanceActionId
 import com.tcrrry.helper.domain.session.MaintenanceGroupId
+import com.tcrrry.helper.domain.session.MaintenanceActionStatus
+import com.tcrrry.helper.domain.session.requiresConnectedDevice
 import com.tcrrry.helper.ui.components.AnimatedEntry
+import com.tcrrry.helper.ui.components.DividerLine
 import com.tcrrry.helper.ui.components.PressableSurface
 import com.tcrrry.helper.ui.components.StatusIcon
 import com.tcrrry.helper.ui.components.TaskTopBar
 import com.tcrrry.helper.ui.state.InstallUiIntent
 import com.tcrrry.helper.ui.state.InstallUiState
+import com.tcrrry.helper.ui.state.MaintenanceApplicationRow
+import com.tcrrry.helper.ui.state.MaintenanceFeedback
 import com.tcrrry.helper.ui.theme.InstallerColors
 import com.tcrrry.helper.ui.theme.InstallerDimensions
+import com.tcrrry.helper.ui.theme.InstallerMotion
 
 @Composable
 fun MaintenanceHome(
@@ -51,6 +64,24 @@ fun MaintenanceHome(
                 onReconnect = { onIntent(InstallUiIntent.Reconnect) },
                 onDisconnect = { onIntent(InstallUiIntent.DisconnectDevice) },
             )
+            AnimatedVisibility(
+                visible = state.feedback != null,
+                enter = fadeIn(InstallerMotion.stateChange()),
+                exit = fadeOut(InstallerMotion.stateChange()),
+            ) {
+                state.feedback?.let { feedback ->
+                    Column {
+                        Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
+                        Crossfade(
+                            targetState = feedback,
+                            animationSpec = InstallerMotion.stateChange(),
+                            label = "maintenanceFeedback",
+                        ) { target ->
+                            MaintenanceFeedbackBlock(target, state.applications)
+                        }
+                    }
+                }
+            }
             Spacer(modifier = Modifier.height(InstallerDimensions.SectionVerticalSpacing))
             LazyColumn(
                 modifier = Modifier
@@ -62,6 +93,8 @@ fun MaintenanceHome(
                     MaintenanceGroup(
                         group = group,
                         columns = columns,
+                        connected = state.connected,
+                        busy = state.feedback?.status == MaintenanceActionStatus.RUNNING,
                         onAction = { action -> onIntent(InstallUiIntent.MaintenanceAction(action)) },
                     )
                 }
@@ -77,6 +110,7 @@ private fun DeviceStatusHeader(
     onReconnect: () -> Unit,
     onDisconnect: () -> Unit,
 ) {
+    val busy = state.feedback?.status == MaintenanceActionStatus.RUNNING
     Row(
         modifier = Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
@@ -101,6 +135,7 @@ private fun DeviceStatusHeader(
         if (state.connected) {
             PressableSurface(
                 onClick = onDisconnect,
+                enabled = !busy,
                 modifier = Modifier.width(112.dp),
                 minHeight = 48.dp,
                 containerColor = InstallerColors.PageBlue,
@@ -114,6 +149,7 @@ private fun DeviceStatusHeader(
         } else {
             PressableSurface(
                 onClick = onReconnect,
+                enabled = !busy,
                 modifier = Modifier.width(112.dp),
                 minHeight = 48.dp,
                 containerColor = InstallerColors.White,
@@ -129,9 +165,99 @@ private fun DeviceStatusHeader(
 }
 
 @Composable
+private fun MaintenanceFeedbackBlock(
+    feedback: MaintenanceFeedback,
+    applications: List<MaintenanceApplicationRow>,
+) {
+    val icon = when (feedback.status) {
+        MaintenanceActionStatus.RUNNING -> "loader_circle"
+        MaintenanceActionStatus.SUCCEEDED -> "circle_check"
+        MaintenanceActionStatus.FAILED -> "triangle_alert"
+    }
+    val tint = when (feedback.status) {
+        MaintenanceActionStatus.RUNNING -> InstallerColors.White
+        MaintenanceActionStatus.SUCCEEDED -> InstallerColors.Success
+        MaintenanceActionStatus.FAILED -> InstallerColors.Error
+    }
+    val title = when (feedback.status) {
+        MaintenanceActionStatus.RUNNING -> stringResource(
+            R.string.maintenance_action_running,
+            stringResource(actionTitle(feedback.actionId)),
+        )
+
+        MaintenanceActionStatus.SUCCEEDED -> stringResource(
+            R.string.maintenance_action_completed,
+            stringResource(actionTitle(feedback.actionId)),
+        )
+
+        MaintenanceActionStatus.FAILED -> stringResource(
+            R.string.maintenance_action_failed,
+            stringResource(actionTitle(feedback.actionId)),
+        )
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            StatusIcon(name = icon, contentDescription = title, tint = tint)
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text(text = title, style = MaterialTheme.typography.bodyLarge, color = InstallerColors.White)
+                maintenanceFeedbackDescription(feedback)?.let { description ->
+                    Text(
+                        text = stringResource(description),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = InstallerColors.AuxiliaryWhite,
+                    )
+                }
+            }
+        }
+        if (
+            feedback.actionId == MaintenanceActionId.MANAGE_APPS &&
+            feedback.status == MaintenanceActionStatus.SUCCEEDED &&
+            applications.isNotEmpty()
+        ) {
+            Text(
+                text = stringResource(R.string.maintenance_installed_apps),
+                style = MaterialTheme.typography.bodyMedium,
+                color = InstallerColors.AuxiliaryWhite,
+            )
+            applications.forEach { application ->
+                DividerLine()
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = application.displayName,
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = InstallerColors.White,
+                    )
+                    Text(
+                        text = stringResource(
+                            if (application.installed) {
+                                R.string.maintenance_app_installed
+                            } else {
+                                R.string.maintenance_app_not_installed
+                            },
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (application.installed) InstallerColors.Success else InstallerColors.Warning,
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun MaintenanceGroup(
     group: MaintenanceGroupId,
     columns: Int,
+    connected: Boolean,
+    busy: Boolean,
     onAction: (MaintenanceActionId) -> Unit,
 ) {
     val actions = when (group) {
@@ -164,6 +290,7 @@ private fun MaintenanceGroup(
                         MaintenanceActionCard(
                             action = action,
                             onClick = { onAction(action) },
+                            enabled = maintenanceActionEnabled(action, connected, busy),
                             modifier = Modifier.weight(1f),
                             index = rowIndex * columns + columnIndex,
                         )
@@ -177,16 +304,29 @@ private fun MaintenanceGroup(
 
 internal fun maintenanceColumnCount(screenWidthDp: Float): Int = if (screenWidthDp >= 360f) 2 else 1
 
+internal fun maintenanceActionEnabled(
+    action: MaintenanceActionId,
+    connected: Boolean,
+    busy: Boolean,
+): Boolean = !busy && (connected || !action.requiresConnectedDevice)
+
 @Composable
 private fun MaintenanceActionCard(
     action: MaintenanceActionId,
     onClick: () -> Unit,
+    enabled: Boolean,
     modifier: Modifier,
     index: Int,
 ) {
-    AnimatedEntry(visible = true, index = index, modifier = modifier) {
+    val contentAlpha by animateFloatAsState(
+        targetValue = if (enabled) 1f else 0.55f,
+        animationSpec = InstallerMotion.stateChange(),
+        label = "maintenanceActionEnabled",
+    )
+    AnimatedEntry(visible = true, index = index, modifier = modifier.alpha(contentAlpha)) {
         PressableSurface(
             onClick = onClick,
+            enabled = enabled,
             modifier = Modifier.testTag("maintenance_${action.name.lowercase()}"),
             minHeight = InstallerDimensions.MaintenanceActionMinHeight,
         ) {
@@ -246,4 +386,30 @@ private fun actionIcon(action: MaintenanceActionId): String = when (action) {
     MaintenanceActionId.LAUNCH_DESKTOP -> "panels_top_left"
     MaintenanceActionId.CLEANUP -> "trash_2"
     MaintenanceActionId.EXPORT_DIAGNOSTICS -> "file_down"
+}
+
+private fun maintenanceFeedbackDescription(feedback: MaintenanceFeedback): Int? = when (feedback.status) {
+    MaintenanceActionStatus.RUNNING -> null
+    MaintenanceActionStatus.SUCCEEDED -> when (feedback.resultCode) {
+        "updates_available" -> R.string.maintenance_result_updates_available
+        "up_to_date" -> R.string.maintenance_result_up_to_date
+        "authorization_repaired" -> R.string.maintenance_result_authorization_repaired
+        "applications_checked" -> R.string.maintenance_result_applications_checked
+        "component_launched" -> R.string.maintenance_result_component_launched
+        "cache_cleared" -> R.string.maintenance_result_cache_cleared
+        "diagnostics_ready" -> R.string.maintenance_result_diagnostics_ready
+        else -> null
+    }
+
+    MaintenanceActionStatus.FAILED -> when {
+        feedback.reasonCode in setOf(
+            "adb_connection_closed",
+            "device_action_gateway_unavailable",
+            "device_disconnected",
+        ) -> R.string.maintenance_failure_disconnected
+
+        feedback.reasonCode?.startsWith("catalog_") == true -> R.string.maintenance_failure_catalog
+        feedback.reasonCode?.contains("identity") == true -> R.string.maintenance_failure_identity
+        else -> R.string.maintenance_failure_generic
+    }
 }

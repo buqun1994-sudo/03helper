@@ -48,7 +48,7 @@ class ArtifactCache(
 
     fun clearAll() {
         root.listFiles()?.forEach { file ->
-            if (file.isFile) file.delete()
+            file.deleteRecursively()
         }
     }
 
