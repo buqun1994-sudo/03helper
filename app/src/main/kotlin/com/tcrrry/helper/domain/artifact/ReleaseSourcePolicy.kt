@@ -70,6 +70,9 @@ class ReleaseSourcePolicy(
 
     /** Lanzou's numbered lanrar page is a short-lived verification step, not a file response. */
     fun isLanzouVerificationPage(url: String): Boolean = hostPolicy.isLanzouVerificationPage(url)
+
+    /** Signed configuration may point only to a password-folder page, never an arbitrary URL. */
+    fun isLanzouFolderUrl(url: String): Boolean = hostPolicy.isLanzouFolderUrl(url)
 }
 
 /** Compile-time selected policy; catalog data cannot enable a debug source mode. */
@@ -139,6 +142,13 @@ class SourceHostPolicy(
             !uri.query.isNullOrBlank()
     } ?: false
 
+    fun isLanzouFolderUrl(url: String): Boolean = parseHttpsUrl(url)?.let { uri ->
+        val host = checkNotNull(uri.host).lowercase()
+        matchesSuffix(host, lanzouShareSuffixes) &&
+            uri.query.isNullOrBlank() &&
+            isFolderPath(uri.path)
+    } ?: false
+
     private fun matchesSuffix(host: String, suffixes: Set<String>): Boolean =
         suffixes.any { suffix -> host == suffix || host.endsWith(".$suffix") }
 
@@ -159,6 +169,11 @@ class SourceHostPolicy(
     }
 
     private fun hasDownloadPath(uri: URI): Boolean = uri.path.orEmpty().trim('/').isNotBlank()
+
+    private fun isFolderPath(path: String?): Boolean {
+        val segments = path.orEmpty().trim('/').split('/').filter(String::isNotBlank)
+        return segments.size == 1 && segments.single().matches(FOLDER_ID_PATTERN)
+    }
 
     private fun parseHttpsUrl(value: String): URI? {
         val uri = try {
@@ -184,6 +199,8 @@ class SourceHostPolicy(
     }
 
     companion object {
+        private val FOLDER_ID_PATTERN = Regex("^b[A-Za-z0-9]+$")
+
         fun default(): SourceHostPolicy = SourceHostPolicy(
             lanzouShareSuffixes = setOf(
                 "lanzou.com",

@@ -22,6 +22,7 @@ import java.io.FileOutputStream
 import java.security.MessageDigest
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
+import java.time.Instant
 import java.util.zip.ZipInputStream
 import kotlinx.coroutines.CancellationException
 
@@ -41,6 +42,7 @@ class FolderArtifactCatalogAdapter(
     private val sourcePolicy: ReleaseSourcePolicy,
     private val artifactCache: ArtifactCache,
     private val workingDirectory: File,
+    private val now: () -> Instant = Instant::now,
 ) {
     suspend fun load(): CatalogLoadResult {
         val config = when (val result = configAdapter.load()) {
@@ -50,10 +52,15 @@ class FolderArtifactCatalogAdapter(
 
             is DistributionConfigLoadResult.Success -> result.config
         }
+        if (!config.expiresAt.isAfter(now())) {
+            return CatalogLoadResult.Failure("distribution_config_expired", retryable = true)
+        }
         if (!workingDirectory.mkdirs() && !workingDirectory.isDirectory) {
             return CatalogLoadResult.Failure("distribution_catalog_cache_unavailable", retryable = true)
         }
         clearWorkingDirectory()
+        val stagedManifests = mutableListOf<ArtifactManifest>()
+        var committed = false
         return try {
             val folder = when (val result = folderSourceAdapter.resolve(config)) {
                 is LanzouFolderResolutionResult.Failure -> {
@@ -67,30 +74,37 @@ class FolderArtifactCatalogAdapter(
             }
             val manifests = folder.map { artifact ->
                 when (val result = buildManifest(config, artifact)) {
-                    is ManifestBuildResult.Success -> result.manifest
+                    is ManifestBuildResult.Success -> result.manifest.also { stagedManifests += it }
                     is ManifestBuildResult.Failure -> {
                         return CatalogLoadResult.Failure(result.reasonCode, result.retryable)
                     }
                 }
             }
+            if (!config.expiresAt.isAfter(now())) {
+                return CatalogLoadResult.Failure("distribution_config_expired", retryable = true)
+            }
             when (val validation = ArtifactManifestValidator.validateCatalog(manifests)) {
                 is ManifestValidation.Invalid ->
                     CatalogLoadResult.Failure(validation.reasonCode, retryable = false)
 
-                ManifestValidation.Valid -> CatalogLoadResult.Success(
-                    TrustedArtifactCatalog(
-                        catalogVersion = config.configVersion,
-                        keyId = config.keyId,
-                        signatureAlgorithm = config.signatureAlgorithm,
-                        manifests = manifests,
-                    ),
-                )
+                ManifestValidation.Valid -> {
+                    committed = true
+                    CatalogLoadResult.Success(
+                        TrustedArtifactCatalog(
+                            catalogVersion = config.configVersion,
+                            keyId = config.keyId,
+                            signatureAlgorithm = config.signatureAlgorithm,
+                            manifests = manifests,
+                        ),
+                    )
+                }
             }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
             CatalogLoadResult.Failure("distribution_catalog_build_failed", retryable = true)
         } finally {
+            if (!committed) stagedManifests.forEach(artifactCache::clearArtifact)
             clearWorkingDirectory()
         }
     }
@@ -99,6 +113,9 @@ class FolderArtifactCatalogAdapter(
         config: InstallerDistributionConfig,
         artifact: LanzouFolderArtifact,
     ): ManifestBuildResult {
+        if (!config.expiresAt.isAfter(now())) {
+            return ManifestBuildResult.Failure("distribution_config_expired", retryable = true)
+        }
         val component = artifact.component
         val request = when (val result = lanzouSourceAdapter.resolve(artifact.source)) {
             is LanzouResolutionResult.Failure -> {
@@ -116,7 +133,10 @@ class FolderArtifactCatalogAdapter(
 
             is DynamicArchiveDownloadResult.Completed -> result.archive
         }
-        val inspection = inspectArchive(archive.file, apkFile)
+        if (!config.expiresAt.isAfter(now())) {
+            return ManifestBuildResult.Failure("distribution_config_expired", retryable = true)
+        }
+        val inspection = inspectArchive(archive.file, apkFile, component.apkEntryName)
             ?: return ManifestBuildResult.Failure("distribution_archive_invalid", retryable = false)
         val metadata = try {
             metadataReader.read(inspection.apkFile)
@@ -124,15 +144,16 @@ class FolderArtifactCatalogAdapter(
             null
         } ?: return ManifestBuildResult.Failure("distribution_apk_metadata_unreadable", retryable = false)
 
-        val expectedPackage = component.packageName
-            ?: return ManifestBuildResult.Failure("distribution_package_identity_missing", retryable = false)
-        if (metadata.packageName != expectedPackage) {
+        if (metadata.packageName != component.packageName) {
             return ManifestBuildResult.Failure("distribution_apk_package_mismatch", retryable = false)
         }
-        val expectedCertificate = component.certificateSha256
-            ?: return ManifestBuildResult.Failure("distribution_certificate_identity_missing", retryable = false)
-        if (metadata.certificateSha256s.none { it.equals(expectedCertificate, ignoreCase = true) }) {
+        if (metadata.certificateSha256s.none {
+                it.equals(component.certificateSha256, ignoreCase = true)
+            }) {
             return ManifestBuildResult.Failure("distribution_apk_certificate_mismatch", retryable = false)
+        }
+        if (!config.expiresAt.isAfter(now())) {
+            return ManifestBuildResult.Failure("distribution_config_expired", retryable = true)
         }
 
         val manifest = ArtifactManifest(
@@ -148,9 +169,9 @@ class FolderArtifactCatalogAdapter(
             apkEntryName = inspection.entryName,
             apkSizeBytes = inspection.apkSizeBytes,
             apkSha256 = inspection.apkSha256,
-            packageName = metadata.packageName,
+            packageName = component.packageName,
             apkVersion = ArtifactVersion(metadata.version.name, metadata.version.code),
-            certificateSha256 = expectedCertificate.lowercase(),
+            certificateSha256 = component.certificateSha256.lowercase(),
             sources = listOf(artifact.source),
             rollbackId = "${config.configVersion}-${component.componentId}",
         )
@@ -174,7 +195,7 @@ class FolderArtifactCatalogAdapter(
         return ManifestBuildResult.Success(manifest)
     }
 
-    private fun inspectArchive(archive: File, apkFile: File): ArchiveInspection? {
+    private fun inspectArchive(archive: File, apkFile: File, expectedEntryName: String): ArchiveInspection? {
         if (!archive.isFile || archive.length() <= 0L) return null
         apkFile.delete()
         var entryName: String? = null
@@ -186,7 +207,9 @@ class FolderArtifactCatalogAdapter(
                 while (true) {
                     val entry = zip.nextEntry ?: break
                     entryCount += 1
-                    if (entryCount > 1 || entry.isDirectory || !isSafeApkEntry(entry.name)) return null
+                    if (entryCount > 1 || entry.isDirectory || entry.name != expectedEntryName || !isSafeApkEntry(entry.name)) {
+                        return null
+                    }
                     entryName = entry.name
                     FileOutputStream(apkFile).use { output ->
                         val buffer = ByteArray(DEFAULT_BUFFER_SIZE)

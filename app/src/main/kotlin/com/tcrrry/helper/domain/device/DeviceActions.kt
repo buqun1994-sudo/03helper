@@ -2,6 +2,7 @@ package com.tcrrry.helper.domain.device
 
 import com.tcrrry.helper.domain.artifact.ArtifactManifest
 import com.tcrrry.helper.domain.artifact.ArtifactVersion
+import com.tcrrry.helper.domain.artifact.InstallerComponentTrustRegistry
 import java.io.File
 
 /**
@@ -468,12 +469,12 @@ object AuthorizationPlanFactory {
         val fixedLaunchComponent: String?,
     )
 
-    const val LYRICS_COMPONENT_ID = "lyrics"
-    const val DESKTOP_COMPONENT_ID = "desktop"
-    const val FILE_MANAGER_COMPONENT_ID = "file-manager"
-    const val LYRICS_PACKAGE_NAME = "com.tcrrry.desktoplyrics"
-    const val DESKTOP_PACKAGE_NAME = "com.tcrrry.desktop"
-    const val FILE_MANAGER_PACKAGE_NAME = "org.fossify.filemanager.debug"
+    const val LYRICS_COMPONENT_ID = InstallerComponentTrustRegistry.LYRICS_COMPONENT_ID
+    const val DESKTOP_COMPONENT_ID = InstallerComponentTrustRegistry.DESKTOP_COMPONENT_ID
+    const val FILE_MANAGER_COMPONENT_ID = InstallerComponentTrustRegistry.FILE_MANAGER_COMPONENT_ID
+    const val LYRICS_PACKAGE_NAME = InstallerComponentTrustRegistry.LYRICS_PACKAGE_NAME
+    const val DESKTOP_PACKAGE_NAME = InstallerComponentTrustRegistry.DESKTOP_PACKAGE_NAME
+    const val FILE_MANAGER_PACKAGE_NAME = InstallerComponentTrustRegistry.FILE_MANAGER_PACKAGE_NAME
     const val DESKTOP_MAIN_ACTIVITY = "com.tcrrry.desktop/.MainActivity"
     const val LYRICS_MAIN_ACTIVITY = "com.tcrrry.desktoplyrics/.MainActivity"
     const val FILE_MANAGER_MAIN_ACTIVITY =

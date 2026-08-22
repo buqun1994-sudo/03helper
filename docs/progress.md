@@ -165,7 +165,7 @@ F2 Debug APK 已按用户授权安装到指定手机。该段记录的是 F2 交
 
 ## 2026-08-20 F3 安装授权主链口径收敛
 
-1. 产品口径已确认：03桌面是唯一核心且必装；03 歌词和文件管理器均为可选。Debug 签名 profile 已更新为 `android-real-debug-2026-08-20-v4`，清单按桌面优先排序，歌词的 `required` 字段为 `false`，并由新的本地 Debug ECDSA 信任根重新签发；Release 不读取该资料。
+1. 产品口径已确认：03桌面是唯一核心且必装；03 歌词和文件管理器均为可选。Debug 签名 profile 当时使用 `android-real-debug-2026-08-20-v4`，清单按桌面优先排序，歌词的 `required` 字段为 `false`，并由本地 Debug ECDSA 信任根重新签发；该 key 已在 2026-08-22 信任根轮换中废弃，Release 不读取该资料。
 2. 安装阶段逐个执行 `pm install -r`，不启动任何目标应用；所有已选包安装完成后回读车机内实际 APK 的大小、SHA-256、包名、版本和证书。
 3. 授权与启动阶段只调用一次固定、版本化、白名单综合命令：按已验证的组件 ID 授权已安装组件，缺少可选组件时记录跳过并失败闭环，最后只解析并启动 03桌面；03 歌词和文件管理器不启动。
 4. 状态机、设备协调器、DADB 网关、Debug 场景、测试夹具和产品 / 架构 / 验证文档已同步上述不变量；`testDebugUnitTest` 当前 71 项全部通过。
@@ -232,3 +232,28 @@ F2 Debug APK 已按用户授权安装到指定手机。该段记录的是 F2 交
 3. 无线 ADB 恢复后，使用本机上下文指定的 `SM-F946B` 测试手机完成既有 `InstallAppActivitySmokeTest`；生产入口和 Debug 维护场景 `2/2` 通过。Gradle 入口仍会读取其它在线设备的只读属性，因此后续应继续收紧测试设备隔离；本轮测试结果只报告测试手机，且只读核对确认车机没有安装 `com.tcrrry.helper`。
 4. smoke 结束后已再次对测试手机保留数据覆盖安装最新 Debug 主包，系统返回 `Success`；最终包身份为 `com.tcrrry.helper`、Debug、`0.1.0 (1)`，`MAIN` / `LAUNCHER` 解析到 `com.tcrrry.helper/.MainActivity`。本轮未清数据、卸载、降级、重启、提交、推送或对车机执行维护写入。
 5. 待用户最小人工主测：真实 Cloud 根文件夹下载与安装、维护态九个入口逐页进入 / 返回、锁屏后解锁自动快速重连、以及真实车机上的检查更新、重装、修复授权和受控应用管理。任一动作出现意外跳回首页、静态状态突变、连接未恢复或车机写入范围异常时停止该条并保留当前界面与时间点。
+
+## 2026-08-22 Cloud Android 配置 V2 迁移收尾
+
+1. 客户端已切换为只请求 `GET /api/03helper/android-config` 的 schema V2 envelope；先 Base64 解码并使用原始 payload UTF-8 字节验签，支持 `SHA256withECDSA`（ASN.1 DER）与 `Ed25519`，未知 key / 算法、签名失败、外层或 payload schema 非 2、channel 不符、过期和字段注入均 fail closed。Debug 只信任包内置公钥与固定 keyId，Release 继续保持无公钥时不可用；旧 Debug 本地密码旁路和旧 V1 profile 资产已移除。
+2. 新增源码内置 `InstallerComponentTrustRegistry`，固定 desktop / lyrics / file-manager 的 ZIP、APK entry、包名、Debug 证书和最低 SDK；网络 payload 只能声明固定组件映射与必选性，不能覆盖包身份或兼容参数。根目录每次重新枚举，只允许三个固定 ZIP，desktop 必须存在、两个可选 ZIP 可以缺失；未知 / 重复文件、错误 entry、任一实际组件失败均整次拒绝，并清理本轮暂存缓存。
+3. 已补齐 V2 签名、原始字节、Ed25519、过期、未知 key / 算法、网络身份注入、可选 ZIP 缺失、必选 ZIP 缺失、大小写重复和错误 APK entry 等回归用例；下载日志不再输出异常文本或短时 URL 路径，密码、Cookie、Referer 和短时下载上下文不进入持久状态。
+4. 本轮验证通过：`108` 项 `testDebugUnitTest`（0 failures / 0 errors）、Debug / Release Kotlin 编译、`lintDebug`、`assembleDebug`、`assembleDebugAndroidTest`、`check-project-docs.mjs`、`check-skills.mjs` 和 `git diff --check`。Cloud 公共 endpoint 当前只读返回 HTTP `404 Not Found`，真实 staging 配置、根目录枚举、ZIP / APK 动态校验和车机安装因此仍是外部发布阻断，未把 404 当作客户端通过或回退到 V1。
+5. 最新 Debug APK 已核对为 `com.tcrrry.helper`、`versionName=0.1.0`、`versionCode=1`、Launcher `MainActivity`，APK Signature Scheme v2 为 true；主包 SHA-256 为 `d2d76c52872ecc03593eb3e0ce5c89d440aee8b2bce5a8dde7e47e60c66f21e7`。最新构建在指定测试手机上完成现有 instrumentation smoke `2/2`，随后再次以保留数据方式覆盖安装主包并启动 `MainActivity` 核对 resumed；未清数据、卸载、降级、重启或触碰车机。
+6. 交付用户的最小人工主测：Cloud staging 返回有效 V2 配置后，验证验签与过期门禁、根目录可选 ZIP 缺失、人工替换 ZIP 后 version / size / SHA-256 识别，再验证真实 Android System WebView、车机安装 / 授权 / 可用性和维护态更新流程。任何真实发布资料缺失时停止该条，不把 fixture 或模拟结果写成通过。
+
+## 2026-08-22 Cloud Android 配置 V2 历史字段与空密码对齐
+
+1. 按冻结协议将 `previousVersionsUrl` 与 `previousVersionsPassword` 加入客户端 V2 payload 和运行时配置对象；两字段无默认值，旧 V2 payload 缺字段时继续 fail closed。历史字段只为未来人工选择往期版本准备，当前不进入自动更新、版本比较或备用源。
+2. `folderPassword` 与 `previousVersionsPassword` 允许空字符串，空字符串表示无密码；历史 URL 非空时必须为 HTTPS 蓝奏文件夹 URL，且无用户名 / 密码、query 或 fragment；历史 URL 为空时历史密码必须为空。
+3. 将蓝奏文件夹 URL 校验收回 `ReleaseSourcePolicy` 唯一 owner，配置解析和根目录适配器共用同一 HTTPS、域名和 `b...` 文件夹路径边界；Debug 配置地址切换为 `https://api-staging.9studio.fun/api/03helper/android-config`，Release 地址保持独立。
+4. 已补充历史字段缺失、空密码、历史密码成对关系、历史 URL query / 文件页拒绝以及无密码目录继续向隐藏 WebView 传递空密码的回归用例；当前 `testDebugUnitTest`、Release Kotlin 编译、Debug Lint、项目文档、Skill、本机环境和 `git diff --check` 均已通过。真实 Cloud 200 签名配置、蓝奏目录和设备主测仍待 Cloud candidate 发布后执行。
+
+## 2026-08-22 staging 配置签名信任根轮换
+
+1. 用户明确授权废弃旧 `03helper-real-debug-2026-08-20-v4`，不保留旧 key 兼容；已生成新的 staging P-256 PKCS#8 签名私钥，私钥只保存在仓库外受控目录，不进入 Git、APK、数据库、日志或聊天。
+2. 新 `keyId` 为 `03helper-staging-config-2026-08-22-v1`，算法为 `SHA256withECDSA`，客户端内置公钥 SPKI DER SHA-256 为 `8c2573689e87e6c426add9f2249186ec7b6c0e8f44b196ea669c820adb1283d3`；Cloud 必须使用同一私钥签名，另行配置独立的 `ANDROID_CONFIG_ENCRYPTION_KEY_BASE64`。
+3. 客户端 Debug 信任资料已切换到新公钥和 keyId；Cloud staging 必须重新构建 / 部署 candidate 后注入新私钥，旧 candidate 或旧签名配置不能作为通过依据。
+4. 独立密码学探针确认私钥为 PKCS#8、曲线为 `prime256v1`，派生公钥与 APK asset 一致，实际 `SHA256withECDSA` DER 签名验签通过；配置加密密钥已另行生成并与签名私钥分开保存。
+5. 本轮 `testDebugUnitTest` 共 `113` 项通过，Debug / Release 编译、Debug Lint、Debug 主包与 AndroidTest 构建、项目文档 / Skill / 本机环境检查和 `git diff --check` 均通过。最新 Debug APK SHA-256 为 `94d121a574a202d237f626c8e9de9330767b46ec6bdb7c5031c7ee7410f57167`。
+6. 指定测试手机上的启动 smoke 为 `2/2` 通过；smoke 结束后再次保留数据覆盖安装最新主 Debug APK，系统返回 `Success`，最终包为 `com.tcrrry.helper`、`0.1.0 (1)`、Launcher `MainActivity`。未安装到车机，未清数据、卸载、降级或重启。

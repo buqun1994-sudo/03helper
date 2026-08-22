@@ -26,3 +26,71 @@ data class ArtifactManifest(
     val sources: List<ArtifactSource>,
     val rollbackId: String? = null,
 )
+
+/**
+ * Package, signing and compatibility identities shipped with this installer.
+ * Cloud configuration may select a fixed archive, but it can never replace
+ * any value in this registry.
+ */
+data class TrustedInstallerComponent(
+    val componentId: String,
+    val archiveFileName: String,
+    val apkEntryName: String,
+    val required: Boolean,
+    val displayName: String,
+    val minAndroidSdk: Int,
+    val packageName: String,
+    val certificateSha256: String,
+)
+
+object InstallerComponentTrustRegistry {
+    const val DESKTOP_COMPONENT_ID = "desktop"
+    const val LYRICS_COMPONENT_ID = "lyrics"
+    const val FILE_MANAGER_COMPONENT_ID = "file-manager"
+
+    const val DESKTOP_PACKAGE_NAME = "com.tcrrry.desktop"
+    const val LYRICS_PACKAGE_NAME = "com.tcrrry.desktoplyrics"
+    const val FILE_MANAGER_PACKAGE_NAME = "org.fossify.filemanager.debug"
+
+    private const val DEBUG_CERTIFICATE_SHA256 =
+        "2990047fddf6d6ec1eb7f83731fcc1398616e5fb83aec97542a4f132c35a1a27"
+
+    val components: List<TrustedInstallerComponent> = listOf(
+        TrustedInstallerComponent(
+            componentId = DESKTOP_COMPONENT_ID,
+            archiveFileName = "03desktop-debug.zip",
+            apkEntryName = "03desktop-debug.apk",
+            required = true,
+            displayName = "03桌面",
+            minAndroidSdk = 28,
+            packageName = DESKTOP_PACKAGE_NAME,
+            certificateSha256 = DEBUG_CERTIFICATE_SHA256,
+        ),
+        TrustedInstallerComponent(
+            componentId = LYRICS_COMPONENT_ID,
+            archiveFileName = "03lyrics-debug.zip",
+            apkEntryName = "03lyrics-debug.apk",
+            required = false,
+            displayName = "03歌词",
+            minAndroidSdk = 26,
+            packageName = LYRICS_PACKAGE_NAME,
+            certificateSha256 = DEBUG_CERTIFICATE_SHA256,
+        ),
+        TrustedInstallerComponent(
+            componentId = FILE_MANAGER_COMPONENT_ID,
+            archiveFileName = "fossify-file-manager-car-debug.zip",
+            apkEntryName = "fossify-file-manager-car-debug.apk",
+            required = false,
+            displayName = "文件管理器",
+            minAndroidSdk = 26,
+            packageName = FILE_MANAGER_PACKAGE_NAME,
+            certificateSha256 = DEBUG_CERTIFICATE_SHA256,
+        ),
+    )
+
+    private val byId = components.associateBy { it.componentId }
+
+    fun get(componentId: String): TrustedInstallerComponent? = byId[componentId]
+
+    fun ids(): Set<String> = byId.keys
+}

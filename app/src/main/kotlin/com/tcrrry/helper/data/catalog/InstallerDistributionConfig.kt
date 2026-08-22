@@ -1,7 +1,7 @@
 package com.tcrrry.helper.data.catalog
 
-import com.tcrrry.helper.domain.artifact.ArtifactManifestValidator
-import java.net.URI
+import com.tcrrry.helper.domain.artifact.InstallerComponentTrustRegistry
+import com.tcrrry.helper.domain.artifact.ReleaseSourcePolicy
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
 import java.time.Instant
@@ -20,7 +20,12 @@ data class SignedInstallerConfigEnvelope(
     val signatureAlgorithm: String,
     val payloadBase64: String,
     val signatureBase64: String,
-)
+) {
+    override fun toString(): String =
+        "SignedInstallerConfigEnvelope(schemaVersion=$schemaVersion, configVersion=$configVersion, " +
+            "keyId=$keyId, signatureAlgorithm=$signatureAlgorithm, payloadBase64=<redacted>, " +
+            "signatureBase64=<redacted>)"
+}
 
 @Serializable
 data class InstallerDistributionConfigPayload(
@@ -29,18 +34,22 @@ data class InstallerDistributionConfigPayload(
     val expiresAt: String,
     val folderUrl: String,
     val folderPassword: String,
+    val previousVersionsUrl: String,
+    val previousVersionsPassword: String,
     val components: List<InstallerComponentSourceDocument>,
-)
+) {
+    override fun toString(): String =
+        "InstallerDistributionConfigPayload(schemaVersion=$schemaVersion, channel=$channel, " +
+            "expiresAt=$expiresAt, folderUrl=<redacted>, folderPassword=<redacted>, " +
+            "previousVersionsUrl=<redacted>, previousVersionsPassword=<redacted>, components=$components)"
+}
 
+/** V2 deliberately contains no package, certificate or compatibility fields. */
 @Serializable
 data class InstallerComponentSourceDocument(
     val componentId: String,
     val archiveFileName: String,
     val required: Boolean,
-    val displayName: String? = null,
-    val minAndroidSdk: Int? = null,
-    val packageName: String? = null,
-    val certificateSha256: String? = null,
 )
 
 data class InstallerDistributionConfig(
@@ -49,11 +58,20 @@ data class InstallerDistributionConfig(
     val expiresAt: Instant,
     val folderUrl: String,
     val folderPassword: String,
+    val previousVersionsUrl: String,
+    val previousVersionsPassword: String,
     val components: List<InstallerComponentSource>,
     val keyId: String,
     val signatureAlgorithm: String,
-)
+) {
+    override fun toString(): String =
+        "InstallerDistributionConfig(configVersion=$configVersion, channel=$channel, expiresAt=$expiresAt, " +
+            "folderUrl=<redacted>, folderPassword=<redacted>, previousVersionsUrl=<redacted>, " +
+            "previousVersionsPassword=<redacted>, components=$components, keyId=$keyId, " +
+            "signatureAlgorithm=$signatureAlgorithm)"
+}
 
+/** Runtime component identity after the V2 payload has been joined to trust data. */
 data class InstallerComponentSource(
     val componentId: String,
     val archiveFileName: String,
@@ -62,6 +80,7 @@ data class InstallerComponentSource(
     val minAndroidSdk: Int,
     val packageName: String,
     val certificateSha256: String,
+    val apkEntryName: String,
 )
 
 sealed interface DistributionConfigLoadResult {
@@ -80,10 +99,9 @@ class CloudInstallerDistributionConfigAdapter(
     private val expectedChannel: String,
     private val now: () -> Instant = Instant::now,
     private val json: Json = CloudReleaseCatalogAdapter.STRICT_JSON,
-    private val staticConfig: InstallerDistributionConfig? = null,
+    private val sourcePolicy: ReleaseSourcePolicy = ReleaseSourcePolicy(),
 ) {
     suspend fun load(): DistributionConfigLoadResult {
-        staticConfig?.let { return DistributionConfigLoadResult.Success(it) }
         val response = try {
             transport.fetch()
         } catch (cancelled: CancellationException) {
@@ -111,24 +129,33 @@ class CloudInstallerDistributionConfigAdapter(
         } catch (_: Exception) {
             return DistributionConfigLoadResult.Failure("distribution_config_envelope_invalid", retryable = false)
         }
-        if (
-            envelope.schemaVersion != SUPPORTED_SCHEMA_VERSION ||
-            envelope.configVersion.isBlank() ||
-            envelope.keyId.isBlank()
-        ) {
+        if (envelope.schemaVersion != SUPPORTED_SCHEMA_VERSION) {
+            return DistributionConfigLoadResult.Failure("distribution_config_schema_unsupported", retryable = false)
+        }
+        if (envelope.configVersion.isBlank() || envelope.keyId.isBlank()) {
             return DistributionConfigLoadResult.Failure("distribution_config_envelope_fields_missing", retryable = false)
         }
+        if (envelope.signatureAlgorithm !in SUPPORTED_SIGNATURE_ALGORITHMS) {
+            return DistributionConfigLoadResult.Failure(
+                "distribution_config_signature_algorithm_invalid",
+                retryable = false,
+            )
+        }
+
         val payload = try {
             Base64.getDecoder().decode(envelope.payloadBase64)
         } catch (_: IllegalArgumentException) {
             return DistributionConfigLoadResult.Failure("distribution_config_payload_encoding_invalid", retryable = false)
+        }
+        if (payload.isEmpty() || payload.size > MAX_CONFIG_BYTES) {
+            return DistributionConfigLoadResult.Failure("distribution_config_payload_size_invalid", retryable = false)
         }
         val signature = try {
             Base64.getDecoder().decode(envelope.signatureBase64)
         } catch (_: IllegalArgumentException) {
             return DistributionConfigLoadResult.Failure("distribution_config_signature_encoding_invalid", retryable = false)
         }
-        if (!signatureVerifier.verify(envelope.keyId, envelope.signatureAlgorithm, payload, signature)) {
+        if (signature.isEmpty() || !signatureVerifier.verify(envelope.keyId, envelope.signatureAlgorithm, payload, signature)) {
             return DistributionConfigLoadResult.Failure("distribution_config_signature_invalid", retryable = false)
         }
 
@@ -137,7 +164,10 @@ class CloudInstallerDistributionConfigAdapter(
         } catch (_: Exception) {
             return DistributionConfigLoadResult.Failure("distribution_config_payload_invalid", retryable = false)
         }
-        if (document.schemaVersion != SUPPORTED_SCHEMA_VERSION || document.channel != expectedChannel) {
+        if (document.schemaVersion != SUPPORTED_SCHEMA_VERSION) {
+            return DistributionConfigLoadResult.Failure("distribution_config_payload_schema_unsupported", retryable = false)
+        }
+        if (document.channel != expectedChannel) {
             return DistributionConfigLoadResult.Failure("distribution_config_channel_invalid", retryable = false)
         }
         val expiresAt = try {
@@ -148,55 +178,38 @@ class CloudInstallerDistributionConfigAdapter(
         if (!expiresAt.isAfter(now())) {
             return DistributionConfigLoadResult.Failure("distribution_config_expired", retryable = true)
         }
-        if (document.folderPassword.isBlank() || document.folderPassword.length > MAX_PASSWORD_LENGTH) {
+        if (!isValidPassword(document.folderPassword)) {
             return DistributionConfigLoadResult.Failure("distribution_config_password_invalid", retryable = false)
         }
-        if (!isLanzouFolderUrl(document.folderUrl)) {
+        if (!sourcePolicy.isLanzouFolderUrl(document.folderUrl)) {
             return DistributionConfigLoadResult.Failure("distribution_config_folder_url_invalid", retryable = false)
         }
-        if (document.components.size != EXPECTED_COMPONENT_IDS.size) {
-            return DistributionConfigLoadResult.Failure("distribution_config_component_count_invalid", retryable = false)
-        }
-        val componentIds = document.components.map { it.componentId }
-        if (componentIds.toSet() != EXPECTED_COMPONENT_IDS) {
-            return DistributionConfigLoadResult.Failure("distribution_config_component_set_invalid", retryable = false)
-        }
-        if (componentIds.size != componentIds.toSet().size) {
-            return DistributionConfigLoadResult.Failure("distribution_config_component_duplicate", retryable = false)
-        }
-        if (document.components.count { it.required } != 1 || document.components.none { it.componentId == DESKTOP_COMPONENT_ID && it.required }) {
-            return DistributionConfigLoadResult.Failure("distribution_config_required_component_invalid", retryable = false)
-        }
-        if (document.components.any { !isSimpleZipName(it.archiveFileName) }) {
-            return DistributionConfigLoadResult.Failure("distribution_config_archive_name_invalid", retryable = false)
-        }
-        if (document.components.map { it.archiveFileName.lowercase() }.toSet().size != document.components.size) {
-            return DistributionConfigLoadResult.Failure("distribution_config_archive_duplicate", retryable = false)
-        }
-        if (document.components.any { component ->
-                component.packageName.isNullOrBlank() || !PACKAGE_NAME_PATTERN.matches(component.packageName)
-            }) {
-            return DistributionConfigLoadResult.Failure("distribution_config_package_invalid", retryable = false)
-        }
-        if (document.components.any { component ->
-                component.certificateSha256.isNullOrBlank() || !SHA256_PATTERN.matches(component.certificateSha256)
-            }) {
-            return DistributionConfigLoadResult.Failure("distribution_config_certificate_invalid", retryable = false)
-        }
-        if (document.components.any { it.minAndroidSdk != null && it.minAndroidSdk !in 1..100 }) {
-            return DistributionConfigLoadResult.Failure("distribution_config_compatibility_invalid", retryable = false)
-        }
-        val components = document.components.map { component ->
-            InstallerComponentSource(
-                componentId = component.componentId,
-                archiveFileName = component.archiveFileName,
-                required = component.required,
-                displayName = component.displayName?.trim().takeUnless { it.isNullOrBlank() }
-                    ?: defaultDisplayName(component.componentId),
-                minAndroidSdk = component.minAndroidSdk ?: defaultMinAndroidSdk(component.componentId),
-                packageName = checkNotNull(component.packageName),
-                certificateSha256 = checkNotNull(component.certificateSha256).lowercase(),
+        if (!isValidPassword(document.previousVersionsPassword)) {
+            return DistributionConfigLoadResult.Failure(
+                "distribution_config_previous_password_invalid",
+                retryable = false,
             )
+        }
+        if (document.previousVersionsUrl.isEmpty()) {
+            if (document.previousVersionsPassword.isNotEmpty()) {
+                return DistributionConfigLoadResult.Failure(
+                    "distribution_config_previous_password_without_url",
+                    retryable = false,
+                )
+            }
+        } else if (!sourcePolicy.isLanzouFolderUrl(document.previousVersionsUrl)) {
+            return DistributionConfigLoadResult.Failure(
+                "distribution_config_previous_url_invalid",
+                retryable = false,
+            )
+        }
+
+        val components = when (val result = trustedComponents(document.components)) {
+            is TrustedComponentsResult.Failure -> {
+                return DistributionConfigLoadResult.Failure(result.reasonCode, retryable = false)
+            }
+
+            is TrustedComponentsResult.Success -> result.components
         }
         return DistributionConfigLoadResult.Success(
             InstallerDistributionConfig(
@@ -205,6 +218,8 @@ class CloudInstallerDistributionConfigAdapter(
                 expiresAt = expiresAt,
                 folderUrl = document.folderUrl,
                 folderPassword = document.folderPassword,
+                previousVersionsUrl = document.previousVersionsUrl,
+                previousVersionsPassword = document.previousVersionsPassword,
                 components = components,
                 keyId = envelope.keyId,
                 signatureAlgorithm = envelope.signatureAlgorithm,
@@ -212,47 +227,53 @@ class CloudInstallerDistributionConfigAdapter(
         )
     }
 
-    private fun isLanzouFolderUrl(value: String): Boolean {
-        val uri = runCatching { URI(value) }.getOrNull() ?: return false
-        val host = uri.host?.lowercase() ?: return false
-        val allowedHost = setOf("lanzou.com", "lanzouw.com", "lanzoux.com", "lanzoui.com", "lanzouy.com")
-            .any { host == it || host.endsWith(".$it") }
-        val path = uri.path.orEmpty().trim('/').split('/').filter(String::isNotBlank)
-        return uri.scheme.equals("https", ignoreCase = true) &&
-            uri.userInfo == null &&
-            uri.fragment.isNullOrBlank() &&
-            allowedHost &&
-            path.size == 1 &&
-            path.single().matches(Regex("^b[a-zA-Z0-9]+$"))
+    private fun trustedComponents(
+        documents: List<InstallerComponentSourceDocument>,
+    ): TrustedComponentsResult {
+        if (documents.size != InstallerComponentTrustRegistry.components.size) {
+            return TrustedComponentsResult.Failure("distribution_config_component_count_invalid")
+        }
+        val ids = documents.map { it.componentId }
+        if (ids.size != ids.toSet().size) {
+            return TrustedComponentsResult.Failure("distribution_config_component_duplicate")
+        }
+        if (ids.toSet() != InstallerComponentTrustRegistry.ids()) {
+            return TrustedComponentsResult.Failure("distribution_config_component_set_invalid")
+        }
+        val byId = documents.associateBy { it.componentId }
+        val trusted = InstallerComponentTrustRegistry.components.map { definition ->
+            val document = byId[definition.componentId]
+                ?: return TrustedComponentsResult.Failure("distribution_config_component_set_invalid")
+            if (document.archiveFileName != definition.archiveFileName || document.required != definition.required) {
+                return TrustedComponentsResult.Failure("distribution_config_component_identity_invalid")
+            }
+            InstallerComponentSource(
+                componentId = definition.componentId,
+                archiveFileName = definition.archiveFileName,
+                required = definition.required,
+                displayName = definition.displayName,
+                minAndroidSdk = definition.minAndroidSdk,
+                packageName = definition.packageName,
+                certificateSha256 = definition.certificateSha256,
+                apkEntryName = definition.apkEntryName,
+            )
+        }
+        return TrustedComponentsResult.Success(trusted)
     }
 
-    private fun isSimpleZipName(value: String): Boolean =
-        value.isNotBlank() &&
-            value.endsWith(".zip", ignoreCase = true) &&
-            value.none { it == '/' || it == '\\' || it == '\u0000' } &&
-            value != "." && value != ".."
-
-    private fun defaultDisplayName(componentId: String): String = when (componentId) {
-        "desktop" -> "03桌面"
-        "lyrics" -> "03歌词"
-        "file-manager" -> "文件管理器"
-        else -> componentId
-    }
-
-    private fun defaultMinAndroidSdk(componentId: String): Int = when (componentId) {
-        "desktop" -> 28
-        "lyrics", "file-manager" -> 26
-        else -> 1
-    }
+    private fun isValidPassword(value: String): Boolean =
+        value.toByteArray(Charsets.UTF_8).size <= MAX_PASSWORD_BYTES
 
     private companion object {
-        const val SUPPORTED_SCHEMA_VERSION = 1
+        const val SUPPORTED_SCHEMA_VERSION = 2
         const val MAX_CONFIG_BYTES = 256 * 1024
-        const val MAX_PASSWORD_LENGTH = 128
-        const val DESKTOP_COMPONENT_ID = "desktop"
-        val EXPECTED_COMPONENT_IDS = setOf("desktop", "lyrics", "file-manager")
-        val SHA256_PATTERN = Regex("^[0-9a-fA-F]{64}$")
-        val PACKAGE_NAME_PATTERN = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$")
+        const val MAX_PASSWORD_BYTES = 512
+        val SUPPORTED_SIGNATURE_ALGORITHMS = setOf("SHA256withECDSA", "Ed25519")
+    }
+
+    private sealed interface TrustedComponentsResult {
+        data class Success(val components: List<InstallerComponentSource>) : TrustedComponentsResult
+        data class Failure(val reasonCode: String) : TrustedComponentsResult
     }
 }
 

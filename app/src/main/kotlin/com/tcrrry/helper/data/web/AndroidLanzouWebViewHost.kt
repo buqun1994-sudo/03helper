@@ -103,7 +103,7 @@ class AndroidLanzouWebViewHost(
                 request.method.equals("GET", ignoreCase = true) &&
                 sourcePolicy.isLanzouTransientDownloadUrl(url)
             ) {
-                Log.d(TAG, "transient_download_capture host=${safeHost(url)} path=${safePathPrefix(url)}")
+                Log.d(TAG, "transient_download_capture host=${safeHost(url)}")
                 completeDownload(
                     url = url,
                     userAgent = view.settings.userAgentString,
@@ -124,7 +124,7 @@ class AndroidLanzouWebViewHost(
         @Suppress("DEPRECATION")
         override fun shouldOverrideUrlLoading(view: WebView, url: String): Boolean {
             if (sourcePolicy.isLanzouTransientDownloadUrl(url)) {
-                Log.d(TAG, "transient_download_capture host=${safeHost(url)} path=${safePathPrefix(url)}")
+                Log.d(TAG, "transient_download_capture host=${safeHost(url)}")
                 completeDownload(
                     url = url,
                     userAgent = view.settings.userAgentString,
@@ -429,10 +429,6 @@ class AndroidLanzouWebViewHost(
         .getOrNull()
         ?.lowercase()
         .orEmpty()
-
-    private fun safePathPrefix(url: String): String = runCatching {
-        URI(url).path.orEmpty().trim('/').substringBefore('/').lowercase()
-    }.getOrDefault("")
 
     private fun normalizePageUrl(url: String): String = url.substringBefore('#')
 

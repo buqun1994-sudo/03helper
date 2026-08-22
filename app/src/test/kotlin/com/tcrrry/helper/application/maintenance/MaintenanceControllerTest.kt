@@ -80,6 +80,36 @@ class MaintenanceControllerTest {
     }
 
     @Test
+    fun `check updates detects archive or APK size changes even when hashes and version stay equal`() = runBlocking {
+        val current = manifest("desktop", versionCode = 1)
+        val updated = manifest("desktop", versionCode = 1, archiveSizeBytes = 101, apkSizeBytes = 51)
+        val events = mutableListOf<InstallationSessionEvent>()
+        val controller = MaintenanceController(
+            artifactCache = tempCache(),
+            diagnosticStore = tempDiagnostics(),
+            loadCatalog = {
+                CatalogLoadResult.Success(
+                    TrustedArtifactCatalog(
+                        catalogVersion = "catalog-2",
+                        keyId = "test-key",
+                        signatureAlgorithm = "Ed25519",
+                        manifests = listOf(updated),
+                    ),
+                )
+            },
+        )
+
+        controller.execute(
+            actionId = MaintenanceActionId.CHECK_UPDATES,
+            snapshot = maintenanceSnapshot(listOf(current)),
+            connection = null,
+            eventPort = InstallationSessionEventPort { events += it },
+        )
+
+        assertEquals("updates_available", (events[1] as InstallationSessionEvent.MaintenanceActionCompleted).resultCode)
+    }
+
+    @Test
     fun `device action without a retained lease fails before gateway access`() = runBlocking {
         val events = mutableListOf<InstallationSessionEvent>()
         val controller = MaintenanceController(tempCache(), tempDiagnostics())
@@ -215,7 +245,12 @@ class MaintenanceControllerTest {
         )
     }
 
-    private fun manifest(componentId: String, versionCode: Long): ArtifactManifest = ArtifactManifest(
+    private fun manifest(
+        componentId: String,
+        versionCode: Long,
+        archiveSizeBytes: Long = 100,
+        apkSizeBytes: Long = 50,
+    ): ArtifactManifest = ArtifactManifest(
         schemaVersion = 1,
         componentId = componentId,
         displayName = componentId,
@@ -223,10 +258,10 @@ class MaintenanceControllerTest {
         version = ArtifactVersion("1.$versionCode", versionCode),
         compatibility = CompatibilityRange(26, 30),
         archiveFileName = "$componentId.zip",
-        archiveSizeBytes = 100,
+        archiveSizeBytes = archiveSizeBytes,
         archiveSha256 = ("1" + versionCode).repeat(64).take(64),
         apkEntryName = "$componentId.apk",
-        apkSizeBytes = 50,
+        apkSizeBytes = apkSizeBytes,
         apkSha256 = ("2" + versionCode).repeat(64).take(64),
         packageName = when (componentId) {
             "desktop" -> "com.tcrrry.desktop"

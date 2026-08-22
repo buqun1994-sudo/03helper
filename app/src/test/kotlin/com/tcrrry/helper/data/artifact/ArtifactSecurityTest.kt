@@ -36,6 +36,25 @@ import org.junit.Test
 
 class ArtifactSecurityTest {
     @Test
+    fun `transient download request string representation redacts URL and headers`() {
+        val request = ResolvedDownloadRequest(
+            sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+            url = "https://zip1.webgetstore.com/secret-token",
+            userAgent = "secret-user-agent",
+            cookie = "secret-cookie",
+            referer = "https://wwatl.lanzouw.com/private",
+            contentDisposition = "secret-disposition",
+        )
+
+        val text = request.toString()
+
+        assertFalse(text.contains("secret-token"))
+        assertFalse(text.contains("secret-cookie"))
+        assertFalse(text.contains("private"))
+        assertTrue(text.contains("<redacted>"))
+    }
+
+    @Test
     fun `manifest validation rejects missing digest and unsafe names`() {
         val valid = manifestFor(byteArrayOf(1), byteArrayOf(2))
         assertTrue(ArtifactManifestValidator.validate(valid) is com.tcrrry.helper.domain.artifact.ManifestValidation.Valid)

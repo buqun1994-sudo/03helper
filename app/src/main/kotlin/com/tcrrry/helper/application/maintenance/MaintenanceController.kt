@@ -93,7 +93,9 @@ class MaintenanceController(
                 val changed = currentById.keys != nextById.keys || nextById.any { (componentId, manifest) ->
                     currentById[componentId]?.let { current ->
                         current.version != manifest.version ||
+                            current.archiveSizeBytes != manifest.archiveSizeBytes ||
                             !current.archiveSha256.equals(manifest.archiveSha256, ignoreCase = true) ||
+                            current.apkSizeBytes != manifest.apkSizeBytes ||
                             !current.apkSha256.equals(manifest.apkSha256, ignoreCase = true) ||
                             !current.certificateSha256.equals(manifest.certificateSha256, ignoreCase = true) ||
                             current.packageName != manifest.packageName

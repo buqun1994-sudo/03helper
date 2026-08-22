@@ -48,7 +48,7 @@ sealed interface LanzouFolderResolutionResult {
     data class Failure(val failure: ArtifactFailure) : LanzouFolderResolutionResult
 }
 
-/** Resolves one password-protected folder into the fixed three-component source set. */
+/** Resolves one configured Lanzou folder into the fixed component set. */
 class LanzouFolderSourceAdapter(
     private val hostFactory: LanzouFolderWebViewHostFactory,
     private val sourcePolicy: ReleaseSourcePolicy = ReleaseSourcePolicy(),
@@ -56,7 +56,7 @@ class LanzouFolderSourceAdapter(
 ) {
     suspend fun resolve(config: InstallerDistributionConfig): LanzouFolderResolutionResult {
         val folderUri = runCatching { URI(config.folderUrl) }.getOrNull()
-        if (folderUri == null || !isFolderUrl(folderUri) || config.folderPassword.isBlank()) {
+        if (folderUri == null || !sourcePolicy.isLanzouFolderUrl(config.folderUrl)) {
             return failure("lanzou_folder_config_invalid", retryable = false)
         }
         val host = try {
@@ -114,19 +114,37 @@ class LanzouFolderSourceAdapter(
         if (zipEntries.size != entries.size) {
             return failure("lanzou_folder_unknown_file", retryable = false)
         }
-        if (zipEntries.size != config.components.size) {
-            return failure("lanzou_folder_component_count_invalid", retryable = false)
+        val allowedNames = config.components.associateBy { it.archiveFileName.lowercase() }
+        if (zipEntries.any { it.name.lowercase() !in allowedNames }) {
+            return failure("lanzou_folder_unknown_file", retryable = false)
         }
-        val byName = zipEntries.groupBy { it.name }
+        if (zipEntries.map { it.id }.toSet().size != zipEntries.size) {
+            return failure("lanzou_folder_duplicate_file", retryable = false)
+        }
+        val byName = zipEntries.groupBy { it.name.lowercase() }
         if (byName.values.any { it.size != 1 }) {
             return failure("lanzou_folder_duplicate_file", retryable = false)
         }
         val origin = "${folderUri.scheme}://${folderUri.authority}"
-        val artifacts = config.components.map { component ->
-            val entry = byName[component.archiveFileName]?.singleOrNull()
-                ?: return failure("lanzou_folder_missing_${component.componentId}", retryable = false)
+        val artifacts = mutableListOf<LanzouFolderArtifact>()
+        for (component in config.components) {
+            val entry = byName[component.archiveFileName.lowercase()]?.singleOrNull()
+            if (entry == null) {
+                if (component.required) {
+                    return failure(
+                        reasonCode = "lanzou_folder_missing_${component.componentId}",
+                        retryable = false,
+                        componentId = component.componentId,
+                    )
+                }
+                continue
+            }
             if (!entry.id.matches(SHARE_ID_PATTERN)) {
-                return failure("lanzou_folder_entry_id_invalid", retryable = false)
+                return failure(
+                    "lanzou_folder_entry_id_invalid",
+                    retryable = false,
+                    componentId = component.componentId,
+                )
             }
             val source = ArtifactSource(
                 kind = ArtifactSourceKind.LANZOU_SHARE,
@@ -135,30 +153,26 @@ class LanzouFolderSourceAdapter(
             when (val validation = sourcePolicy.validateManifestSource(source)) {
                 com.tcrrry.helper.domain.artifact.SourcePolicyValidation.Accepted -> Unit
                 is com.tcrrry.helper.domain.artifact.SourcePolicyValidation.Rejected ->
-                    return failure(validation.reasonCode, retryable = false)
+                    return failure(
+                        validation.reasonCode,
+                        retryable = false,
+                        componentId = component.componentId,
+                    )
             }
-            LanzouFolderArtifact(component, entry, source)
+            artifacts += LanzouFolderArtifact(component, entry, source)
         }
         return LanzouFolderResolutionResult.Success(artifacts)
     }
 
-    private fun isFolderUrl(uri: URI): Boolean {
-        val host = uri.host?.lowercase() ?: return false
-        val lanzouHost = setOf("lanzou.com", "lanzouw.com", "lanzoux.com", "lanzoui.com", "lanzouy.com")
-            .any { host == it || host.endsWith(".$it") }
-        val path = uri.path.orEmpty().trim('/').split('/').filter(String::isNotBlank)
-        return uri.scheme.equals("https", ignoreCase = true) &&
-            uri.userInfo == null &&
-            uri.fragment.isNullOrBlank() &&
-            lanzouHost &&
-            path.size == 1 &&
-            path.single().matches(Regex("^b[a-zA-Z0-9]+$"))
-    }
-
-    private fun failure(reasonCode: String, retryable: Boolean): LanzouFolderResolutionResult.Failure =
+    private fun failure(
+        reasonCode: String,
+        retryable: Boolean,
+        componentId: String? = null,
+    ): LanzouFolderResolutionResult.Failure =
         LanzouFolderResolutionResult.Failure(
             ArtifactFailure(
                 phase = ArtifactFailurePhase.SOURCE_RESOLUTION,
+                componentId = componentId,
                 sourceKind = ArtifactSourceKind.LANZOU_SHARE,
                 reasonCode = reasonCode,
                 retryable = retryable,

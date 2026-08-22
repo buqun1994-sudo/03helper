@@ -95,7 +95,12 @@ data class ResolvedDownloadRequest(
     val contentDisposition: String? = null,
     val mimeType: String? = null,
     val contentLength: Long? = null,
-)
+) {
+    override fun toString(): String =
+        "ResolvedDownloadRequest(sourceKind=$sourceKind, url=<redacted>, userAgent=<redacted>, " +
+            "cookie=<redacted>, referer=<redacted>, contentDisposition=<redacted>, " +
+            "mimeType=$mimeType, contentLength=$contentLength)"
+}
 
 enum class ArtifactFailurePhase {
     CATALOG,

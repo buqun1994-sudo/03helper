@@ -137,7 +137,8 @@ class ArtifactDownloader(
             // Keep the part and metadata for the same manifest/source resume boundary.
             throw cancelled
         } catch (error: Exception) {
-            Log.w(TAG, "download_exception type=${error::class.java.simpleName} message=${error.message ?: "unknown"}")
+            // Exception messages can contain transient URLs supplied by the source.
+            Log.w(TAG, "download_exception type=${error::class.java.simpleName}")
             return failed(manifest, request, "download_io_failed", paths.archivePart.length())
         } finally {
             response?.close()
