@@ -22,8 +22,8 @@
 
 ### 3.1 控制面与对象流分离
 
-1. 03helper 需要一个很小的 schema V3 签名配置作为控制面，配置描述当前蓝奏根文件夹、运行时密码、`environment`、`channel`、`catalogVersion`、`catalogRevision` 和动态 `apps[]`；每个条目可声明展示信息、安装策略、排序、客户端能力门槛和受限 typed `deviceSetup`。包名、证书、最低 SDK 和 APK 实际身份由客户端读取并用官方发布者证书根校验，包体版本、大小和摘要由客户端从当前 ZIP 内 APK 读取。
-2. 安装包对象流不经过 03helper 自有服务器。客户端每次从配置取得同一个受密码保护的蓝奏根文件夹，在隐藏 WebView 中完成验证并枚举文件，只下载启用 `apps[]` 声明的 ZIP；未声明文件忽略，desktop 必须存在，其他可选 ZIP 可以缺失并单项隔离。根文件夹是唯一的“最新版本”真值，上传一批不可变 ZIP、完成预检并发布新配置即可更新或新增 APP。
+1. 03helper 需要一个很小的 schema V3 签名配置作为控制面，配置描述当前蓝奏根文件夹、运行时密码、`environment`、`channel`、`catalogVersion`、`catalogRevision` 和动态 `apps[]`；每个条目可声明 `versionCode`、`versionName`、`apkSizeBytes`、展示信息、安装策略、排序、客户端能力门槛和受限 typed `deviceSetup`。包名、证书、最低 SDK、APK 哈希和实际身份由客户端读取并用官方发布者证书根校验，实际 APK 的版本 / 大小必须与配置字段一致。
+2. 安装包对象流不经过 03helper 自有服务器。客户端每次从配置取得同一个受密码保护的蓝奏根文件夹，在隐藏 WebView 中完成验证并枚举文件，只定位启用 `apps[]` 声明的 ZIP；未声明文件忽略，缺失 ZIP（包括 `desktop`）不在目录阶段把整次安装判死。用户确认后先扫描手机公共 `Download`，只有没有通过 Cloud 版本 / 大小 / 包身份校验的本地 APK 时才下载对应 ZIP；单个远端或本地来源失败逐项隔离，结果页再决定是否允许进入维护。最新版本展示以签名 `apps[]` 的 `versionCode`、`versionName`、`apkSizeBytes` 为准，`catalogVersion` 只作配置修订。
 3. R2 / GitHub Releases 不参与当前根文件夹自动版本判断；后续若增加备用对象，必须继续由同一签名配置声明并保持组件版本一致，不能让多个来源各自决定“最新版本”。
 4. 600GB/月额度只用于评估对象流量，不用于否定小清单控制面；几 KB 的清单请求不构成 APK 直链流量。
 
@@ -47,8 +47,8 @@ V3 已冻结独立的 Android distribution-config 控制面。领域对象和签
 
 1. 各产品仓库先生成已签名 APK，分别由 03 歌词、03桌面和文件管理器仓库负责包身份、版本和证书；03helper 不复制产品源码，也不重新签名。
 2. Cloud release 流程为每个 APP 生成一个 ZIP，归档根目录只放一个 APK；服务端只保存 `apps[]` 中的文件名和展示 / 安装策略。
-3. 全部 ZIP 上传到同一个受密码保护的不可变蓝奏目录。目录可包含人工维护的其它文件；客户端只处理签名 `apps[]` 声明的 ZIP，desktop ZIP 必须存在，其余 APP 可以缺失。
-4. 客户端连接后先重新打开根文件夹并按动态文件映射发布轻量应用列表；用户确认后才对已选 APP（最多 2 个并发）下载、解压、读取 APK 元数据并生成本次 `ArtifactManifest`；单个可选 APP 失败不阻断其它 APP。
+3. 全部 ZIP 上传到同一个受密码保护的不可变蓝奏目录。目录可包含人工维护的其它文件；客户端只处理签名 `apps[]` 声明的 ZIP，任一声明 ZIP 都允许在目录阶段暂时缺失，因为公共 `Download` 可能已有可复用 APK。
+4. 客户端连接后先重新打开根文件夹并按动态文件映射发布轻量应用列表；用户确认后先检查公共 `Download`，再对未命中的已选 APP（最多 2 个并发）下载、解压、读取 APK 元数据并生成本次 `ArtifactManifest`；任一 APP 失败只记录原因并继续其它 APP，`desktop` 失败也必须落到统一结果页。
 5. 只有正式 staging 下载、解压、APK 包身份 / 证书校验和 ADB 安装验证全部通过，才允许把签名配置切到公开状态。当前真实组件 Debug 包只进入 03helper Debug 变体的本地签名验证 profile；它们可以证明客户端完整工程链，但不代表 Cloud production 配置或公开候选通过。
 6. 密码只作为签名 payload 的运行时字段下发给客户端；Cloud 不向客户端下发网盘账号、R2 密钥、GitHub PAT 或任意命令，客户端不记录密码和短时下载上下文。
 
@@ -88,6 +88,8 @@ Cloud 最新 iCAR 03 官网已确认的可复用语言：
 5. 每次 Cloud 侧涉及 release index、R2、官网入口、API 或生产部署时，先读取 Cloud 仓库对应专项文档；部署和上线仍按 Cloud 的固定候选与人工授权规则执行。
 
 ## 7. Cloud 路由索引
+
+本轮协议补充：`apps[]` 启用条目必须包含 `versionCode`、`versionName`、`apkSizeBytes`；客户端选择页展示为 `V1.2.3`、`2.6M`，下载后逐项核对 APK 实际版本与大小。
 
 在 Cloud 仓库中继续读取：
 

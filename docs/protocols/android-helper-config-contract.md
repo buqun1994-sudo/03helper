@@ -6,7 +6,7 @@
 
 构建变体与环境必须成对匹配：Debug 只接受 `environment=staging`、`channel=debug`；Release 只接受 `environment=production`、`channel=release`。其它组合在目录枚举前拒绝。
 
-Cloud 只声明目录、展示信息和受限的本地信任 / 授权档案 ID，不声明或覆盖 APK 的 `packageName`、`certificateSha256`、`minAndroidSdk`。客户端从实际 APK 读取包名、版本、证书、大小和 SHA-256，并使用本地官方发布者信任档案校验身份；现有内置 `appId` 仍额外绑定其本地官方包名，未知 `appId` 只能落在受信发布者命名空间内。
+Cloud 声明目录、应用展示元数据、APK 的 `versionCode`、`versionName`、`apkSizeBytes` 以及受限的本地信任 / 授权档案 ID；不声明或覆盖 APK 的 `packageName`、`certificateSha256`、`minAndroidSdk`。客户端在选择页直接展示这三个版本 / 包体字段，下载后仍从实际 APK 读取包名、版本、大小、证书和 SHA-256，并逐项与 Cloud 字段核对；现有内置 `appId` 仍额外绑定其本地官方包名，未知 `appId` 只能落在受信发布者命名空间内。
 
 ## 2. v3 envelope 与 payload
 
@@ -45,6 +45,9 @@ envelope 与解码后的 payload 都携带同一 `catalogVersion`、`catalogRevi
       "archiveFileName": "03desktop-debug.zip",
       "displayName": "03桌面",
       "description": "车机桌面应用",
+      "versionCode": 123,
+      "versionName": "1.2.3",
+      "apkSizeBytes": 4567890,
       "enabled": true,
       "installPolicy": "required",
       "sortOrder": 10,
@@ -59,17 +62,17 @@ envelope 与解码后的 payload 都携带同一 `catalogVersion`、`catalogRevi
 }
 ```
 
-`appId` 是 Cloud 目录标识，不是 Android 包名。`archiveFileName` 必须是单一 ZIP 文件名，禁止目录、查询参数、片段和路径穿越。`displayName`、`description` 是受签名保护的元数据；当前首次安装选择框只使用名称，描述保留给后续受控页面 / 诊断投影，不直接渲染到组件行。连接后的轻量选择阶段不下载 ZIP：版本先显示签名 `catalogVersion`（若未来条目提供 `versionLabel` 则优先），体积优先显示蓝奏根目录返回的安全大小；用户确认并完成 APK 校验后，实际 `versionName` 与归档大小覆盖这些展示值。`enabled=false` 的条目不显示、不下载、不安装。启用条目按 `sortOrder` 排序，平局按 `appId`。除 `desktop` 外，`installPolicy=required` 只表示首次安装建议，不代表整个目录必须包含该 APP；`desktop` 必须同时 `enabled=true` 且 `installPolicy=required`，它是首次安装唯一核心必装项。
+`appId` 是 Cloud 目录标识，不是 Android 包名。`archiveFileName` 必须是单一 ZIP 文件名，禁止目录、查询参数、片段和路径穿越。`displayName`、`description`、`versionCode`、`versionName`、`apkSizeBytes` 都是受签名保护的配置字段；客户端在连接后的轻量选择阶段不下载 ZIP，直接把 `versionName` 规范化为 `V1.2.3` 形式，并把 `apkSizeBytes` 规范化为紧凑单位（例如 `2.6M`）。`versionCode` 是正整数，`versionName` 为非空 Android 版本名，`apkSizeBytes` 为正的 APK 本体字节数。用户确认后，实际 APK 的包名、版本名、版本号、文件大小、SHA-256 和证书必须与配置一致；任何不一致只记录该 APP 失败。`enabled=false` 的条目不显示、不下载、不安装。启用条目按 `sortOrder` 排序，平局按 `appId`。除 `desktop` 外，`installPolicy=required` 只表示首次安装建议，不代表整个目录必须包含该 APP；`desktop` 必须同时 `enabled=true` 且 `installPolicy=required`，它是首次安装唯一核心必装项。
 
-`versionLabel` 与 `sizeLabel` 是可选的受签名展示提示，不是身份字段；当前 staging 可以不发送 `versionLabel`，客户端会使用 `catalogVersion` 保证选择页仍有版本标识。它们不得替代 APK 下载后的真实 `versionName`、文件大小和哈希校验。
+旧协议中的 `versionLabel`、`sizeLabel` 不再作为 Cloud 字段；客户端不读取它们，也不把 `catalogVersion` 或蓝奏 ZIP 行大小当作应用版本 / APK 大小。`catalogVersion`、`catalogRevision` 仅用于配置快照的防回滚和内部追踪。
 
 客户端不设置业务 APP 数量上限；只执行传输体和字段长度护栏：payload 最大 512 KiB，`appId` 最大 64 字节，文件名最大 128 字节，名称最大 128 字节，描述最大 512 字节。
 
 ## 3. 目录处理
 
-客户端重新枚举受保护蓝奏云目录，只处理已启用 `apps[]` 中声明的 ZIP。未声明文件（包括说明文件、旧 ZIP 和其它人工文件）直接忽略。声明但缺失的可选 APP 进入“目录中缺失”，其它 APP 继续处理；`desktop` 缺失阻止首次安装。
+客户端重新枚举受保护蓝奏云目录，只处理已启用 `apps[]` 中声明的 ZIP。未声明文件（包括说明文件、旧 ZIP 和其它人工文件）直接忽略。目录枚举只负责建立远端定位结果，不是安装包可用性的唯一门槛：用户确认后，每个选中 APP 先扫描手机公共 `Download`，找到通过包名、`versionCode`、`versionName`、`apkSizeBytes`、哈希和受信证书校验的 APK 就直接复用；本地未命中时才解析并下载对应 ZIP。声明 ZIP 缺失（包括 `desktop`）只生成该 APP 的结构化失败，后续应用继续处理；全部结束后由结果页决定是否可进入维护。
 
-每个 ZIP 独立下载、校验和解压。解压根目录必须只有一个 APK，不允许子目录、第二个文件或说明文件；APK 必须能读取包名、版本、大小、SHA-256 和证书。已知包名不匹配或 `deviceSetup` 绑定到其它包名时，只更新该 APP 的失败状态，不阻塞其它 APP。
+每个 ZIP 独立下载、校验和解压。解压根目录必须只有一个 APK，不允许子目录、第二个文件或说明文件；APK 必须能读取包名、版本、大小、SHA-256 和证书，并与配置的 `versionCode`、`versionName`、`apkSizeBytes` 一致。已知包名不匹配或 `deviceSetup` 绑定到其它包名时，只更新该 APP 的失败状态，不阻塞其它 APP。
 
 ## 4. 授权声明
 

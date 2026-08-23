@@ -436,6 +436,32 @@ class InstallationSessionTest {
     }
 
     @Test
+    fun `one failed component still reaches a partial result after the remaining app completes`() {
+        val session = connectedSession(includeOptional = false)
+        session.dispatch(InstallationSessionCommand.ToggleOptionalComponent("lyrics", selected = true))
+        startToDeviceVerification(session)
+
+        session.dispatchEvent(
+            InstallationSessionEvent.ComponentFailed(
+                componentId = "lyrics",
+                phase = InstallPhase.VERIFY,
+                reasonCode = "availability_check_failed",
+            ),
+        )
+        session.dispatchEvent(
+            InstallationSessionEvent.DeviceVerified(
+                checks = listOf(ComponentCheck("desktop", passed = true)),
+            ),
+        )
+
+        val snapshot = session.currentSnapshot()
+        assertEquals(InstallationSessionState.COMPLETED_WITH_ERRORS, snapshot.state)
+        assertEquals(setOf("lyrics"), snapshot.failedComponentIds)
+        assertTrue(snapshot.componentResults.first { it.componentId == "desktop" }.available)
+        assertFalse(snapshot.componentResults.first { it.componentId == "lyrics" }.available)
+    }
+
+    @Test
     fun `duplicate and older sequence events cannot overwrite a newer snapshot`() {
         val session = connectedSession(includeOptional = false)
         session.dispatch(InstallationSessionCommand.StartInstallation)

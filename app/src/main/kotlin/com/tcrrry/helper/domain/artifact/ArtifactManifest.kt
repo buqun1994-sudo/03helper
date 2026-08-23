@@ -31,6 +31,8 @@ data class ArtifactManifest(
     /** Typed setup compiled from the signed app entry; never shell text. */
     val deviceSetup: AuthorizationSetupDeclaration? = null,
     val sortOrder: Int = 0,
+    /** A local-only manifest is built from a verified public Download APK. */
+    val localOnly: Boolean = false,
 )
 
 /**

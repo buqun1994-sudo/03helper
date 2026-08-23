@@ -362,9 +362,7 @@ class InstallerRuntime(
                 val result = loader(selectedIds, port)
                 if (result is CatalogLoadResult.Success) {
                     val current = session.currentSnapshot()
-                    if (current.state == InstallationSessionState.SELECTION_CONFIRMED &&
-                        current.artifactManifests.isNotEmpty()
-                    ) {
+                    if (current.state == InstallationSessionState.SELECTION_CONFIRMED) {
                         beginArtifactPreparation(current)
                     }
                 }
@@ -551,7 +549,8 @@ class InstallerRuntime(
             .map { it.id }
             .toSet()
         val manifests = snapshot.artifactManifests.filter { it.componentId in selectedIds }
-        if (manifests.map { it.componentId }.toSet() != selectedIds) {
+        val unresolvedIds = selectedIds - manifests.map { it.componentId }.toSet() - snapshot.failedComponentIds
+        if (unresolvedIds.isNotEmpty()) {
             port.emit(
                 InstallationSessionEvent.FatalError(
                     category = FailureCategory.VERIFICATION,
@@ -735,6 +734,7 @@ class InstallerRuntime(
             InstallationSessionState.AUTHORIZING,
             InstallationSessionState.VERIFYING_DEVICE,
             InstallationSessionState.SUCCEEDED,
+            InstallationSessionState.COMPLETED_WITH_ERRORS,
             InstallationSessionState.PAUSED,
             InstallationSessionState.MAINTENANCE,
         )

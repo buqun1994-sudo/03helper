@@ -53,6 +53,7 @@ import com.tcrrry.helper.ui.state.MaintenanceFeedback
 import com.tcrrry.helper.ui.theme.InstallerColors
 import com.tcrrry.helper.ui.theme.InstallerDimensions
 import com.tcrrry.helper.ui.theme.InstallerMotion
+import kotlin.math.roundToInt
 
 @Composable
 fun MaintenanceHome(
@@ -152,7 +153,6 @@ fun MaintenanceActionFlowPage(
         when (state) {
             is InstallUiState.Installing -> MaintenanceInstallProgress(
                 state = state,
-                onIntent = onIntent,
             )
 
             is InstallUiState.Result -> MaintenanceInstallResult(
@@ -169,7 +169,6 @@ fun MaintenanceActionFlowPage(
 @Composable
 private fun MaintenanceInstallProgress(
     state: InstallUiState.Installing,
-    onIntent: (InstallUiIntent) -> Unit,
 ) {
     val phases = listOf(
         InstallPhase.FETCH to R.string.phase_fetch,
@@ -207,18 +206,12 @@ private fun MaintenanceInstallProgress(
             }
         }
         Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
-        PressableSurface(
-            onClick = { onIntent(InstallUiIntent.CancelInstallation) },
-            enabled = state.canCancel,
+        Text(
+            text = stringResource(R.string.install_keep_screen_on),
+            style = MaterialTheme.typography.bodySmall,
+            color = InstallerColors.AuxiliaryWhite,
             modifier = Modifier.fillMaxWidth(),
-            minHeight = InstallerDimensions.PrimaryActionHeight,
-            containerColor = InstallerColors.PageBlue,
-            pressedColor = InstallerColors.PressedBlue,
-        ) {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-                Text(text = stringResource(R.string.install_cancel), style = MaterialTheme.typography.bodyLarge, color = InstallerColors.White)
-            }
-        }
+        )
         Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
     }
 }
@@ -272,12 +265,27 @@ private fun MaintenancePhaseRow(
                             modifier = Modifier.fillMaxWidth(),
                         )
                     } else {
-                        LinearProgressIndicator(
-                            progress = { animatedProgress },
-                            color = InstallerColors.White,
-                            trackColor = InstallerColors.WhiteBorder,
+                        Row(
                             modifier = Modifier.fillMaxWidth(),
-                        )
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            LinearProgressIndicator(
+                                progress = { animatedProgress },
+                                color = InstallerColors.White,
+                                trackColor = InstallerColors.WhiteBorder,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Text(
+                                text = stringResource(
+                                    R.string.install_progress_percent,
+                                    (animatedProgress * 100f).roundToInt(),
+                                ),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = InstallerColors.White,
+                                modifier = Modifier.width(44.dp),
+                            )
+                        }
                     }
                 }
             }
@@ -299,6 +307,14 @@ private fun MaintenanceInstallResult(
             InstallerColors.Success,
             R.string.result_enter_maintenance,
             InstallUiIntent.EnterMaintenance,
+        )
+        ResultKind.PARTIAL_FAILURE -> ResultFlowCopy(
+            R.string.result_partial_failure_title,
+            R.string.result_partial_failure_description,
+            "triangle_alert",
+            InstallerColors.Warning,
+            if (state.canEnterMaintenance) R.string.result_enter_maintenance else R.string.result_retry,
+            if (state.canEnterMaintenance) InstallUiIntent.EnterMaintenance else InstallUiIntent.RetryInstallation,
         )
         ResultKind.PAUSED -> ResultFlowCopy(
             R.string.result_paused_title,
@@ -768,6 +784,7 @@ private fun maintenanceNextStep(status: MaintenanceActionStatus): Int = when (st
 
 private fun maintenanceResultNextStep(kind: ResultKind): Int = when (kind) {
     ResultKind.SUCCESS -> R.string.maintenance_next_step_succeeded
+    ResultKind.PARTIAL_FAILURE -> R.string.maintenance_next_step_succeeded
     ResultKind.PAUSED,
     ResultKind.INSTALLATION_FAILED,
     -> R.string.maintenance_next_step_continue

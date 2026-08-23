@@ -23,6 +23,10 @@ class ReleaseSourcePolicy(
             return SourcePlan.Rejected(manifestValidation.reasonCode)
         }
 
+        if (manifest.localOnly) {
+            return SourcePlan.Accepted(manifest.sources)
+        }
+
         val byKind = manifest.sources.associateBy { it.kind }
         if (byKind.size != automaticOrder.size || byKind.keys != automaticOrder.toSet()) {
             return SourcePlan.Rejected("source_set_invalid")
@@ -55,6 +59,11 @@ class ReleaseSourcePolicy(
     }
 
     fun validateManifestSource(source: ArtifactSource): SourcePolicyValidation {
+        if (source.kind == ArtifactSourceKind.LOCAL_DOWNLOAD &&
+            source.url == ArtifactManifestValidator.LOCAL_DOWNLOAD_URL
+        ) {
+            return SourcePolicyValidation.Accepted
+        }
         val reason = hostPolicy.rejectReason(source, requireSingleSharePath = true)
         return if (reason == null) {
             SourcePolicyValidation.Accepted
@@ -126,6 +135,8 @@ class SourceHostPolicy(
 
             ArtifactSourceKind.GITHUB_RELEASES ->
                 if (host !in githubHosts) "github_host_forbidden" else null
+
+            ArtifactSourceKind.LOCAL_DOWNLOAD -> "local_source_requires_local_manifest"
         }
     }
 

@@ -6,6 +6,7 @@ import java.security.Signature
 import java.nio.file.Files
 import java.time.Instant
 import java.util.Base64
+import com.tcrrry.helper.domain.artifact.formatArtifactSizeLabel
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.encodeToString
 import org.junit.Assert.assertEquals
@@ -225,6 +226,29 @@ class InstallerDistributionConfigTest {
     }
 
     @Test
+    fun `Cloud release metadata is projected as compact version and APK size`() = runBlocking {
+        val keys = KeyPairGenerator.getInstance("EC").apply { initialize(256) }.generateKeyPair()
+        val document = payloadDocument(
+            apps = defaultApps().map { app ->
+                if (app.appId == "desktop") {
+                    app.copy(versionCode = 123L, versionName = "1.2.3", apkSizeBytes = 2_726_400L)
+                } else {
+                    app
+                }
+            },
+        )
+
+        val config = (loadDocument(keys, document) as DistributionConfigLoadResult.Success).config
+        val desktop = config.apps.single { it.appId == "desktop" }
+
+        assertEquals(123L, desktop.versionCode)
+        assertEquals("1.2.3", desktop.versionName)
+        assertEquals("V1.2.3", desktop.displayVersionLabel)
+        assertEquals("2.6M", desktop.displaySizeLabel)
+        assertEquals("2.6M", formatArtifactSizeLabel(2_726_400L))
+    }
+
+    @Test
     fun `file revision store survives recreation and rejects an older snapshot`() = runBlocking {
         val keys = KeyPairGenerator.getInstance("EC").apply { initialize(256) }.generateKeyPair()
         val root = Files.createTempDirectory("catalog-revision-store").toFile()
@@ -330,6 +354,9 @@ class InstallerDistributionConfigTest {
             archiveFileName = "03desktop-debug.zip",
             displayName = "03桌面",
             description = "车机桌面",
+            versionCode = 1L,
+            versionName = "0.1.0",
+            apkSizeBytes = 1_200_000L,
             enabled = true,
             installPolicy = "required",
             sortOrder = 10,
@@ -342,6 +369,9 @@ class InstallerDistributionConfigTest {
             archiveFileName = "03lyrics-debug.zip",
             displayName = "03歌词",
             description = "歌词",
+            versionCode = 114L,
+            versionName = "1.14",
+            apkSizeBytes = 1_800_000L,
             enabled = true,
             installPolicy = "optional",
             sortOrder = 20,
@@ -354,6 +384,9 @@ class InstallerDistributionConfigTest {
             archiveFileName = "03notes-debug.zip",
             displayName = "Notes",
             description = "Notes",
+            versionCode = 1L,
+            versionName = "1.0",
+            apkSizeBytes = 900_000L,
             enabled = true,
             installPolicy = "optional",
             sortOrder = 30,
@@ -393,9 +426,9 @@ class InstallerDistributionConfigTest {
           "previousVersionsUrl": "",
           "previousVersionsPassword": "",
           "apps": [
-            {"appId":"desktop","archiveFileName":"03desktop-debug.zip","displayName":"03桌面","description":"车机桌面","enabled":true,"installPolicy":"required","sortOrder":10,"minClientSchemaVersion":3,"trustProfileId":"nine-studio","deviceSetup":{"profileId":"","actionIds":[]}},
-            {"appId":"lyrics","archiveFileName":"03lyrics-debug.zip","displayName":"03歌词","description":"歌词","enabled":true,"installPolicy":"optional","sortOrder":20,"minClientSchemaVersion":3,"trustProfileId":"nine-studio","deviceSetup":{"profileId":"","actionIds":[]}},
-            {"appId":"notes","archiveFileName":"03notes-debug.zip","displayName":"Notes","description":"Notes","enabled":true,"installPolicy":"optional","sortOrder":30,"minClientSchemaVersion":3,"trustProfileId":"nine-studio","deviceSetup":{"profileId":"","actionIds":[]}}
+            {"appId":"desktop","archiveFileName":"03desktop-debug.zip","displayName":"03桌面","description":"车机桌面","versionCode":1,"versionName":"0.1.0","apkSizeBytes":1200000,"enabled":true,"installPolicy":"required","sortOrder":10,"minClientSchemaVersion":3,"trustProfileId":"nine-studio","deviceSetup":{"profileId":"","actionIds":[]}},
+            {"appId":"lyrics","archiveFileName":"03lyrics-debug.zip","displayName":"03歌词","description":"歌词","versionCode":114,"versionName":"1.14","apkSizeBytes":1800000,"enabled":true,"installPolicy":"optional","sortOrder":20,"minClientSchemaVersion":3,"trustProfileId":"nine-studio","deviceSetup":{"profileId":"","actionIds":[]}},
+            {"appId":"notes","archiveFileName":"03notes-debug.zip","displayName":"Notes","description":"Notes","versionCode":1,"versionName":"1.0","apkSizeBytes":900000,"enabled":true,"installPolicy":"optional","sortOrder":30,"minClientSchemaVersion":3,"trustProfileId":"nine-studio","deviceSetup":{"profileId":"","actionIds":[]}}
           ]
         }
     """.trimIndent()

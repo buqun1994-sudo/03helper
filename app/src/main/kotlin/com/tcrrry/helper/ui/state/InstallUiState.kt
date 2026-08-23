@@ -2,7 +2,6 @@ package com.tcrrry.helper.ui.state
 
 import com.tcrrry.helper.domain.session.DeviceConnectionStatus
 import com.tcrrry.helper.domain.session.ComponentCompatibility
-import com.tcrrry.helper.domain.session.ComponentProgressStatus
 import com.tcrrry.helper.domain.session.InstallPhase
 import com.tcrrry.helper.domain.session.MaintenanceActionId
 import com.tcrrry.helper.domain.session.MaintenanceActionStatus
@@ -38,8 +37,6 @@ sealed interface InstallUiState {
         val currentPhase: InstallPhase,
         val progress: UiProgress,
         val completedStages: Set<InstallPhase>,
-        val canCancel: Boolean,
-        val componentProgress: List<ComponentInstallProgressRow> = emptyList(),
     ) : InstallUiState {
         override val screen: InstallScreen = InstallScreen.INSTALLING
     }
@@ -48,6 +45,7 @@ sealed interface InstallUiState {
         val kind: ResultKind,
         val componentResults: List<ComponentResultRow>,
         val canContinue: Boolean,
+        val canEnterMaintenance: Boolean = false,
     ) : InstallUiState {
         override val screen: InstallScreen = InstallScreen.RESULT
     }
@@ -120,15 +118,6 @@ data class UiProgress(
     val totalCount: Int,
     val fraction: Float?,
     val indeterminate: Boolean,
-)
-
-data class ComponentInstallProgressRow(
-    val componentId: String,
-    val displayName: String,
-    val iconKey: String,
-    val phase: InstallPhase,
-    val status: ComponentProgressStatus,
-    val progress: UiProgress,
 )
 
 data class ComponentResultRow(

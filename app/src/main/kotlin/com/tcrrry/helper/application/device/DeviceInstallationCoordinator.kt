@@ -19,6 +19,7 @@ import com.tcrrry.helper.domain.session.ComponentProgressStatus
 import com.tcrrry.helper.domain.session.FailureCategory
 import com.tcrrry.helper.domain.session.InstallPhase
 import com.tcrrry.helper.domain.session.InstallationSessionEvent
+import kotlinx.coroutines.CancellationException
 
 sealed interface DeviceInstallationExecutionResult {
     data object Completed : DeviceInstallationExecutionResult
@@ -51,134 +52,240 @@ class DeviceInstallationCoordinator(
             )
         }
         val componentIds = installable.map { it.manifest.componentId }.toSet()
-        if (installable.isEmpty() || componentIds.size != installable.size) {
+        if (componentIds.size != installable.size) {
             return failed(
                 category = FailureCategory.INSTALLATION,
                 failure = DeviceActionFailure("installable_artifacts_invalid", retryable = false),
             )
         }
-        val authorizationPlan = when (val result = AuthorizationPlanFactory.create(installable)) {
-            is AuthorizationPlanBuildResult.Ready -> result.plan
-            is AuthorizationPlanBuildResult.Rejected -> return failed(
-                category = FailureCategory.CONFIGURATION,
-                failure = DeviceActionFailure(result.reasonCode, retryable = false),
-            )
-        }
-        installable.forEach { artifact ->
-            emitProgress(artifact.manifest.componentId, InstallPhase.SEND, ComponentProgressStatus.RUNNING)
-        }
         val gateway = actionConnection.commandGateway
         eventPort.emit(InstallationSessionEvent.InstallationStarted(componentIds.toList()))
+        if (installable.isEmpty()) {
+            eventPort.emit(InstallationSessionEvent.InstallationCompleted(emptyList(), emptyList()))
+            eventPort.emit(InstallationSessionEvent.AuthorizationCompleted(emptyList(), emptyList()))
+            eventPort.emit(InstallationSessionEvent.DeviceVerified(emptyList(), emptyList()))
+            return DeviceInstallationExecutionResult.Completed
+        }
 
-        val installationEvidence = when (val result = gateway.install(installable)) {
-            is DeviceInstallResult.Failed -> return failed(FailureCategory.INSTALLATION, result.failure)
-            is DeviceInstallResult.Installed -> {
-                if (!validateInstallationEvidence(installable, result.evidence)) {
-                    return failed(
-                        category = FailureCategory.INSTALLATION,
-                        failure = DeviceActionFailure("installation_evidence_invalid", retryable = false),
-                    )
-                }
-                eventPort.emit(
-                    InstallationSessionEvent.InstallationCompleted(
-                        checks = componentIds.toChecks(),
-                        evidence = result.evidence,
-                    ),
+        val installedArtifacts = mutableListOf<InstallableArtifact>()
+        val installationEvidence = mutableListOf<com.tcrrry.helper.domain.device.InstalledArtifactEvidence>()
+        installable.forEach { artifact ->
+            emitProgress(artifact.manifest.componentId, InstallPhase.SEND, ComponentProgressStatus.RUNNING)
+            val result = try {
+                gateway.install(listOf(artifact))
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                DeviceInstallResult.Failed(
+                    DeviceActionFailure("install_exception", artifact.manifest.componentId, retryable = false),
                 )
-                installable.forEach { artifact ->
-                    emitProgress(artifact.manifest.componentId, InstallPhase.SEND, ComponentProgressStatus.COMPLETED)
+            }
+            when (result) {
+                is DeviceInstallResult.Failed -> recordFailure(artifact, InstallPhase.SEND, result.failure)
+                is DeviceInstallResult.Installed -> {
+                    if (validateInstallationEvidence(listOf(artifact), result.evidence)) {
+                        installedArtifacts += artifact
+                        installationEvidence += result.evidence
+                        emitProgress(artifact.manifest.componentId, InstallPhase.SEND, ComponentProgressStatus.COMPLETED)
+                    } else {
+                        recordFailure(
+                            artifact,
+                            InstallPhase.SEND,
+                            DeviceActionFailure("installation_evidence_invalid", artifact.manifest.componentId, false),
+                        )
+                    }
                 }
-                result.evidence
             }
         }
+        eventPort.emit(
+            InstallationSessionEvent.InstallationCompleted(
+                checks = installedArtifacts.map { ComponentCheck(it.manifest.componentId, true) },
+                evidence = installationEvidence,
+            ),
+        )
 
-        AuthorizationDeclarationValidator.validate(authorizationPlan, installable)?.let { failure ->
-            return failed(FailureCategory.CONFIGURATION, failure)
+        val desktop = installedArtifacts.firstOrNull {
+            it.manifest.componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
+        }
+        if (desktop == null) {
+            installedArtifacts.forEach { artifact ->
+                recordFailure(
+                    artifact,
+                    InstallPhase.CONFIGURE,
+                    DeviceActionFailure("desktop_prerequisite_failed", artifact.manifest.componentId, false),
+                )
+            }
+            eventPort.emit(InstallationSessionEvent.AuthorizationCompleted(emptyList(), emptyList()))
+            eventPort.emit(InstallationSessionEvent.DeviceVerified(emptyList(), emptyList()))
+            return DeviceInstallationExecutionResult.Completed
         }
 
-        when (val result = gateway.runShortcut(
-            shortcut = DeviceShortcut.CONFIGURE_ALL_INSTALLED_APPS_AND_START_DESKTOP,
-            selectedComponentIds = componentIds,
-            authorizationPlan = authorizationPlan,
-        )) {
-            is DeviceShortcutResult.Failed -> return failed(
-                category = if (result.stage == DeviceShortcutFailureStage.AUTHORIZATION) {
-                    FailureCategory.CONFIGURATION
-                } else {
-                    FailureCategory.VERIFICATION
-                },
-                failure = result.failure,
+        val configuredArtifacts = mutableListOf<InstallableArtifact>()
+        // Each optional authorization group includes the desktop prerequisite.
+        // Keep one evidence record per typed action so the final session proof
+        // remains a plan-sized set instead of duplicating desktop actions.
+        val authorizationEvidence = linkedMapOf<String, com.tcrrry.helper.domain.device.AuthorizationActionEvidence>()
+        var desktopRuntime: com.tcrrry.helper.domain.device.ManagedApplicationAvailabilityEvidence? = null
+        val desktopAttempt = authorizeGroup(gateway, listOf(desktop))
+        if (desktopAttempt is AuthorizationAttempt.Success) {
+            configuredArtifacts += desktop
+            desktopAttempt.evidence.forEach { evidence ->
+                authorizationEvidence.putIfAbsent(evidence.actionId, evidence)
+            }
+            desktopRuntime = desktopAttempt.desktopRuntime
+            emitProgress(desktop.manifest.componentId, InstallPhase.CONFIGURE, ComponentProgressStatus.COMPLETED)
+        } else {
+            recordFailure(desktop, InstallPhase.CONFIGURE, (desktopAttempt as AuthorizationAttempt.Failure).failure)
+        }
+
+        if (desktopRuntime != null) {
+            installedArtifacts.filter { it.manifest.componentId != AuthorizationPlanFactory.DESKTOP_COMPONENT_ID }
+                .forEach { artifact ->
+                    when (val attempt = authorizeGroup(gateway, listOf(desktop, artifact))) {
+                        is AuthorizationAttempt.Success -> {
+                            configuredArtifacts += artifact
+                            attempt.evidence.forEach { evidence ->
+                                authorizationEvidence.putIfAbsent(evidence.actionId, evidence)
+                            }
+                            emitProgress(artifact.manifest.componentId, InstallPhase.CONFIGURE, ComponentProgressStatus.COMPLETED)
+                        }
+
+                        is AuthorizationAttempt.Failure -> recordFailure(artifact, InstallPhase.CONFIGURE, attempt.failure)
+                    }
+                }
+        } else {
+            installedArtifacts.filter { it.manifest.componentId != AuthorizationPlanFactory.DESKTOP_COMPONENT_ID }
+                .forEach { artifact ->
+                    recordFailure(
+                        artifact,
+                        InstallPhase.CONFIGURE,
+                        DeviceActionFailure("desktop_prerequisite_failed", artifact.manifest.componentId, false),
+                    )
+                }
+        }
+        eventPort.emit(
+            InstallationSessionEvent.AuthorizationCompleted(
+                checks = configuredArtifacts.map { ComponentCheck(it.manifest.componentId, true) },
+                evidence = authorizationEvidence.values.toList(),
+            ),
+        )
+
+        val availableEvidence = mutableListOf<DeviceAvailabilityEvidence>()
+        val configuredIds = configuredArtifacts.map { it.manifest.componentId }.toSet()
+        if (desktopRuntime != null && AuthorizationPlanFactory.DESKTOP_COMPONENT_ID in configuredIds) {
+            val desktopManifest = desktop.manifest
+            val runtime = desktopRuntime
+            availableEvidence += DeviceAvailabilityEvidence(
+                componentId = desktopManifest.componentId,
+                packageName = desktopManifest.packageName,
+                version = desktopManifest.apkVersion,
+                installedArchiveVerified = true,
+                launchAttempted = runtime.launchAttempted,
+                launcherResolved = runtime.launcherResolved,
+                processRunning = runtime.processRunning,
+                requiredServiceBound = runtime.requiredServiceBound,
             )
+        }
+        configuredArtifacts.filter { it.manifest.componentId != AuthorizationPlanFactory.DESKTOP_COMPONENT_ID }
+            .forEach { artifact ->
+                availableEvidence += DeviceAvailabilityEvidence(
+                    componentId = artifact.manifest.componentId,
+                    packageName = artifact.manifest.packageName,
+                    version = artifact.manifest.apkVersion,
+                    installedArchiveVerified = true,
+                    launchAttempted = false,
+                    launcherResolved = false,
+                    processRunning = false,
+                    requiredServiceBound = null,
+                )
+                emitProgress(artifact.manifest.componentId, InstallPhase.VERIFY, ComponentProgressStatus.COMPLETED)
+            }
+        if (desktopRuntime != null && AuthorizationPlanFactory.DESKTOP_COMPONENT_ID in configuredIds) {
+            emitProgress(AuthorizationPlanFactory.DESKTOP_COMPONENT_ID, InstallPhase.VERIFY, ComponentProgressStatus.COMPLETED)
+        }
+        eventPort.emit(
+            InstallationSessionEvent.DeviceVerified(
+                checks = availableEvidence.map { ComponentCheck(it.componentId, true) },
+                evidence = availableEvidence,
+            ),
+        )
+        return DeviceInstallationExecutionResult.Completed
+    }
 
+    private suspend fun authorizeGroup(
+        gateway: com.tcrrry.helper.domain.device.AdbCommandGateway,
+        artifacts: List<InstallableArtifact>,
+    ): AuthorizationAttempt {
+        val plan = when (val result = AuthorizationPlanFactory.create(artifacts)) {
+            is AuthorizationPlanBuildResult.Ready -> result.plan
+            is AuthorizationPlanBuildResult.Rejected -> return AuthorizationAttempt.Failure(
+                DeviceActionFailure(result.reasonCode, artifacts.lastOrNull()?.manifest?.componentId, false),
+            )
+        }
+        AuthorizationDeclarationValidator.validate(plan, artifacts)?.let {
+            return AuthorizationAttempt.Failure(it)
+        }
+        val result = try {
+            gateway.runShortcut(
+                shortcut = DeviceShortcut.CONFIGURE_ALL_INSTALLED_APPS_AND_START_DESKTOP,
+                selectedComponentIds = artifacts.map { it.manifest.componentId }.toSet(),
+                authorizationPlan = plan,
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            return AuthorizationAttempt.Failure(
+                DeviceActionFailure("authorization_exception", artifacts.lastOrNull()?.manifest?.componentId, false),
+            )
+        }
+        return when (result) {
+            is DeviceShortcutResult.Failed -> AuthorizationAttempt.Failure(result.failure)
             is DeviceShortcutResult.Completed -> {
-                if (!componentIds.all { it in result.configuredComponentIds }) {
-                    return failed(
-                        category = FailureCategory.CONFIGURATION,
-                        failure = DeviceActionFailure("shortcut_selected_component_missing", retryable = false),
+                val selectedActionIds = plan.actions.map { it.id }.toSet()
+                val evidence = result.authorizationEvidence.filter { it.actionId in selectedActionIds }
+                if (!AuthorizationPlanFactory.validateEvidence(plan, evidence)) {
+                    AuthorizationAttempt.Failure(
+                        DeviceActionFailure("authorization_evidence_invalid", artifacts.lastOrNull()?.manifest?.componentId, false),
+                    )
+                } else if (!artifacts.all { it.manifest.componentId in result.configuredComponentIds }) {
+                    AuthorizationAttempt.Failure(
+                        DeviceActionFailure("shortcut_selected_component_missing", artifacts.lastOrNull()?.manifest?.componentId, false),
+                    )
+                } else {
+                    AuthorizationAttempt.Success(
+                        evidence = evidence,
+                        desktopRuntime = result.availabilityEvidence.firstOrNull {
+                            it.componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
+                        },
                     )
                 }
-                val selectedActionIds = authorizationPlan.actions.map { it.id }.toSet()
-                val selectedAuthorizationEvidence = result.authorizationEvidence.filter { it.actionId in selectedActionIds }
-                if (!AuthorizationPlanFactory.validateEvidence(authorizationPlan, selectedAuthorizationEvidence)) {
-                    return failed(
-                        category = FailureCategory.CONFIGURATION,
-                        failure = DeviceActionFailure("authorization_evidence_invalid", retryable = false),
-                    )
-                }
-                eventPort.emit(
-                    InstallationSessionEvent.AuthorizationCompleted(
-                        checks = componentIds.toChecks(),
-                        evidence = selectedAuthorizationEvidence,
-                    ),
-                )
-                installable.forEach { artifact ->
-                    emitProgress(artifact.manifest.componentId, InstallPhase.CONFIGURE, ComponentProgressStatus.COMPLETED)
-                }
-                val desktopRuntime = result.availabilityEvidence.firstOrNull {
-                    it.componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
-                } ?: return failed(
-                    category = FailureCategory.VERIFICATION,
-                    failure = DeviceActionFailure(
-                        "availability_evidence_missing",
-                        AuthorizationPlanFactory.DESKTOP_COMPONENT_ID,
-                        retryable = false,
-                    ),
-                )
-                val selectedAvailabilityEvidence = installable.map { artifact ->
-                    val isDesktop = artifact.manifest.componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
-                    val runtime = if (isDesktop) desktopRuntime else null
-                    DeviceAvailabilityEvidence(
-                        componentId = artifact.manifest.componentId,
-                        packageName = artifact.manifest.packageName,
-                        version = artifact.manifest.apkVersion,
-                        installedArchiveVerified = true,
-                        launchAttempted = runtime?.launchAttempted ?: false,
-                        launcherResolved = runtime?.launcherResolved ?: false,
-                        processRunning = runtime?.processRunning ?: false,
-                        requiredServiceBound = runtime?.requiredServiceBound,
-                    )
-                }
-                if (!validateAvailabilityEvidence(installable, authorizationPlan, selectedAvailabilityEvidence)) {
-                    return failed(
-                        category = FailureCategory.VERIFICATION,
-                        failure = DeviceActionFailure("availability_evidence_invalid", retryable = false),
-                    )
-                }
-                eventPort.emit(
-                    InstallationSessionEvent.DeviceVerified(
-                        checks = componentIds.toChecks(),
-                        evidence = selectedAvailabilityEvidence,
-                    ),
-                )
-                installable.forEach { artifact ->
-                    emitProgress(artifact.manifest.componentId, InstallPhase.VERIFY, ComponentProgressStatus.COMPLETED)
-                }
-                artifacts.forEach { artifact ->
-                    runCatching { artifact.finalApk.delete() }
-                }
-                return DeviceInstallationExecutionResult.Completed
             }
         }
+    }
+
+    private sealed interface AuthorizationAttempt {
+        data class Success(
+            val evidence: List<com.tcrrry.helper.domain.device.AuthorizationActionEvidence>,
+            val desktopRuntime: com.tcrrry.helper.domain.device.ManagedApplicationAvailabilityEvidence?,
+        ) : AuthorizationAttempt
+
+        data class Failure(val failure: DeviceActionFailure) : AuthorizationAttempt
+    }
+
+    private fun recordFailure(
+        artifact: InstallableArtifact,
+        phase: InstallPhase,
+        failure: DeviceActionFailure,
+    ) {
+        emitProgress(artifact.manifest.componentId, phase, ComponentProgressStatus.FAILED, indeterminate = false)
+        eventPort.emit(
+            InstallationSessionEvent.ComponentFailed(
+                componentId = artifact.manifest.componentId,
+                phase = phase,
+                reasonCode = failure.reasonCode,
+                retryable = failure.retryable,
+            ),
+        )
     }
 
     private fun validateInstallationEvidence(

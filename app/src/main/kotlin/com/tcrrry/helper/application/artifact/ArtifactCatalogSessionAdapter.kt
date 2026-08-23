@@ -118,10 +118,11 @@ internal fun TrustedArtifactCatalog.toComponentDescriptors(androidSdk: Int? = nu
             displayName = app.displayName,
             description = app.description,
             required = app.required,
-            // APK-derived values always win. Before the user confirms a
-            // download, retain only signed / directory presentation metadata.
-            versionLabel = base?.versionLabel ?: app.versionLabel,
-            sizeLabel = base?.sizeLabel ?: app.sizeLabel,
+            // Before preparation, these labels come directly from Cloud's
+            // versionName / apkSizeBytes fields. A verified manifest replaces
+            // them with the same normalized values after download.
+            versionLabel = base?.versionLabel ?: app.displayVersionLabel,
+            sizeLabel = base?.sizeLabel ?: app.displaySizeLabel,
             compatibilityLabel = base?.compatibilityLabel,
             compatibilityState = base?.compatibilityState ?: ComponentCompatibility.UNKNOWN,
             iconKey = app.componentId,

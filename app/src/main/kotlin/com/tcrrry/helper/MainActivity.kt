@@ -1,7 +1,11 @@
 package com.tcrrry.helper
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.Composable
@@ -15,6 +19,14 @@ import com.tcrrry.helper.ui.state.InstallUiIntent
 class MainActivity : ComponentActivity() {
     private val installerRuntime: InstallerRuntime
         get() = (application as InstallerApplication).installerRuntime
+    private var storagePermissionPrompted = false
+    private val storagePermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions(),
+    ) {
+        // Start the normal foreground flow even when permission is denied so
+        // the session can expose a recoverable public-Download error.
+        installerRuntime.onForeground()
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -28,9 +40,26 @@ class MainActivity : ComponentActivity() {
         super.onResume()
         // onResume is the single foreground boundary: it covers first entry and
         // the fast recovery path after a lock-screen pause without duplicate work.
+        if (requiresLegacyStoragePermission()) {
+            if (!storagePermissionPrompted) {
+                storagePermissionPrompted = true
+                storagePermissionLauncher.launch(
+                    arrayOf(
+                        Manifest.permission.READ_EXTERNAL_STORAGE,
+                        Manifest.permission.WRITE_EXTERNAL_STORAGE,
+                    ),
+                )
+            }
+            return
+        }
         installerRuntime.onForeground()
     }
 
+    private fun requiresLegacyStoragePermission(): Boolean {
+        if (Build.VERSION.SDK_INT > Build.VERSION_CODES.P) return false
+        return checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED ||
+            checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
+    }
 }
 
 @Composable

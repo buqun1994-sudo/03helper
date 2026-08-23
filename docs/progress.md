@@ -215,10 +215,10 @@ F2 Debug APK 已按用户授权安装到指定手机。该段记录的是 F2 交
 6. 使用显式测试手机完成主包和 AndroidTest 包保留数据覆盖安装；随后运行既有 `connectedDebugAndroidTest`，生产入口与 Debug 维护场景 `2/2` 通过。测试框架移除目标包后，已再次覆盖安装最新 Debug 主包并核对 `com.tcrrry.helper`、Debug、`0.1.0 (1)`、`INTERNET` 已授予以及 `MainActivity` 的 `MAIN/LAUNCHER` 入口。最终 Debug APK SHA-256 为 `9eb6a842b393220e081ed3eca11440b01956efa116f56802ba1fdf13bc48bb2f`，AndroidTest APK SHA-256 为 `f56066697ff7dd1a435b77c30e8559d61744f3c4f9704fa6f87f4a5e21cef3a1`。
 7. 本轮未提交、未推送、未发布，未清数据、卸载、降级或重启设备，也未对真实车机执行维护写入。真实目标车机的检查更新、重装、修复授权、应用状态、断线重连和冷启动人工主测仍待执行；卸载、清除数据、降级、重启和任意 shell 仍不在 V1 主链，正式 Cloud / Release 资料阻断保持不变。
 
-## 2026-08-21 根文件夹分发契约与安装恢复边界
+## 2026-08-21 根文件夹分发契约与安装恢复边界（历史中间实现，已被 V3 单项隔离与 Cloud 字段口径覆盖）
 
-1. 用户确认采用单一蓝奏密码根文件夹作为当前版本真值：Cloud 只需后台配置根文件夹地址和密码，文件夹内固定放 `03desktop-debug.zip`、`03lyrics-debug.zip` 和 `fossify-file-manager-car-debug.zip`；人工替换 ZIP 后，客户端下一次检查更新重新枚举目录并从 APK 动态读取版本、大小和 SHA-256。
-2. 已将当前产品、架构、安全、计划和验证文档的现行口径切换为签名 `android-config` 控制面：HTTPS 接口返回 detached-signature envelope，密码只运行时驻留内存；未知、缺失、重复或额外文件、签名失败、过期或包身份不符时整次目录拒绝。此前每组件无密码分享页和 R2 / GitHub 自动备用仅保留为历史方案或未来受控扩展。
+1. 当时的中间实现采用固定三 ZIP 的蓝奏密码根文件夹，并在人工替换 ZIP 后从 APK 动态读取版本、大小和 SHA-256；该版本 / 大小来源已被 V3 签名 `apps[]` 的 `versionCode` / `versionName` / `apkSizeBytes` 取代，ZIP / APK 只保留安装前校验职责。
+2. 当时的中间实现曾把未知、缺失、重复或额外文件以及包身份不符升级为整次目录拒绝；该规则已废弃。现行 V3 规则忽略未声明文件，声明 ZIP 缺失 / 重复或某 APP 身份不符只记录当前 APP，只有签名配置、密码或根目录解析本身失败才拒绝整次配置。
 3. 客户端动态目录主链已落地为 `CloudInstallerDistributionConfigAdapter` -> `LanzouFolderSourceAdapter` -> `FolderArtifactCatalogAdapter` -> 原有安装 / 维护会话；根目录只作为发现和版本控制面，短时 ZIP URL、Cookie、Referer 和密码不进入持久状态。
 4. 修正安装重连边界：`CONNECTED + checkpoint` 现在与其它可恢复安装阶段统一走安装重连，锁屏 / ADB 短暂断开后重新确认同一车机可恢复到原 `CONNECTED` 检查点，不再退回普通初始化发现或出现无响应的继续按钮。新增领域回归用例已通过。
 5. 本轮新增代码后的完整验证已完成：`testDebugUnitTest` 共 `96` 项通过，`compileDebugKotlin`、`compileReleaseKotlin`、`lintDebug`、`assembleDebug` 和 `assembleDebugAndroidTest` 均通过；`check-project-docs.mjs`、`check-skills.mjs`、`check-local-environment.mjs` 和 `git diff --check` 均通过。
@@ -249,10 +249,10 @@ F2 Debug APK 已按用户授权安装到指定手机。该段记录的是 F2 交
 4. smoke 结束后已再次对测试手机保留数据覆盖安装最新 Debug 主包，系统返回 `Success`；最终包身份为 `com.tcrrry.helper`、Debug、`0.1.0 (1)`，`MAIN` / `LAUNCHER` 解析到 `com.tcrrry.helper/.MainActivity`。本轮未清数据、卸载、降级、重启、提交、推送或对车机执行维护写入。
 5. 待用户最小人工主测：真实 Cloud 根文件夹下载与安装、维护态九个入口逐页进入 / 返回、锁屏后解锁自动快速重连、以及真实车机上的检查更新、重装、修复授权和受控应用管理。任一动作出现意外跳回首页、静态状态突变、连接未恢复或车机写入范围异常时停止该条并保留当前界面与时间点。
 
-## 2026-08-22 Cloud Android 配置 V2 迁移收尾
+## 2026-08-22 Cloud Android 配置 V2 迁移收尾（历史中间实现，已被 V3 单项隔离口径覆盖）
 
 1. 客户端已切换为只请求 `GET /api/03helper/android-config` 的 schema V2 envelope；先 Base64 解码并使用原始 payload UTF-8 字节验签，支持 `SHA256withECDSA`（ASN.1 DER）与 `Ed25519`，未知 key / 算法、签名失败、外层或 payload schema 非 2、channel 不符、过期和字段注入均 fail closed。Debug 只信任包内置公钥与固定 keyId，Release 继续保持无公钥时不可用；旧 Debug 本地密码旁路和旧 V1 profile 资产已移除。
-2. 新增源码内置 `InstallerComponentTrustRegistry`，固定 desktop / lyrics / file-manager 的 ZIP、APK entry、包名、Debug 证书和最低 SDK；网络 payload 只能声明固定组件映射与必选性，不能覆盖包身份或兼容参数。根目录每次重新枚举，只允许三个固定 ZIP，desktop 必须存在、两个可选 ZIP 可以缺失；未知 / 重复文件、错误 entry、任一实际组件失败均整次拒绝，并清理本轮暂存缓存。
+2. 当时的中间实现新增源码内置 `InstallerComponentTrustRegistry`，固定 desktop / lyrics / file-manager 的 ZIP、APK entry、包名、Debug 证书和最低 SDK；网络 payload 只能声明固定组件映射与必选性，不能覆盖包身份或兼容参数。该阶段曾要求 desktop ZIP 必须存在，并将实际组件失败升级为整次拒绝；这条门槛已废弃，现行 V3 规则改为声明 ZIP（包括 desktop）缺失或单项失败只记录当前 APP，继续其它 APP，最终由结果页决定是否可进入维护。
 3. 已补齐 V2 签名、原始字节、Ed25519、过期、未知 key / 算法、网络身份注入、可选 ZIP 缺失、必选 ZIP 缺失、大小写重复和错误 APK entry 等回归用例；下载日志不再输出异常文本或短时 URL 路径，密码、Cookie、Referer 和短时下载上下文不进入持久状态。
 4. 本轮验证通过：`108` 项 `testDebugUnitTest`（0 failures / 0 errors）、Debug / Release Kotlin 编译、`lintDebug`、`assembleDebug`、`assembleDebugAndroidTest`、`check-project-docs.mjs`、`check-skills.mjs` 和 `git diff --check`。Cloud 公共 endpoint 当前只读返回 HTTP `404 Not Found`，真实 staging 配置、根目录枚举、ZIP / APK 动态校验和车机安装因此仍是外部发布阻断，未把 404 当作客户端通过或回退到 V1。
 5. 最新 Debug APK 已核对为 `com.tcrrry.helper`、`versionName=0.1.0`、`versionCode=1`、Launcher `MainActivity`，APK Signature Scheme v2 为 true；主包 SHA-256 为 `d2d76c52872ecc03593eb3e0ce5c89d440aee8b2bce5a8dde7e47e60c66f21e7`。最新构建在指定测试手机上完成现有 instrumentation smoke `2/2`，随后再次以保留数据方式覆盖安装主包并启动 `MainActivity` 核对 resumed；未清数据、卸载、降级、重启或触碰车机。
@@ -273,10 +273,10 @@ F2 Debug APK 已按用户授权安装到指定手机。该段记录的是 F2 交
 4. 独立密码学探针确认私钥为 PKCS#8、曲线为 `prime256v1`，派生公钥与 APK asset 一致，实际 `SHA256withECDSA` DER 签名验签通过；配置加密密钥已另行生成并与签名私钥分开保存。
 5. 本轮 `testDebugUnitTest` 共 `113` 项通过，Debug / Release 编译、Debug Lint、Debug 主包与 AndroidTest 构建、项目文档 / Skill / 本机环境检查和 `git diff --check` 均通过。最新 Debug APK SHA-256 为 `94d121a574a202d237f626c8e9de9330767b46ec6bdb7c5031c7ee7410f57167`。
 6. 指定测试手机上的启动 smoke 为 `2/2` 通过；smoke 结束后再次保留数据覆盖安装最新主 Debug APK，系统返回 `Success`，最终包为 `com.tcrrry.helper`、`0.1.0 (1)`、Launcher `MainActivity`。未安装到车机，未清数据、卸载、降级或重启。
-## 2026-08-23 Android 动态 APP 分发客户端改造
+## 2026-08-23 Android 动态 APP 分发客户端改造（历史中间实现，已被 2026-08-24 收口覆盖）
 
 1. 客户端控制面已切换为严格 schema V3：`apps[]`、`environment`、`issuedAtUtc`、`catalogVersion` 和 `catalogRevision`；运行时不再接受 v2 或从 `components` 补回固定清单。客户端按环境 / 频道持久化最高修订号，拒绝签名快照回滚。
-2. 蓝奏根目录按动态声明逐项处理：未声明文件忽略，声明但缺失的可选 APP 单项标记，desktop 缺失才阻断；每个 ZIP 独立完成单 APK 根目录检查、APK 元数据读取、SHA-256 和本地官方发布者证书根校验。
+2. 当时的中间实现按动态声明处理蓝奏根目录：未声明文件忽略，声明但缺失的可选 APP 单项标记，但 desktop 缺失仍会阻断；该规则已被 2026-08-24 收口覆盖。现行规则对所有 APP（包括 desktop）统一逐项隔离，公共 `Download` 未命中且远端 ZIP 缺失时只生成当前 APP 失败，不冻结整批安装；每个可用 ZIP 仍独立完成单 APK 根目录检查、APK 元数据读取、SHA-256 和本地官方发布者证书根校验。
 3. 安装与授权链已支持动态条目和 `sortOrder`；Cloud 的 `deviceSetup` 只能编译为客户端强类型动作，ADB 写入前读取现有安全列表并执行 Android 9 容量预检，写入后回读验证并保留原有条目。
 4. 会话、维护持久化和下载界面已增加动态应用行、描述、版本、下载 / 安装状态和单项错误原因；维护刷新可识别新增、移除和不在当前目录的已安装 APP。
 5. 收尾验证已完成：`./gradlew test` 的 Debug 单元测试 `125` 项、Release 对应测试套件均为 0 failures / 0 errors；`:app:lintDebug`、`:app:assembleDebug`、`:app:assembleRelease`、`check-local-environment.mjs`、`check-project-docs.mjs`、`check-skills.mjs` 和 `git diff --check` 均通过。Debug 产物为 `app/build/outputs/apk/debug/app-debug.apk`，Release 产物为 `app/build/outputs/apk/release/app-release-unsigned.apk`。
@@ -313,16 +313,37 @@ F2 Debug APK 已按用户授权安装到指定手机。该段记录的是 F2 交
 4. `:app:assembleDebug` 成功，Debug APK SHA-256 为 `065f458a975a5f7cfd8450bb2a58d2c32060733e32d53e562b2cf160ff870416`；使用显式测试手机保留数据覆盖安装返回 `Success`，`com.tcrrry.helper` / `0.1.0 (1)` 的 `MainActivity` 已启动并保持前台。
 5. 本轮未提交、未推送、未发布，未清数据、卸载、降级或重启设备；真实 staging 根目录下载、车机安装授权和维护动作交由用户人工主测。
 
-## 2026-08-24 Debug 无线车机模拟测试接线
+## 2026-08-24 Debug 无线车机模拟测试接线（已废弃）
 
-1. Debug 构建新增仅限本机测试的 ADB 密钥读取入口：应用只从自身 `files/debug-adb/adbkey` 与 `adbkey.pub` 读取已由测试人员主动放入的密钥；Release 构建始终不读取任何应用内 ADB 密钥。密钥不进入 APK、Git、日志或网络。
-2. `DadbDeviceConnectionFactory` 的发现与安装连接统一使用该 Debug 密钥；未配置密钥时保持原有失败行为，不改变正式设备连接协议。
-3. 指定测试手机 `SM-F946B` 已以保留数据方式覆盖安装最新 Debug APK（`com.tcrrry.helper`、`0.1.0 (1)`、`MainActivity`，SHA-256 `f698806fe47c14c43c0876f524fdddabe0ed38a026bcda3a73858dfb95afa2a0`）。启动后自动发现并确认 `RMX1901` 模拟车机，点选后进入应用选择页；助手进程保持前台运行。
-4. Realme 仅作为模拟车机，未安装 `com.tcrrry.helper`；本轮已完成 Cloud staging 配置验签与根目录枚举并进入应用选择页，但未触发下载、APK 安装、授权或维护写入，后续由用户继续人工主测。
+1. 本节记录的 Debug 专用 ADB 密钥旁路仅用于上一轮临时模拟测试，现已从 Debug / Release 组合根、连接工厂和生产运行时全部移除；当前版本不从应用私有目录读取或注入 ADB 密钥。
+2. 上一轮普通手机作为模拟车机的运行结果只保留为历史证据，不构成当前设备兼容性或车机安装通过结论；后续以真实车机人工主测为准。
 
-## 2026-08-24 选择页轻量元数据恢复
+## 2026-08-24 选择页轻量元数据恢复（已被本轮协议字段收口覆盖）
 
-1. 修正根目录 WebView 解析：同时兼容蓝奏当前 `#ready` 行结构与旧 `.mbx` 结构，读取 ZIP 名称、大小和时间；安全大小会在用户确认前投影到选择页。
-2. 轻量选择清单在没有 APK 下载的前提下使用签名 `catalogVersion` 作为版本标签，目录实际 APK 校验完成后由 `versionName` 和真实归档大小覆盖；因此选择页不再把所有版本 / 大小统一显示为“待准备”。
+1. 这是本轮收口前的中间实现：根目录 WebView 曾同时兼容蓝奏当前 `#ready` 行结构与旧 `.mbx` 结构，并读取 ZIP 名称、大小和时间；这些目录行字段当时只用于临时轻量展示，现行选择页不再使用它们，直接投影签名 `apps[]` 的 `versionName` / `versionCode` / `apkSizeBytes`。
+2. 该中间实现还曾临时使用签名 `catalogVersion` 作为版本标签，现已被 Cloud `versionName` / `versionCode` / `apkSizeBytes` 字段直接取代；`catalogVersion` / `catalogRevision` 只保留配置修订、防回滚和内部追踪职责。
 3. 增加展示字段边界和根目录大小回归用例；当前仍不把目录展示值当作 APK 身份证明，安装前完整 ZIP / APK 校验门禁不变。
-4. 最新 Debug APK 为 `com.tcrrry.helper` / `0.1.0 (1)`，SHA-256 为 `e567852e1075af08a44f94d5531018e96d14c2a227efc3bda42e506d60e6d965`；已在显式测试手机保留数据覆盖安装并启动 `MainActivity`，选择页实机看到 `android-debug-2026-08-22-002 · 2.0 MB`、`4.9 MB`、`25.7 MB` 三项信息，Realme 未安装助手。
+4. 该中间包的实机观察只保留为历史证据，不构成当前版本字段或设备闭环结论。
+
+## 2026-08-24 Cloud 字段、公共 Download 与单项失败隔离收口
+
+1. Cloud schema V3 的每个启用 `apps[]` 条目现在严格读取 `versionCode`、`versionName`、`apkSizeBytes`；选择页规范化显示 `V1.2.3`、`2.6M`。`catalogVersion` / `catalogRevision` 只用于配置修订、防回滚和内部追踪，不再作为应用版本或包体大小。
+2. 用户确认后先扫描安卓系统公共 `Download` 目录（Android Q+ 使用 MediaStore，Android 9 及以下使用公共目录）；只有包名、`versionCode`、`versionName`、APK 字节数、SHA-256 和受信证书全部匹配的 APK 才复用。未命中时 ZIP / 分片留在应用私有缓存，校验通过的 APK 发布并保留到公共 `Download`；清理只删除助手生成的 `03helper-` APK，不删除用户其它安装包。
+3. 远端目录缺少声明 ZIP（包括 `desktop`）不再在选择阶段阻断；本地和远端均不可用时只记录当前 APP 失败，继续其它 APP。安装页只呈现获取、检查、发送、授权、检查可用性五个阶段和当前百分比，取消安装按钮与逐应用进度列表已移除，底部显示保持亮屏提示。全部结束后进入结果页展示逐项失败原因；只有 `desktop` 有完整可用证据时才显示进入维护。
+4. 下载 / 目录准备层增加单 APP 未预期异常隔离，异常转为结构化失败并继续批次；安装、授权和可用性阶段沿用逐 APP 失败后继续的会话主链。
+5. 本轮验证通过：指定 JDK17 下 `testDebugUnitTest` 共 `138` 项（0 failures / 0 errors）、`:app:lintDebug`、`:app:assembleDebug`、`:app:assembleDebugAndroidTest`、`:app:compileReleaseKotlin`、`check-project-docs.mjs`、`check-skills.mjs`、`check-local-environment.mjs` 和 `git diff --check`。
+6. 最新 Debug APK 已核对为 `com.tcrrry.helper` / `versionName=0.1.0` / `versionCode=1`，Launcher 为 `MainActivity`，APK Signature Scheme v2 验证通过；主包 SHA-256 为 `17e2da37dd1eb591a4cedd5eaa01c0b55622641060384b8a5bd7fb9d7741207e`。当前上下文指定手机 ADB 返回空设备列表，未执行覆盖安装、instrumentation smoke 或车机动作；不把构建和 JVM 测试写成设备闭环通过。
+7. 本轮未提交、未推送、未发布，未清数据、卸载、降级或重启设备；真实 Cloud staging 配置、公共 `Download` 复用、Android System WebView、车机安装 / 授权 / 可用性和维护入口仍交由用户在真实车机上人工主测。
+
+## 2026-08-24 最终 Debug 包交接（覆盖安装受设备连接阻断）
+
+1. 文档口径最终复核已通过：旧的 desktop ZIP 整体阻断、ZIP 行版本 / 大小和 `catalogVersion` 展示口径均明确标记为历史中间实现；现行 V3 规则以签名 `apps[]` 字段展示、公共 `Download` 优先和逐 APP 失败隔离为准。
+2. 最新 Debug APK 已核对为 `com.tcrrry.helper` / `versionName=0.1.0` / `versionCode=1` / `MainActivity`，SHA-256 为 `17e2da37dd1eb591a4cedd5eaa01c0b55622641060384b8a5bd7fb9d7741207e`。
+3. 收尾第一次尝试使用本机上下文指定的测试手机 mDNS 端点时因 ADB TLS `Connection refused` 未执行安装；无线调试恢复后已用显式 serial `adb-RFCX412AN1X-gWfMRD (2)._adb-tls-connect._tcp` 对该测试手机执行保留数据覆盖安装，系统返回 `Success`，并启动 `com.tcrrry.helper/.MainActivity` 核对进程保持运行。车机 `192.168.0.203:5555` 未连接、未写入。
+4. 本轮未提交、未推送、未发布，未清数据、卸载、降级或重启设备；真实 Cloud、公共 `Download` 复用、Android System WebView、车机安装 / 授权 / 可用性和结果页维护入口交由用户人工主测。
+
+## 2026-08-24 测试车机清理
+
+1. 按用户当次明确授权，在样本车机上对 03桌面、03歌词和文件管理器执行 user 0 卸载；三个目标包的安装路径、用户包列表和进程回读均已为空。
+2. 卸载前已撤销本次安装链对应的精确授权：桌面悬浮窗 / 安装包 AppOps 与无障碍服务，歌词悬浮窗 / 通知监听 / 无障碍服务，文件管理器存储运行时权限 / AppOps 与安装包 AppOp。
+3. 回读确认目标通知监听和无障碍服务已移除，车机原有的 `com.mengbo.monitor` 无障碍服务保留；未触碰其它应用或车机数据。

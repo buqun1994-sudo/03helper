@@ -130,9 +130,6 @@ class LanzouFolderSourceAdapter(
         val appFailures = mutableListOf<LanzouFolderAppFailure>()
         val matchedIds = mutableMapOf<String, String>()
         config.declaredApps().filter { it.enabled && !it.clientSupported }.forEach { component ->
-            if (component.componentId == DESKTOP_APP_ID) {
-                return failure("lanzou_folder_client_schema_unsupported", retryable = false, componentId = component.componentId)
-            }
             appFailures += LanzouFolderAppFailure(
                 componentId = component.componentId,
                 reasonCode = "lanzou_folder_client_schema_unsupported",
@@ -144,9 +141,6 @@ class LanzouFolderSourceAdapter(
             if (entry == null) {
                 val duplicate = byName[component.archiveFileName.lowercase(Locale.ROOT)].orEmpty().size > 1
                 val reason = if (duplicate) "lanzou_folder_duplicate_file" else "lanzou_folder_missing_${component.componentId}"
-                if (component.componentId == DESKTOP_APP_ID) {
-                    return failure(reasonCode = reason, retryable = false, componentId = component.componentId)
-                }
                 appFailures += LanzouFolderAppFailure(component.componentId, reason, retryable = false)
                 continue
             }
@@ -156,9 +150,13 @@ class LanzouFolderSourceAdapter(
             }
             val previousApp = matchedIds.putIfAbsent(entry.id, component.componentId)
             if (previousApp != null) {
-                if (component.componentId == DESKTOP_APP_ID || previousApp == DESKTOP_APP_ID) {
-                    return failure("lanzou_folder_duplicate_entry", retryable = false, componentId = component.componentId)
-                }
+                // One share entry cannot safely satisfy two configured apps.
+                // Remove the first match as well and expose both failures so a
+                // later local-Download check can independently recover either
+                // app without accepting an ambiguous remote source.
+                artifacts.removeAll { it.component.componentId == previousApp }
+                appFailures.removeAll { it.componentId == previousApp }
+                appFailures += LanzouFolderAppFailure(previousApp, "lanzou_folder_duplicate_entry", false)
                 appFailures += LanzouFolderAppFailure(component.componentId, "lanzou_folder_duplicate_entry", false)
                 continue
             }
@@ -173,19 +171,22 @@ class LanzouFolderSourceAdapter(
                     continue
                 }
             }
-            // The folder listing is the only metadata available before the user
-            // confirms a download. Keep its bounded size estimate for the
-            // selection page; APK-derived values still replace it later.
+            // The folder listing only locates the ZIP. Version and APK size
+            // remain the signed Cloud metadata and must not be replaced by the
+            // ZIP row size.
             artifacts += LanzouFolderArtifact(
-                component = component.copy(
-                    sizeLabel = entry.sizeLabel?.let(::normalizeSizeLabel) ?: component.sizeLabel,
-                ),
+                component = component,
                 entry = entry,
                 source = source,
             )
         }
         if (artifacts.isEmpty()) {
-            return failure("lanzou_folder_no_available_apps", retryable = false)
+            // A valid folder may contain no matching ZIP when every selected
+            // application is already available in the user's public Download
+            // directory. Keep the signed app list and defer each missing item
+            // to the per-application preparation path instead of blocking the
+            // whole installation session here.
+            return LanzouFolderResolutionResult.Success(emptyList(), appFailures)
         }
         return LanzouFolderResolutionResult.Success(artifacts, appFailures)
     }
@@ -219,7 +220,6 @@ class LanzouFolderSourceAdapter(
 
     private companion object {
         const val DEFAULT_TIMEOUT_MILLIS = 30_000L
-        const val DESKTOP_APP_ID = "desktop"
         val SHARE_ID_PATTERN = Regex("^i[a-zA-Z0-9]+$")
         val SIZE_LABEL_PATTERN = Regex(
             "([0-9]+(?:\\.[0-9]+)?)\\s*(B|K|KB|M|MB|G|GB|T|TB)",

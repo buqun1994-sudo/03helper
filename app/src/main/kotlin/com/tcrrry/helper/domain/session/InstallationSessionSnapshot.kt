@@ -22,6 +22,8 @@ data class InstallationSessionSnapshot(
     val progress: SessionProgress? = null,
     /** Per-application progress projected from the same installation event stream. */
     val componentProgress: Map<String, ComponentProgress> = emptyMap(),
+    /** Selected applications that were attempted but failed in one phase. */
+    val failedComponentIds: Set<String> = emptySet(),
     val failure: SessionFailure? = null,
     val componentResults: List<ComponentResult> = emptyList(),
     val sessionId: Long = 0L,
@@ -177,6 +179,7 @@ data class SessionCheckpoint(
     val currentComponentName: String?,
     val progress: SessionProgress?,
     val componentProgress: Map<String, ComponentProgress> = emptyMap(),
+    val failedComponentIds: Set<String> = emptySet(),
     val evidence: SessionEvidence,
     val selectedSources: Map<String, ArtifactSourceKind> = emptyMap(),
     val archiveDownloads: Map<String, ArchiveDownloadEvidence> = emptyMap(),

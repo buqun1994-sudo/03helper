@@ -272,7 +272,7 @@ class DeviceActionsTest {
         }
 
         assertEquals(com.tcrrry.helper.application.device.DeviceInstallationExecutionResult.Completed, result)
-        assertEquals(listOf(setOf("lyrics", "desktop")), commandSelections)
+        assertEquals(listOf(setOf("desktop"), setOf("desktop", "lyrics")), commandSelections)
         assertEquals(
             listOf(
                 InstallationSessionEvent.InstallationStarted::class,
@@ -290,8 +290,8 @@ class DeviceActionsTest {
         assertFalse(availability.getValue("lyrics").launchAttempted)
         assertTrue(availability.getValue("desktop").launchAttempted)
         assertTrue(availability.getValue("desktop").processRunning)
-        assertFalse(lyricsFile.exists())
-        assertFalse(desktopFile.exists())
+        assertTrue(lyricsFile.exists())
+        assertTrue(desktopFile.exists())
     }
 
     @Test
@@ -333,14 +333,18 @@ class DeviceActionsTest {
                 .execute(actionLease(gateway), artifacts)
         }
 
-        assertEquals(com.tcrrry.helper.application.device.DeviceInstallationExecutionResult.Failed, result)
-        assertEquals("shortcut_selected_component_missing", (events.last() as InstallationSessionEvent.FatalError).reasonCode)
+        assertEquals(com.tcrrry.helper.application.device.DeviceInstallationExecutionResult.Completed, result)
+        assertTrue(events.any {
+            it is InstallationSessionEvent.ComponentFailed &&
+                it.componentId == "lyrics" &&
+                it.reasonCode == "shortcut_selected_component_missing"
+        })
         assertTrue(lyricsFile.exists())
         assertTrue(desktopFile.exists())
     }
 
     @Test
-    fun `missing declaration stops before the authorization plan`() {
+    fun `authorization declaration failure is isolated per component`() {
         val lyricsFile = Files.createTempFile("lyrics-declaration", ".apk").toFile().apply { writeBytes(byteArrayOf(1)) }
         val desktopFile = Files.createTempFile("desktop-declaration", ".apk").toFile().apply { writeBytes(byteArrayOf(2)) }
         val artifacts = listOf(
@@ -352,7 +356,7 @@ class DeviceActionsTest {
             ),
             prepared("desktop", "com.tcrrry.desktop", desktopFile),
         )
-        var shortcutCalls = 0
+        val shortcutSelections = mutableListOf<Set<String>>()
         val events = mutableListOf<InstallationSessionEvent>()
         val gateway = object : AdbCommandGateway {
             override suspend fun install(artifacts: List<com.tcrrry.helper.domain.device.InstallableArtifact>): DeviceInstallResult =
@@ -362,7 +366,7 @@ class DeviceActionsTest {
                 shortcut: DeviceShortcut,
                 selectedComponentIds: Set<String>,
             ): DeviceShortcutResult {
-                shortcutCalls += 1
+                shortcutSelections += selectedComponentIds
                 return DeviceShortcutResult.Failed(
                     DeviceShortcutFailureStage.AUTHORIZATION,
                     com.tcrrry.helper.domain.device.DeviceActionFailure("unexpected", retryable = false),
@@ -375,9 +379,18 @@ class DeviceActionsTest {
                 .execute(actionLease(gateway), artifacts)
         }
 
-        assertEquals(com.tcrrry.helper.application.device.DeviceInstallationExecutionResult.Failed, result)
-        assertEquals(0, shortcutCalls)
-        assertEquals("authorization_service_not_declared", (events.last() as InstallationSessionEvent.FatalError).reasonCode)
+        assertEquals(com.tcrrry.helper.application.device.DeviceInstallationExecutionResult.Completed, result)
+        assertEquals(listOf(setOf("desktop")), shortcutSelections)
+        assertTrue(events.any {
+            it is InstallationSessionEvent.ComponentFailed &&
+                it.componentId == "desktop" &&
+                it.reasonCode == "unexpected"
+        })
+        assertTrue(events.any {
+            it is InstallationSessionEvent.ComponentFailed &&
+                it.componentId == "lyrics" &&
+                it.reasonCode == "desktop_prerequisite_failed"
+        })
         assertTrue(lyricsFile.exists())
         assertTrue(desktopFile.exists())
     }

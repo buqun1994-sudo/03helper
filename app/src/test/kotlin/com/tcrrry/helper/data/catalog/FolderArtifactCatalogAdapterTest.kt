@@ -32,6 +32,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.util.concurrent.atomic.AtomicInteger
 
 class FolderArtifactCatalogAdapterTest {
     @Test
@@ -59,7 +60,7 @@ class FolderArtifactCatalogAdapterTest {
     }
 
     @Test
-    fun `folder source keeps bounded listing size for the selection page`() = runBlocking {
+    fun `folder source keeps Cloud APK size instead of ZIP listing size`() = runBlocking {
         val config = config()
         val adapter = LanzouFolderSourceAdapter(
             hostFactory = LanzouFolderWebViewHostFactory {
@@ -74,11 +75,12 @@ class FolderArtifactCatalogAdapterTest {
 
         val result = adapter.resolve(config) as com.tcrrry.helper.data.web.LanzouFolderResolutionResult.Success
 
-        assertEquals("2.0 MB", result.artifacts.single().component.sizeLabel)
+        assertEquals(config.apps.first { it.componentId == "desktop" }.displaySizeLabel,
+            result.artifacts.single().component.displaySizeLabel)
     }
 
     @Test
-    fun `folder source allows missing optional archives but requires desktop`() = runBlocking {
+    fun `folder source allows missing optional archives and records them`() = runBlocking {
         val config = config()
         val adapter = LanzouFolderSourceAdapter(
             hostFactory = LanzouFolderWebViewHostFactory {
@@ -105,6 +107,9 @@ class FolderArtifactCatalogAdapterTest {
             displayName = "Notes",
             description = "动态应用",
             sortOrder = 40,
+            versionCode = 1L,
+            versionName = "1.0",
+            apkSizeBytes = 1L,
         )
         val dynamicConfig = base.copy(
             apps = base.apps.map { app ->
@@ -161,7 +166,7 @@ class FolderArtifactCatalogAdapterTest {
     }
 
     @Test
-    fun `folder source rejects a missing desktop archive`() = runBlocking {
+    fun `folder source records a missing desktop archive for later local reuse`() = runBlocking {
         val config = config()
         val adapter = LanzouFolderSourceAdapter(
             hostFactory = LanzouFolderWebViewHostFactory {
@@ -172,14 +177,16 @@ class FolderArtifactCatalogAdapterTest {
 
         val result = adapter.resolve(config)
 
+        val success = result as com.tcrrry.helper.data.web.LanzouFolderResolutionResult.Success
+        assertTrue(success.artifacts.none { it.component.componentId == "desktop" })
         assertEquals(
             "lanzou_folder_missing_desktop",
-            (result as com.tcrrry.helper.data.web.LanzouFolderResolutionResult.Failure).failure.reasonCode,
+            success.appFailures.single { it.componentId == "desktop" }.reasonCode,
         )
     }
 
     @Test
-    fun `folder source rejects duplicate names case insensitively`() = runBlocking {
+    fun `folder source records duplicate names case insensitively`() = runBlocking {
         val config = config()
         val adapter = LanzouFolderSourceAdapter(
             hostFactory = LanzouFolderWebViewHostFactory {
@@ -195,14 +202,16 @@ class FolderArtifactCatalogAdapterTest {
 
         val result = adapter.resolve(config)
 
+        val success = result as com.tcrrry.helper.data.web.LanzouFolderResolutionResult.Success
+        assertTrue(success.artifacts.isEmpty())
         assertEquals(
             "lanzou_folder_duplicate_file",
-            (result as com.tcrrry.helper.data.web.LanzouFolderResolutionResult.Failure).failure.reasonCode,
+            success.appFailures.single { it.componentId == "desktop" }.reasonCode,
         )
     }
 
     @Test
-    fun `catalog reads a replacement archive as a new APK version`() = runBlocking {
+    fun `catalog reads a replacement archive and rejects a Cloud size mismatch`() = runBlocking {
         val config = config()
         val archives = mutableMapOf<String, ByteArray>()
         val versions = mutableMapOf<String, ArtifactVersion>()
@@ -271,14 +280,19 @@ class FolderArtifactCatalogAdapterTest {
             )
 
             val first = adapter.load() as CatalogLoadResult.Success
+            assertTrue(
+                tempRoot.resolve("artifacts").listFiles().orEmpty().any {
+                    it.name.startsWith("03helper-desktop-") && it.extension == "apk"
+                },
+            )
             val firstDesktop = first.catalog.manifests.single { it.componentId == "desktop" }
-            versions["desktop"] = ArtifactVersion("2.0", 2L)
-            archives["desktop"] = zip("03desktop-debug.apk", "replacement-desktop".toByteArray())
+            versions["desktop"] = ArtifactVersion("1.0", 1L)
+            archives["desktop"] = zip("03desktop-debug.apk", "updated-desktop".toByteArray())
 
             val second = adapter.load() as CatalogLoadResult.Success
             val secondDesktop = second.catalog.manifests.single { it.componentId == "desktop" }
             assertEquals(1L, firstDesktop.apkVersion.code)
-            assertEquals(2L, secondDesktop.apkVersion.code)
+            assertEquals(1L, secondDesktop.apkVersion.code)
             assertNotEquals(firstDesktop.archiveSha256, secondDesktop.archiveSha256)
             assertTrue(second.catalog.manifests.all { it.sources.single().kind == ArtifactSourceKind.LANZOU_SHARE })
 
@@ -292,10 +306,72 @@ class FolderArtifactCatalogAdapterTest {
             archives["lyrics"] = zip("03lyrics-debug.apk", "restored-lyrics".toByteArray())
 
             archives["desktop"] = zip("unexpected.apk", "wrong-entry".toByteArray())
-            val replaced = adapter.load() as CatalogLoadResult.Success
-            assertEquals("unexpected.apk", replaced.catalog.manifests.single { it.componentId == "desktop" }.apkEntryName)
+            val rejected = adapter.load() as CatalogLoadResult.Failure
+            assertEquals("distribution_apk_size_mismatch", rejected.reasonCode)
         } finally {
             tempRoot.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `selected preparation reuses a verified public Download APK before remote ZIP`() = runBlocking {
+        val config = config()
+        val root = java.nio.file.Files.createTempDirectory("03helper-local-download").toFile()
+        try {
+            val publicDownload = root.resolve("Download").apply { mkdirs() }
+            val desktop = config.apps.single { it.componentId == "desktop" }
+            val localApk = publicDownload.resolve("manual-desktop.apk").apply {
+                writeBytes("initial-desktop".toByteArray())
+            }
+            val remoteAttempts = AtomicInteger(0)
+            val sourcePolicy = ReleaseSourcePolicy(mode = ReleaseSourceMode.FOLDER_CONFIG)
+            val adapter = FolderArtifactCatalogAdapter(
+                configAdapter = configAdapter(config),
+                folderSourceAdapter = LanzouFolderSourceAdapter(
+                    hostFactory = LanzouFolderWebViewHostFactory {
+                        FolderHost(emptyList())
+                    },
+                    sourcePolicy = sourcePolicy,
+                ),
+                lanzouSourceAdapter = LanzouWebSourceAdapter(
+                    hostFactory = LanzouWebViewHostFactory {
+                        DownloadHost {
+                            remoteAttempts.incrementAndGet()
+                            ResolvedDownloadRequest(
+                                sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                                url = "https://zip1.webgetstore.com/desktop",
+                            )
+                        }
+                    },
+                    sourcePolicy = sourcePolicy,
+                ),
+                downloader = DynamicArtifactDownloader(
+                    transport = ArtifactTransport { _, _ ->
+                        error("remote_download_should_not_run")
+                    },
+                    sourcePolicy = sourcePolicy,
+                ),
+                metadataReader = ApkMetadataReader {
+                    ApkMetadata(
+                        packageName = desktop.packageName,
+                        version = ArtifactVersion(desktop.versionName, desktop.versionCode),
+                        certificateSha256s = setOf(desktop.certificateSha256),
+                    )
+                },
+                sourcePolicy = sourcePolicy,
+                artifactCache = ArtifactCache(root.resolve("cache"), publicDownload),
+                workingDirectory = root.resolve("working"),
+            )
+
+            val result = adapter.prepareSelected(setOf("desktop")) as CatalogLoadResult.Success
+            val manifest = result.catalog.manifests.single()
+
+            assertTrue(manifest.localOnly)
+            assertEquals(ArtifactSourceKind.LOCAL_DOWNLOAD, manifest.sources.single().kind)
+            assertEquals(0, remoteAttempts.get())
+            assertTrue(localApk.exists())
+        } finally {
+            root.deleteRecursively()
         }
     }
 
@@ -318,6 +394,9 @@ class FolderArtifactCatalogAdapterTest {
                     archiveFileName = component.archiveFileName,
                     displayName = component.displayName,
                     description = component.description,
+                    versionCode = component.versionCode,
+                    versionName = component.versionName,
+                    apkSizeBytes = component.apkSizeBytes,
                     enabled = component.enabled,
                     installPolicy = if (component.required) "required" else "optional",
                     sortOrder = component.sortOrder,
@@ -367,6 +446,9 @@ class FolderArtifactCatalogAdapterTest {
                     certificateSha256 = definition.certificateSha256,
                     apkEntryName = definition.apkEntryName,
                     trustProfileId = definition.trustProfileId,
+                    versionCode = 1L,
+                    versionName = "1.0",
+                    apkSizeBytes = "initial-${definition.componentId}".toByteArray().size.toLong(),
                 )
             },
             keyId = "test-key",

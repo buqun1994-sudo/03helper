@@ -89,6 +89,58 @@ class ArtifactPreparationCoordinatorTest {
     }
 
     @Test
+    fun `published local APK still emits strict archive proof for a remote manifest`() = runBlocking {
+        val apkBytes = byteArrayOf(9, 8, 7, 6)
+        val zipBytes = zipBytes("lyrics.apk", apkBytes)
+        val manifest = manifest(zipBytes, apkBytes)
+        val privateRoot = Files.createTempDirectory("artifact-coordinator-local-private").toFile()
+        val publicRoot = Files.createTempDirectory("artifact-coordinator-local-public").toFile()
+        try {
+            publicRoot.resolve("manual-name.apk").writeBytes(apkBytes)
+            val events = mutableListOf<InstallationSessionEvent>()
+            val host = object : LanzouWebViewHost {
+                override fun start(
+                    shareUrl: String,
+                    onDownload: (com.tcrrry.helper.domain.artifact.ResolvedDownloadRequest) -> Unit,
+                    onFailure: (com.tcrrry.helper.domain.artifact.ArtifactFailure) -> Unit,
+                ) = error("local_candidate_should_not_resolve")
+
+                override fun stopAndDestroy() = Unit
+            }
+            val cache = ArtifactCache(privateRoot, publicRoot)
+            val coordinator = ArtifactPreparationCoordinator(
+                sourcePolicy = com.tcrrry.helper.domain.artifact.ReleaseSourcePolicy(),
+                lanzouSourceAdapter = LanzouWebSourceAdapter(LanzouWebViewHostFactory { host }),
+                downloader = ArtifactDownloader(
+                    transport = ArtifactTransport { _, _ -> error("local_candidate_should_not_download") },
+                    cache = cache,
+                ),
+                archiveVerifier = ArchiveIdentityVerifier(),
+                archiveExtractor = ArtifactArchiveExtractor { Long.MAX_VALUE },
+                identityVerifier = ArtifactIdentityVerifier {
+                    ApkMetadata(
+                        packageName = manifest.packageName,
+                        version = manifest.apkVersion,
+                        certificateSha256s = setOf(manifest.certificateSha256),
+                    )
+                },
+                cache = cache,
+                eventPort = ArtifactSessionEventPort { events += it },
+            )
+
+            val result = coordinator.prepare(listOf(manifest))
+
+            assertTrue(result is ArtifactPreparationResult.Prepared)
+            assertEquals(1, events.filterIsInstance<InstallationSessionEvent.ArchiveDownloaded>().single().archives.size)
+            assertEquals(1, events.filterIsInstance<InstallationSessionEvent.ArchiveVerified>().single().verifications.size)
+            assertEquals(1, events.filterIsInstance<InstallationSessionEvent.ApkExtracted>().single().extractions.size)
+        } finally {
+            privateRoot.deleteRecursively()
+            publicRoot.deleteRecursively()
+        }
+    }
+
+    @Test
     fun `fixed fallback produces one session evidence batch and cleans zip`() = runBlocking {
         val apkBytes = byteArrayOf(1, 2, 3, 4)
         val zipBytes = zipBytes("lyrics.apk", apkBytes)

@@ -58,6 +58,18 @@ class ArtifactSecurityTest {
     fun `manifest validation rejects missing digest and unsafe names`() {
         val valid = manifestFor(byteArrayOf(1), byteArrayOf(2))
         assertTrue(ArtifactManifestValidator.validate(valid) is com.tcrrry.helper.domain.artifact.ManifestValidation.Valid)
+        val local = valid.copy(
+            localOnly = true,
+            archiveSizeBytes = 0L,
+            archiveSha256 = "",
+            sources = listOf(
+                ArtifactSource(
+                    ArtifactSourceKind.LOCAL_DOWNLOAD,
+                    ArtifactManifestValidator.LOCAL_DOWNLOAD_URL,
+                ),
+            ),
+        )
+        assertTrue(ArtifactManifestValidator.validate(local) is com.tcrrry.helper.domain.artifact.ManifestValidation.Valid)
         assertEquals(
             "archive_sha256_invalid",
             (ArtifactManifestValidator.validate(valid.copy(archiveSha256 = "")) as com.tcrrry.helper.domain.artifact.ManifestValidation.Invalid).reasonCode,
@@ -66,6 +78,27 @@ class ArtifactSecurityTest {
             "apk_entry_name_invalid",
             (ArtifactManifestValidator.validate(valid.copy(apkEntryName = "../app.apk")) as com.tcrrry.helper.domain.artifact.ManifestValidation.Invalid).reasonCode,
         )
+    }
+
+    @Test
+    fun `clear all removes only helper APKs from the public Download root`() {
+        val privateRoot = Files.createTempDirectory("artifact-cache-private").toFile()
+        val publicRoot = Files.createTempDirectory("artifact-cache-public").toFile()
+        try {
+            val cache = ArtifactCache(privateRoot, publicRoot)
+            val helperApk = publicRoot.resolve("03helper-desktop-1.apk").apply { writeBytes(byteArrayOf(1)) }
+            val userApk = publicRoot.resolve("manual-desktop.apk").apply { writeBytes(byteArrayOf(2)) }
+            privateRoot.resolve("temporary.zip.part").writeBytes(byteArrayOf(3))
+
+            cache.clearAll()
+
+            assertFalse(helperApk.exists())
+            assertTrue(userApk.exists())
+            assertFalse(privateRoot.resolve("temporary.zip.part").exists())
+        } finally {
+            privateRoot.deleteRecursively()
+            publicRoot.deleteRecursively()
+        }
     }
 
     @Test

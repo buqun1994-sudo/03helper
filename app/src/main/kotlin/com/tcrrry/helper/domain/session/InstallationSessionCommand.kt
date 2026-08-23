@@ -162,6 +162,14 @@ sealed interface InstallationSessionEvent {
         val indeterminate: Boolean = true,
     ) : InstallationSessionEvent
 
+    /** One application failed; the batch must continue with the remaining apps. */
+    data class ComponentFailed(
+        val componentId: String,
+        val phase: InstallPhase,
+        val reasonCode: String,
+        val retryable: Boolean = false,
+    ) : InstallationSessionEvent
+
     data class InstallationStarted(val componentIds: List<String> = emptyList()) : InstallationSessionEvent
 
     data class InstallationCompleted(

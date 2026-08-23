@@ -8,6 +8,7 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -16,6 +17,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
@@ -42,7 +44,6 @@ import com.tcrrry.helper.R
 import com.tcrrry.helper.domain.session.DeviceConnectionStatus
 import com.tcrrry.helper.domain.device.AuthorizationPlanFactory
 import com.tcrrry.helper.domain.session.InstallPhase
-import com.tcrrry.helper.domain.session.ComponentProgressStatus
 import com.tcrrry.helper.domain.session.ResultKind
 import com.tcrrry.helper.ui.components.AnimatedEntry
 import com.tcrrry.helper.ui.components.ComponentLogo
@@ -52,7 +53,6 @@ import com.tcrrry.helper.ui.components.PrimaryActionButton
 import com.tcrrry.helper.ui.components.StatusIcon
 import com.tcrrry.helper.ui.components.TaskTopBar
 import com.tcrrry.helper.ui.state.ComponentRow
-import com.tcrrry.helper.ui.state.ComponentInstallProgressRow
 import com.tcrrry.helper.ui.state.ConnectionVariant
 import com.tcrrry.helper.ui.state.DeviceRow
 import com.tcrrry.helper.ui.state.InstallUiIntent
@@ -60,6 +60,7 @@ import com.tcrrry.helper.ui.state.InstallUiState
 import com.tcrrry.helper.ui.theme.InstallerColors
 import com.tcrrry.helper.ui.theme.InstallerDimensions
 import com.tcrrry.helper.ui.theme.InstallerMotion
+import kotlin.math.roundToInt
 
 @Composable
 fun FirstInstallScreen(
@@ -70,7 +71,7 @@ fun FirstInstallScreen(
     when (state) {
         is InstallUiState.Connection -> ConnectionScreen(state, onIntent, modifier)
         is InstallUiState.Selection -> SelectionScreen(state, onIntent, modifier)
-        is InstallUiState.Installing -> InstallingScreen(state, onIntent, modifier)
+        is InstallUiState.Installing -> InstallingScreen(state, modifier)
         is InstallUiState.Result -> ResultScreen(state, onIntent, modifier)
         is InstallUiState.Maintenance -> Unit
     }
@@ -403,6 +404,7 @@ private fun ComponentChoiceRow(component: ComponentRow, onToggle: (Boolean) -> U
             com.tcrrry.helper.domain.session.ComponentStatus.NEW,
             com.tcrrry.helper.domain.session.ComponentStatus.UPDATE_AVAILABLE,
             com.tcrrry.helper.domain.session.ComponentStatus.READING,
+            com.tcrrry.helper.domain.session.ComponentStatus.DIRECTORY_MISSING,
         )
     PressableSurface(
         onClick = { if (!mandatory && supported) onToggle(!selected) },
@@ -423,27 +425,13 @@ private fun ComponentChoiceRow(component: ComponentRow, onToggle: (Boolean) -> U
                 size = 40.dp,
             )
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(
-                        text = component.displayName,
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = InstallerColors.White,
-                        modifier = Modifier.weight(1f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    if (mandatory) {
-                        StatusIcon(
-                            name = "lock_keyhole",
-                            contentDescription = stringResource(R.string.required_label),
-                            tint = InstallerColors.AuxiliaryWhite,
-                            size = 16.dp,
-                        )
-                        Text(text = stringResource(R.string.required_label), style = MaterialTheme.typography.bodySmall, color = InstallerColors.AuxiliaryWhite)
-                    } else {
-                        Text(text = stringResource(R.string.optional_label), style = MaterialTheme.typography.bodySmall, color = InstallerColors.AuxiliaryWhite)
-                    }
-                }
+                Text(
+                    text = component.displayName,
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = InstallerColors.White,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
                 Text(
                     text = listOfNotNull(component.versionLabel, component.sizeLabel)
                         .joinToString(" · ")
@@ -452,18 +440,51 @@ private fun ComponentChoiceRow(component: ComponentRow, onToggle: (Boolean) -> U
                     color = InstallerColors.AuxiliaryWhite,
                 )
             }
-            Checkbox(
-                checked = selected,
-                onCheckedChange = if (mandatory || !supported) null else onToggle,
-                enabled = !mandatory && supported,
-                colors = CheckboxDefaults.colors(
-                    checkedColor = InstallerColors.White,
-                    uncheckedColor = InstallerColors.WhiteBorder,
-                    checkmarkColor = InstallerColors.PressedBlue,
-                    disabledCheckedColor = InstallerColors.White,
-                    disabledUncheckedColor = InstallerColors.WhiteBorder,
-                ),
-            )
+            Column(
+                modifier = Modifier.width(72.dp),
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.Center,
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (mandatory) {
+                        StatusIcon(
+                            name = "lock_keyhole",
+                            contentDescription = stringResource(R.string.required_label),
+                            tint = InstallerColors.AuxiliaryWhite,
+                            size = 16.dp,
+                        )
+                        Spacer(modifier = Modifier.width(4.dp))
+                    }
+                    Text(
+                        text = stringResource(if (mandatory) R.string.required_label else R.string.optional_label),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = InstallerColors.AuxiliaryWhite,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+            Box(
+                modifier = Modifier.size(48.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Checkbox(
+                    checked = selected,
+                    onCheckedChange = if (mandatory || !supported) null else onToggle,
+                    enabled = !mandatory && supported,
+                    colors = CheckboxDefaults.colors(
+                        checkedColor = InstallerColors.White,
+                        uncheckedColor = InstallerColors.WhiteBorder,
+                        checkmarkColor = InstallerColors.PressedBlue,
+                        disabledCheckedColor = InstallerColors.White,
+                        disabledUncheckedColor = InstallerColors.WhiteBorder,
+                    ),
+                )
+            }
         }
     }
 }
@@ -471,7 +492,6 @@ private fun ComponentChoiceRow(component: ComponentRow, onToggle: (Boolean) -> U
 @Composable
 private fun InstallingScreen(
     state: InstallUiState.Installing,
-    onIntent: (InstallUiIntent) -> Unit,
     modifier: Modifier,
 ) {
     val phases = listOf(
@@ -510,137 +530,16 @@ private fun InstallingScreen(
                     )
                 }
             }
-            if (state.componentProgress.isNotEmpty()) {
-                item(key = "component-progress-title") {
-                    Text(
-                        text = stringResource(R.string.component_progress_title),
-                        style = MaterialTheme.typography.titleMedium,
-                        color = InstallerColors.White,
-                        modifier = Modifier.padding(top = InstallerDimensions.ContentSpacing),
-                    )
-                }
-                itemsIndexed(
-                    state.componentProgress,
-                    key = { _, item -> "component-${item.componentId}" },
-                ) { index, item ->
-                    AnimatedEntry(visible = true, index = phases.size + index) {
-                        ComponentProgressRow(item)
-                    }
-                }
-            }
         }
         Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
-        PressableSurface(
-            onClick = { onIntent(InstallUiIntent.CancelInstallation) },
+        Text(
+            text = stringResource(R.string.install_keep_screen_on),
+            style = MaterialTheme.typography.bodySmall,
+            color = InstallerColors.AuxiliaryWhite,
             modifier = Modifier.fillMaxWidth(),
-            enabled = state.canCancel,
-            minHeight = InstallerDimensions.PrimaryActionHeight,
-            containerColor = Color.Transparent,
-            pressedColor = InstallerColors.PressedBlue,
-        ) {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-                Text(text = stringResource(R.string.install_cancel), style = MaterialTheme.typography.bodyLarge, color = InstallerColors.White)
-            }
-        }
+        )
         Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
     }
-}
-
-@Composable
-private fun ComponentProgressRow(item: ComponentInstallProgressRow) {
-    val animatedProgress by animateFloatAsState(
-        targetValue = item.progress.fraction ?: 0f,
-        animationSpec = InstallerMotion.progress(),
-        label = "componentProgress",
-    )
-    PressableSurface(
-        onClick = {},
-        enabled = false,
-        minHeight = InstallerDimensions.ListItemMinHeight,
-        containerColor = if (item.status == ComponentProgressStatus.RUNNING) {
-            InstallerColors.WhiteSurface
-        } else {
-            Color.Transparent
-        },
-        borderColor = if (item.status == ComponentProgressStatus.RUNNING) {
-            InstallerColors.WhiteBorder
-        } else {
-            Color.Transparent
-        },
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            ComponentLogo(
-                iconKey = item.iconKey,
-                contentDescription = item.displayName,
-                modifier = Modifier.size(36.dp),
-            )
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    Text(
-                        text = item.displayName,
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = InstallerColors.White,
-                        modifier = Modifier.weight(1f),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                    Text(
-                        text = stringResource(
-                            when (item.status) {
-                                ComponentProgressStatus.PENDING -> R.string.component_progress_waiting
-                                ComponentProgressStatus.RUNNING -> phaseLabel(item.phase)
-                                ComponentProgressStatus.COMPLETED -> R.string.component_progress_done
-                                ComponentProgressStatus.FAILED -> R.string.component_progress_failed
-                            },
-                        ),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = if (item.status == ComponentProgressStatus.COMPLETED) {
-                            InstallerColors.Success
-                        } else {
-                            InstallerColors.AuxiliaryWhite
-                        },
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                when {
-                    item.status == ComponentProgressStatus.COMPLETED -> LinearProgressIndicator(
-                        progress = { 1f },
-                        color = InstallerColors.Success,
-                        trackColor = InstallerColors.WhiteBorder,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    item.progress.indeterminate -> LinearProgressIndicator(
-                        color = InstallerColors.White,
-                        trackColor = InstallerColors.WhiteBorder,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                    else -> LinearProgressIndicator(
-                        progress = { animatedProgress },
-                        color = InstallerColors.White,
-                        trackColor = InstallerColors.WhiteBorder,
-                        modifier = Modifier.fillMaxWidth(),
-                    )
-                }
-            }
-        }
-    }
-}
-
-private fun phaseLabel(phase: InstallPhase): Int = when (phase) {
-    InstallPhase.FETCH -> R.string.phase_fetch
-    InstallPhase.CHECK -> R.string.phase_check
-    InstallPhase.SEND -> R.string.phase_send
-    InstallPhase.CONFIGURE -> R.string.phase_configure
-    InstallPhase.VERIFY -> R.string.phase_verify
 }
 
 @Composable
@@ -705,12 +604,27 @@ private fun PhaseRow(
                             modifier = Modifier.fillMaxWidth(),
                         )
                     } else {
-                        LinearProgressIndicator(
-                            progress = { animatedProgress },
-                            color = InstallerColors.White,
-                            trackColor = InstallerColors.WhiteBorder,
+                        Row(
                             modifier = Modifier.fillMaxWidth(),
-                        )
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            LinearProgressIndicator(
+                                progress = { animatedProgress },
+                                color = InstallerColors.White,
+                                trackColor = InstallerColors.WhiteBorder,
+                                modifier = Modifier.weight(1f),
+                            )
+                            Text(
+                                text = stringResource(
+                                    R.string.install_progress_percent,
+                                    (animatedProgress * 100f).roundToInt(),
+                                ),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = InstallerColors.White,
+                                modifier = Modifier.width(44.dp),
+                            )
+                        }
                     }
                 }
             }
@@ -726,6 +640,23 @@ private fun ResultScreen(
 ) {
     val copy = when (state.kind) {
         ResultKind.SUCCESS -> ResultCopy(R.string.result_success_title, R.string.result_success_description, "circle_check", InstallerColors.Success, R.string.result_enter_maintenance) { onIntent(InstallUiIntent.EnterMaintenance) }
+        ResultKind.PARTIAL_FAILURE -> if (state.canEnterMaintenance) {
+            ResultCopy(
+                R.string.result_partial_failure_title,
+                R.string.result_partial_failure_description,
+                "triangle_alert",
+                InstallerColors.Warning,
+                R.string.result_enter_maintenance,
+            ) { onIntent(InstallUiIntent.EnterMaintenance) }
+        } else {
+            ResultCopy(
+                R.string.result_partial_failure_title,
+                R.string.result_partial_failure_description,
+                "triangle_alert",
+                InstallerColors.Warning,
+                R.string.result_retry,
+            ) { onIntent(InstallUiIntent.RetryInstallation) }
+        }
         ResultKind.PAUSED -> ResultCopy(R.string.result_paused_title, R.string.result_paused_description, "circle_pause", InstallerColors.Warning, R.string.result_continue) { onIntent(InstallUiIntent.ContinueInstallation) }
         ResultKind.DOWNLOAD_FAILED -> ResultCopy(R.string.result_download_failed_title, R.string.result_download_failed_description, "cloud_off", InstallerColors.Error, R.string.result_retry) { onIntent(InstallUiIntent.RetryInstallation) }
         ResultKind.INSTALLATION_FAILED -> ResultCopy(R.string.result_install_failed_title, R.string.result_install_failed_description, "triangle_alert", InstallerColors.Error, R.string.result_continue) { onIntent(InstallUiIntent.ContinueInstallation) }

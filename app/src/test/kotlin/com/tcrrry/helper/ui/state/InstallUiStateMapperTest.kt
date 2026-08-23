@@ -127,6 +127,32 @@ class InstallUiStateMapperTest {
     }
 
     @Test
+    fun `partial installation maps to the result page and keeps maintenance available when desktop is ready`() {
+        val state = InstallUiStateMapper.map(
+            InstallationSessionSnapshot(
+                state = InstallationSessionState.COMPLETED_WITH_ERRORS,
+                device = device,
+                components = listOf(
+                    component("desktop", required = true, size = "12 MB"),
+                    component("lyrics", required = false, size = "18 MB"),
+                ),
+                failedComponentIds = setOf("lyrics"),
+                evidence = com.tcrrry.helper.domain.session.SessionEvidence(
+                    available = setOf("desktop"),
+                ),
+                componentResults = listOf(
+                    com.tcrrry.helper.domain.session.ComponentResult("Desktop", true, true, true, "desktop"),
+                    com.tcrrry.helper.domain.session.ComponentResult("Lyrics", false, false, false, "lyrics"),
+                ),
+            ),
+        ) as InstallUiState.Result
+
+        assertEquals(ResultKind.PARTIAL_FAILURE, state.kind)
+        assertTrue(state.canEnterMaintenance)
+        assertEquals(2, state.componentResults.size)
+    }
+
+    @Test
     fun `connected catalog failure remains an unavailable selection state`() {
         val state = InstallUiStateMapper.map(
             InstallationSessionSnapshot(

@@ -38,6 +38,59 @@ sealed interface ArtifactIdentityResult {
 class ArtifactIdentityVerifier(
     private val metadataReader: ApkMetadataReader,
 ) {
+    /**
+     * Re-validates an APK already present in the public Download directory.
+     * This path never deletes the candidate: files placed by the user belong
+     * to the user, even when they do not match the selected release.
+     */
+    fun verifyExisting(
+        manifest: ArtifactManifest,
+        sourceKind: ArtifactSourceKind,
+        apk: File,
+    ): ArtifactIdentityResult {
+        if (!apk.isFile || apk.length() != manifest.apkSizeBytes) {
+            return existingFailure(manifest, sourceKind, "apk_size_mismatch")
+        }
+        val actualSha256 = try {
+            sha256(apk)
+        } catch (_: Exception) {
+            return existingFailure(manifest, sourceKind, "apk_hash_failed")
+        }
+        if (!actualSha256.equals(manifest.apkSha256, ignoreCase = true)) {
+            return existingFailure(manifest, sourceKind, "apk_sha256_mismatch")
+        }
+        val metadata = runCatching { metadataReader.read(apk) }.getOrNull()
+            ?: return existingFailure(manifest, sourceKind, "apk_metadata_unreadable")
+        if (metadata.packageName != manifest.packageName) {
+            return existingFailure(manifest, sourceKind, "apk_package_mismatch")
+        }
+        if (metadata.version != manifest.apkVersion) {
+            return existingFailure(manifest, sourceKind, "apk_version_mismatch")
+        }
+        if (metadata.certificateSha256s.none { it.equals(manifest.certificateSha256, ignoreCase = true) }) {
+            return existingFailure(manifest, sourceKind, "apk_certificate_mismatch")
+        }
+        return ArtifactIdentityResult.Verified(
+            VerifiedApk(
+                file = apk,
+                verification = ArtifactVerification(
+                    componentId = manifest.componentId,
+                    sourceKind = sourceKind,
+                    archiveSizeBytes = if (manifest.localOnly) 0L else manifest.archiveSizeBytes,
+                    archiveSha256 = if (manifest.localOnly) "" else manifest.archiveSha256,
+                    apkSizeBytes = apk.length(),
+                    apkSha256 = actualSha256,
+                    packageName = metadata.packageName,
+                    apkVersion = metadata.version,
+                    certificateSha256 = manifest.certificateSha256.lowercase(),
+                    archiveDeleted = true,
+                    localDownload = true,
+                ),
+                metadata = metadata,
+            ),
+        )
+    }
+
     fun verify(
         manifest: ArtifactManifest,
         sourceKind: ArtifactSourceKind,
@@ -86,7 +139,6 @@ class ArtifactIdentityVerifier(
                 return failed(manifest, verifiedArchive.file, extractedApk.file, finalApk, "apk_output_unavailable")
             }
         }
-        finalApk.delete()
         try {
             Files.move(
                 extractedApk.file.toPath(),
@@ -142,4 +194,18 @@ class ArtifactIdentityVerifier(
             ),
         )
     }
+
+    private fun existingFailure(
+        manifest: ArtifactManifest,
+        sourceKind: ArtifactSourceKind,
+        reasonCode: String,
+    ): ArtifactIdentityResult.Failed = ArtifactIdentityResult.Failed(
+        ArtifactFailure(
+            phase = ArtifactFailurePhase.APK_VERIFICATION,
+            componentId = manifest.componentId,
+            sourceKind = sourceKind,
+            reasonCode = reasonCode,
+            retryable = false,
+        ),
+    )
 }

@@ -2,8 +2,6 @@ package com.tcrrry.helper.ui.state
 
 import com.tcrrry.helper.domain.session.ComponentDescriptor
 import com.tcrrry.helper.domain.session.ComponentCompatibility
-import com.tcrrry.helper.domain.session.ComponentProgress
-import com.tcrrry.helper.domain.session.ComponentProgressStatus
 import com.tcrrry.helper.domain.session.DeviceConnectionStatus
 import com.tcrrry.helper.domain.session.FailureCategory
 import com.tcrrry.helper.domain.session.InstallPhase
@@ -49,6 +47,7 @@ object InstallUiStateMapper {
         -> installingState(snapshot)
 
         InstallationSessionState.SUCCEEDED -> resultState(ResultKind.SUCCESS, snapshot)
+        InstallationSessionState.COMPLETED_WITH_ERRORS -> resultState(ResultKind.PARTIAL_FAILURE, snapshot)
         InstallationSessionState.PAUSED -> resultState(ResultKind.PAUSED, snapshot)
         InstallationSessionState.FAILED -> if (
             snapshot.failure?.category == FailureCategory.CONNECTION && snapshot.checkpoint == null
@@ -132,12 +131,15 @@ object InstallUiStateMapper {
                         com.tcrrry.helper.domain.session.ComponentStatus.AVAILABLE,
                         com.tcrrry.helper.domain.session.ComponentStatus.NEW,
                         com.tcrrry.helper.domain.session.ComponentStatus.UPDATE_AVAILABLE,
+                        // A missing remote ZIP is recoverable from public
+                        // Download, provided Cloud metadata is present.
+                        com.tcrrry.helper.domain.session.ComponentStatus.DIRECTORY_MISSING,
                     ) &&
+                        (it.status != com.tcrrry.helper.domain.session.ComponentStatus.DIRECTORY_MISSING ||
+                            (!it.versionLabel.isNullOrBlank() && !it.sizeLabel.isNullOrBlank())) &&
                         (snapshot.artifactManifests.isEmpty() &&
                             it.compatibilityState != ComponentCompatibility.UNSUPPORTED ||
                             snapshot.artifactManifests.isNotEmpty() && (
-                            !it.versionLabel.isNullOrBlank() &&
-                                !it.sizeLabel.isNullOrBlank() &&
                                 !it.compatibilityLabel.isNullOrBlank() &&
                                 it.compatibilityState == ComponentCompatibility.SUPPORTED
                             ))
@@ -178,27 +180,6 @@ object InstallUiStateMapper {
                 indeterminate = progress?.indeterminate ?: true,
             ),
             completedStages = completedStages,
-            canCancel = true,
-            componentProgress = selectedComponents(snapshot).map { component ->
-                val item = snapshot.componentProgress[component.id] ?: ComponentProgress(
-                    componentId = component.id,
-                    phase = currentPhase,
-                    status = ComponentProgressStatus.PENDING,
-                )
-                ComponentInstallProgressRow(
-                    componentId = component.id,
-                    displayName = component.displayName,
-                    iconKey = component.iconKey,
-                    phase = item.phase,
-                    status = item.status,
-                    progress = UiProgress(
-                        completedCount = if (item.status == ComponentProgressStatus.COMPLETED) 1 else 0,
-                        totalCount = 1,
-                        fraction = item.fraction?.takeIf { it.isFinite() }?.coerceIn(0f, 1f),
-                        indeterminate = item.indeterminate && item.status == ComponentProgressStatus.RUNNING,
-                    ),
-                )
-            },
         )
     }
 
@@ -219,6 +200,9 @@ object InstallUiStateMapper {
             )
         },
         canContinue = kind != ResultKind.SUCCESS,
+        canEnterMaintenance = kind == ResultKind.SUCCESS ||
+            kind == ResultKind.PARTIAL_FAILURE &&
+            AuthorizationPlanFactory.DESKTOP_COMPONENT_ID in snapshot.evidence.available,
     )
 
     private fun ComponentDescriptor.toUiRow(selectedOptionalIds: Set<String>): ComponentRow = ComponentRow(
@@ -236,18 +220,18 @@ object InstallUiStateMapper {
         errorReason = errorReason?.toUserMessage(),
     )
 
-    private fun selectedComponents(snapshot: InstallationSessionSnapshot): List<ComponentDescriptor> =
-        snapshot.components.filter {
-            it.id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID ||
-                it.id in snapshot.selectedOptionalComponentIds
-        }
-
-private fun ComponentRow.isMandatory(): Boolean = id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
+    private fun ComponentRow.isMandatory(): Boolean = id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
 
 private fun String.toUserMessage(): String = when {
-    contains("missing") -> "下载目录中暂时没有这个应用"
+    contains("desktop_prerequisite") -> "03桌面未完成，无法继续授权此应用"
+    contains("local_download") || contains("public_download") || contains("distribution_app_missing") ->
+        "下载目录中没有可用的安装包"
     contains("certificate") -> "应用签名与官方发布者不匹配"
     contains("archive") || contains("zip") -> "压缩包校验失败"
+    contains("install") || contains("shortcut_selected") -> "车机未接受此应用的安装"
+    contains("authorization") -> "车机授权未完成"
+    contains("availability") || contains("device_verif") -> "应用未通过可用性检查"
+    contains("missing") -> "下载目录中暂时没有这个应用"
     contains("schema") || contains("capability") || contains("incompatible") -> "当前客户端或车机能力不足"
     else -> "暂时无法使用，请稍后重试"
 }

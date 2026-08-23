@@ -1,9 +1,13 @@
 package com.tcrrry.helper.domain.artifact
 
+import java.util.Locale
+
 enum class ArtifactSourceKind(val wireName: String) {
     LANZOU_SHARE("lanzou-share"),
     R2("r2"),
     GITHUB_RELEASES("github"),
+    /** A verified APK already present in the user's public Download folder. */
+    LOCAL_DOWNLOAD("local-download"),
     ;
 
     companion object {
@@ -83,6 +87,8 @@ data class ArtifactVerification(
     val apkVersion: ArtifactVersion,
     val certificateSha256: String,
     val archiveDeleted: Boolean,
+    /** True when the APK was verified from public Download without a ZIP. */
+    val localDownload: Boolean = false,
 )
 
 /** In-memory only context returned by a source adapter to the downloader. */
@@ -128,8 +134,10 @@ fun ArtifactManifest.toComponentDescriptor(
         displayName = displayName,
         required = required,
         description = description,
-        versionLabel = version.name,
-        sizeLabel = formatBytes(archiveSizeBytes),
+        versionLabel = formatArtifactVersionLabel(version.name),
+        // The selection and result surfaces describe the installable APK, not
+        // its transport ZIP. The APK size is the signed Cloud metadata field.
+        sizeLabel = formatArtifactSizeLabel(apkSizeBytes),
         // Keep the compatibility gate in the domain while exposing only plain language.
         compatibilityLabel = when {
             androidSdk == null -> null
@@ -148,8 +156,31 @@ fun ArtifactManifest.toComponentDescriptor(
         status = com.tcrrry.helper.domain.session.ComponentStatus.AVAILABLE,
     )
 
-private fun formatBytes(bytes: Long): String {
-    if (bytes < 1024L) return "$bytes B"
-    if (bytes < 1024L * 1024L) return "${bytes / 1024L} KB"
-    return "${bytes / (1024L * 1024L)} MB"
+/** Formats the only version text that may reach the user-facing app rows. */
+fun formatArtifactVersionLabel(versionName: String): String? {
+    val normalized = versionName.trim()
+        .removePrefix("V")
+        .removePrefix("v")
+        .trim()
+    return normalized.takeIf { it.isNotEmpty() }?.let { "V$it" }
+}
+
+/** Formats APK bytes compactly, using one decimal place and no padding space. */
+fun formatArtifactSizeLabel(bytes: Long): String? {
+    if (bytes <= 0L) return null
+    val units = arrayOf("B", "K", "M", "G", "T")
+    var value = bytes.toDouble()
+    var unitIndex = 0
+    while (value >= 1024.0 && unitIndex < units.lastIndex) {
+        value /= 1024.0
+        unitIndex += 1
+    }
+    val number = if (unitIndex == 0) {
+        bytes.toString()
+    } else {
+        String.format(Locale.US, "%.1f", value)
+            .trimEnd('0')
+            .trimEnd('.')
+    }
+    return "$number${units[unitIndex]}"
 }

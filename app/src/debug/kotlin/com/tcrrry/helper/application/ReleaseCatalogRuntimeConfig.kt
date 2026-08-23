@@ -8,8 +8,6 @@ import com.tcrrry.helper.data.catalog.UnavailableReleaseCatalogTransport
 import com.tcrrry.helper.data.catalog.UrlConnectionReleaseCatalogTransport
 import com.tcrrry.helper.domain.artifact.ReleaseSourceMode
 import com.tcrrry.helper.domain.artifact.ReleaseSourcePolicy
-import dadb.AdbKeyPair
-import java.io.File
 import java.net.URL
 import java.util.Base64
 
@@ -18,15 +16,6 @@ internal object ReleaseCatalogRuntimeConfig {
     val sourcePolicy: ReleaseSourcePolicy = ReleaseSourcePolicy(
         mode = ReleaseSourceMode.FOLDER_CONFIG,
     )
-
-    /** Reads a locally provisioned lab credential; it is never packaged or generated. */
-    fun createDeviceAdbKeyPair(context: Context): AdbKeyPair? = runCatching {
-        val directory = File(context.filesDir, DEBUG_ADB_DIRECTORY)
-        val privateKey = File(directory, DEBUG_ADB_PRIVATE_KEY)
-        val publicKey = File(directory, DEBUG_ADB_PUBLIC_KEY)
-        if (!privateKey.isFile || !publicKey.isFile) return@runCatching null
-        AdbKeyPair.read(privateKey, publicKey)
-    }.getOrNull()
 
     fun createDistributionConfigAdapter(context: Context): CloudInstallerDistributionConfigAdapter {
         val publicKey = runCatching {
@@ -62,7 +51,4 @@ internal object ReleaseCatalogRuntimeConfig {
     private const val DEBUG_ENVIRONMENT = "staging"
     private const val DEBUG_CONFIG_KEY_ID = "03helper-staging-config-2026-08-22-v1"
     private const val DISTRIBUTION_CONFIG_URL = "https://api-staging.9studio.fun/api/03helper/android-config"
-    private const val DEBUG_ADB_DIRECTORY = "debug-adb"
-    private const val DEBUG_ADB_PRIVATE_KEY = "adbkey"
-    private const val DEBUG_ADB_PUBLIC_KEY = "adbkey.pub"
 }

@@ -20,9 +20,9 @@ object ArtifactManifestValidator {
         manifest.compatibility.isInvalid() -> invalid("compatibility_range_invalid")
         manifest.archiveFormat != "zip" -> invalid("archive_format_unsupported")
         !isSimpleZipName(manifest.archiveFileName) -> invalid("archive_file_name_invalid")
-        manifest.archiveSizeBytes <= 0L || manifest.archiveSizeBytes > MAX_ARCHIVE_SIZE_BYTES ->
+        !manifest.localOnly && (manifest.archiveSizeBytes <= 0L || manifest.archiveSizeBytes > MAX_ARCHIVE_SIZE_BYTES) ->
             invalid("archive_size_invalid")
-        !sha256Pattern.matches(manifest.archiveSha256) -> invalid("archive_sha256_invalid")
+        !manifest.localOnly && !sha256Pattern.matches(manifest.archiveSha256) -> invalid("archive_sha256_invalid")
         !isSimpleApkName(manifest.apkEntryName) -> invalid("apk_entry_name_invalid")
         manifest.apkSizeBytes <= 0L || manifest.apkSizeBytes > MAX_APK_SIZE_BYTES ->
             invalid("apk_size_invalid")
@@ -33,7 +33,12 @@ object ArtifactManifestValidator {
             invalid("source_count_invalid")
         manifest.sources.map { it.kind }.toSet().size != manifest.sources.size ->
             invalid("source_duplicate")
-        manifest.sources.any { it.url.isBlank() } -> invalid("source_url_missing")
+        manifest.localOnly && (
+            manifest.sources.size != 1 ||
+                manifest.sources.singleOrNull()?.kind != ArtifactSourceKind.LOCAL_DOWNLOAD ||
+                manifest.sources.singleOrNull()?.url != LOCAL_DOWNLOAD_URL
+            ) -> invalid("local_source_invalid")
+        !manifest.localOnly && manifest.sources.any { it.url.isBlank() } -> invalid("source_url_missing")
         else -> ManifestValidation.Valid
     }
 
@@ -76,6 +81,8 @@ object ArtifactManifestValidator {
 
     private fun invalid(reasonCode: String): ManifestValidation.Invalid =
         ManifestValidation.Invalid(reasonCode)
+
+    const val LOCAL_DOWNLOAD_URL = "content://public-download"
 }
 
 sealed interface ManifestValidation {

@@ -1,6 +1,7 @@
 package com.tcrrry.helper.data.catalog
 
 import com.tcrrry.helper.data.artifact.ApkMetadataReader
+import com.tcrrry.helper.data.artifact.sha256
 import com.tcrrry.helper.data.download.DynamicArtifactDownloader
 import com.tcrrry.helper.data.download.DynamicArchiveDownloadResult
 import com.tcrrry.helper.data.download.DynamicDownloadProgress
@@ -14,6 +15,7 @@ import com.tcrrry.helper.data.web.LanzouWebSourceAdapter
 import com.tcrrry.helper.domain.artifact.ArtifactManifest
 import com.tcrrry.helper.domain.artifact.ArtifactManifestValidator
 import com.tcrrry.helper.domain.artifact.ArtifactSourceKind
+import com.tcrrry.helper.domain.artifact.ArtifactSource
 import com.tcrrry.helper.domain.artifact.ArtifactVersion
 import com.tcrrry.helper.domain.artifact.CompatibilityRange
 import com.tcrrry.helper.domain.artifact.ManifestValidation
@@ -110,13 +112,10 @@ class FolderArtifactCatalogAdapter(
                 apps = config.declaredApps()
                     .filter { it.enabled }
                     .map { app ->
-                        (listedAppsById[app.componentId]?.component ?: app).let { listed ->
-                            // The signed catalog version is the only release
-                            // label available before an APK is downloaded. It
-                            // keeps the selection row informative; the later
-                            // APK-derived version always replaces it.
-                            listed.copy(versionLabel = listed.versionLabel ?: config.effectiveCatalogVersion())
-                        }
+                        // catalogVersion is an internal revision identifier,
+                        // never a user-facing application version. A missing
+                        // hint remains unknown until a verified APK supplies it.
+                        listedAppsById[app.componentId]?.component ?: app
                     },
                 appFailures = folder.appFailures.map {
                     CatalogAppFailure(it.componentId, it.reasonCode, it.retryable)
@@ -153,40 +152,75 @@ class FolderArtifactCatalogAdapter(
             val appFailures = context.folder.appFailures
                 .map { CatalogAppFailure(it.componentId, it.reasonCode, it.retryable) }
                 .toMutableList()
-            val selectedArtifacts = context.folder.artifacts.filter {
-                it.component.componentId in selectedIds
+            val selectedComponents = context.config.declaredApps()
+                .filter { it.enabled && it.componentId in selectedIds }
+                .sortedWith(compareBy<InstallerComponentSource> { it.sortOrder }.thenBy { it.componentId })
+            val selectedArtifacts = selectedComponents.map { component ->
+                component to context.folder.artifacts.firstOrNull {
+                    it.component.componentId == component.componentId
+                }
             }
             val results = coroutineScope {
                 selectedArtifacts.chunked(MAX_PREPARATION_CONCURRENCY).flatMap { batch ->
-                    batch.map { artifact ->
+                    batch.map { (component, artifact) ->
                         async(Dispatchers.IO) {
-                            artifact to prepareSelectedArtifact(context.config, artifact, onProgress)
+                            val result = try {
+                                val local = prepareLocalArtifact(context.config, component, onProgress)
+                                local ?: artifact?.let {
+                                    prepareSelectedArtifact(context.config, it, onProgress)
+                                } ?: ManifestBuildResult.Failure(
+                                    reasonCode = appFailures.firstOrNull { failure ->
+                                        failure.componentId == component.componentId
+                                    }?.reasonCode ?: "distribution_app_missing_${component.componentId}",
+                                    retryable = false,
+                                )
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (_: Exception) {
+                                ManifestBuildResult.Failure(
+                                    reasonCode = "distribution_app_processing_failed",
+                                    retryable = true,
+                                )
+                            }
+                            component to result
                         }
                     }.awaitAll()
                 }
             }
-            val manifests = results.mapNotNull { (artifact, result) ->
-                val componentId = artifact.component.componentId
+            val manifests = results.mapNotNull { (component, result) ->
+                val componentId = component.componentId
                 when (result) {
                     is ManifestBuildResult.Success -> {
+                        appFailures.removeAll { it.componentId == componentId }
                         stagedManifests += result.manifest
                         result.manifest
                     }
 
                     is ManifestBuildResult.Failure -> {
-                        if (componentId == DESKTOP_APP_ID) {
-                            return CatalogLoadResult.Failure(result.reasonCode, result.retryable)
-                        }
+                        appFailures.removeAll { it.componentId == componentId }
                         appFailures += CatalogAppFailure(componentId, result.reasonCode, result.retryable)
                         null
                     }
                 }
             }
-            if (manifests.none { it.componentId == DESKTOP_APP_ID }) {
-                return CatalogLoadResult.Failure("distribution_desktop_unavailable", retryable = false)
-            }
+            // A missing desktop is kept as a component failure so the unified
+            // installation result can explain it alongside other applications.
             when (val validation = ArtifactManifestValidator.validateCatalog(manifests)) {
-                is ManifestValidation.Invalid -> CatalogLoadResult.Failure(validation.reasonCode, retryable = false)
+                is ManifestValidation.Invalid -> if (manifests.isEmpty()) {
+                    CatalogLoadResult.Success(
+                        TrustedArtifactCatalog(
+                            catalogVersion = context.config.effectiveCatalogVersion(),
+                            keyId = context.config.keyId,
+                            signatureAlgorithm = context.config.signatureAlgorithm,
+                            manifests = emptyList(),
+                            apps = context.config.declaredApps().filter { it.enabled },
+                            appFailures = appFailures,
+                            catalogRevision = context.config.catalogRevision,
+                        ),
+                    )
+                } else {
+                    CatalogLoadResult.Failure(validation.reasonCode, retryable = false)
+                }
                 ManifestValidation.Valid -> {
                     committed = true
                     CatalogLoadResult.Success(
@@ -327,6 +361,16 @@ class FolderArtifactCatalogAdapter(
                 null
             } ?: return ManifestBuildResult.Failure("distribution_apk_metadata_unreadable", retryable = false)
 
+            if (component.hasReleaseMetadata) {
+                val expectedVersion = ArtifactVersion(component.versionName, component.versionCode)
+                if (metadata.version != expectedVersion) {
+                    return ManifestBuildResult.Failure("distribution_apk_version_mismatch", retryable = false)
+                }
+                if (inspection.apkSizeBytes != component.apkSizeBytes) {
+                    return ManifestBuildResult.Failure("distribution_apk_size_mismatch", retryable = false)
+                }
+            }
+
             if (component.packageName.isNotBlank() && metadata.packageName != component.packageName) {
                 return ManifestBuildResult.Failure("distribution_apk_package_mismatch", retryable = false)
             }
@@ -366,16 +410,24 @@ class FolderArtifactCatalogAdapter(
                 displayName = component.displayName,
                 description = component.description,
                 required = component.required,
-                version = metadata.version,
+                version = if (component.hasReleaseMetadata) {
+                    ArtifactVersion(component.versionName, component.versionCode)
+                } else {
+                    metadata.version
+                },
                 compatibility = CompatibilityRange(minAndroidSdk = metadata.minAndroidSdk ?: component.minAndroidSdk),
                 archiveFileName = component.archiveFileName,
                 archiveSizeBytes = archive.sizeBytes,
                 archiveSha256 = archive.sha256,
                 apkEntryName = inspection.entryName,
-                apkSizeBytes = inspection.apkSizeBytes,
+                apkSizeBytes = if (component.hasReleaseMetadata) component.apkSizeBytes else inspection.apkSizeBytes,
                 apkSha256 = inspection.apkSha256,
                 packageName = metadata.packageName,
-                apkVersion = ArtifactVersion(metadata.version.name, metadata.version.code),
+                apkVersion = if (component.hasReleaseMetadata) {
+                    ArtifactVersion(component.versionName, component.versionCode)
+                } else {
+                    metadata.version
+                },
                 certificateSha256 = checkNotNull(
                     InstallerPublisherTrustRegistry.trustedCertificateSha256(
                         component.trustProfileId,
@@ -396,6 +448,10 @@ class FolderArtifactCatalogAdapter(
             }
             if (sourcePolicy.plan(manifest) !is com.tcrrry.helper.domain.artifact.SourcePlan.Accepted) {
                 return ManifestBuildResult.Failure("distribution_source_policy_rejected", retryable = false)
+            }
+            if (!artifactCache.publishApk(manifest, inspection.apkFile)) {
+                artifactCache.clearArtifact(manifest)
+                return ManifestBuildResult.Failure("public_download_publish_failed", retryable = true)
             }
             val cachePaths = artifactCache.paths(manifest)
             cachePaths.archivePart.parentFile?.mkdirs()
@@ -434,16 +490,18 @@ class FolderArtifactCatalogAdapter(
             )
         }
         when (result) {
-            is ManifestBuildResult.Success -> onProgress(
-                CatalogPreparationProgress(
-                    componentId,
-                    InstallPhase.CHECK,
-                    ComponentProgressStatus.COMPLETED,
-                    bytesWritten = result.manifest.archiveSizeBytes,
-                    totalBytes = result.manifest.archiveSizeBytes,
-                    indeterminate = false,
-                ),
-            )
+            is ManifestBuildResult.Success -> {
+                onProgress(
+                    CatalogPreparationProgress(
+                        componentId,
+                        InstallPhase.CHECK,
+                        ComponentProgressStatus.COMPLETED,
+                        bytesWritten = result.manifest.apkSizeBytes,
+                        totalBytes = result.manifest.apkSizeBytes,
+                        indeterminate = false,
+                    ),
+                )
+            }
 
             is ManifestBuildResult.Failure -> onProgress(
                 CatalogPreparationProgress(
@@ -455,6 +513,108 @@ class FolderArtifactCatalogAdapter(
             )
         }
         return result
+    }
+
+    /**
+     * Looks for a matching APK in the user's public Download directory before
+     * resolving a remote share. The APK is accepted only after package,
+     * version, digest and trusted-certificate checks; a random APK is never
+     * treated as a reusable install package.
+     */
+    private fun prepareLocalArtifact(
+        config: InstallerDistributionConfig,
+        component: InstallerComponentSource,
+        onProgress: (CatalogPreparationProgress) -> Unit,
+    ): ManifestBuildResult? {
+        if (!artifactCache.publicDirectoryAvailable) return null
+        onProgress(CatalogPreparationProgress(component.componentId, InstallPhase.FETCH, ComponentProgressStatus.RUNNING))
+        val candidate = artifactCache.publicApkCandidates()
+            .asSequence()
+            .mapNotNull { file ->
+                val metadata = runCatching { metadataReader.read(file) }.getOrNull() ?: return@mapNotNull null
+                if (!component.hasReleaseMetadata ||
+                    metadata.version != ArtifactVersion(component.versionName, component.versionCode) ||
+                    file.length() != component.apkSizeBytes
+                ) {
+                    return@mapNotNull null
+                }
+                if (component.packageName.isNotBlank() && metadata.packageName != component.packageName) {
+                    return@mapNotNull null
+                }
+                val trustedComponent = InstallerComponentTrustRegistry.get(component.componentId)
+                if (trustedComponent != null && metadata.packageName != trustedComponent.packageName) {
+                    return@mapNotNull null
+                }
+                if (!InstallerPublisherTrustRegistry.isKnownProfile(component.trustProfileId) ||
+                    !InstallerPublisherTrustRegistry.isTrusted(
+                        component.trustProfileId,
+                        metadata.packageName,
+                        metadata.certificateSha256s,
+                    )
+                ) {
+                    return@mapNotNull null
+                }
+                file to metadata
+            }
+            .sortedWith(compareBy<Pair<File, com.tcrrry.helper.data.artifact.ApkMetadata>> { it.first.name })
+            .firstOrNull()
+            ?: return null
+        val file = candidate.first
+        val metadata = candidate.second
+        val certificate = InstallerPublisherTrustRegistry.trustedCertificateSha256(
+            component.trustProfileId,
+            metadata.certificateSha256s,
+        ) ?: return ManifestBuildResult.Failure("distribution_apk_certificate_mismatch", retryable = false)
+        val manifest = ArtifactManifest(
+            schemaVersion = ArtifactManifestValidator.SUPPORTED_SCHEMA_VERSION,
+            componentId = component.componentId,
+            displayName = component.displayName,
+            description = component.description,
+            required = component.required,
+            version = ArtifactVersion(component.versionName, component.versionCode),
+            compatibility = CompatibilityRange(
+                minAndroidSdk = metadata.minAndroidSdk ?: component.minAndroidSdk,
+            ),
+            archiveFileName = component.archiveFileName,
+            archiveSizeBytes = 0L,
+            archiveSha256 = "",
+            // A user may rename a public Download APK. The local-only
+            // manifest does not inspect ZIP entries, so keep a stable safe
+            // placeholder instead of allowing the filename to affect reuse.
+            apkEntryName = "local.apk",
+            apkSizeBytes = component.apkSizeBytes,
+            apkSha256 = runCatching { sha256(file) }.getOrElse {
+                return ManifestBuildResult.Failure("distribution_apk_hash_failed", retryable = false)
+            },
+            packageName = metadata.packageName,
+            apkVersion = ArtifactVersion(component.versionName, component.versionCode),
+            certificateSha256 = certificate.lowercase(),
+            sources = listOf(
+                ArtifactSource(
+                    kind = ArtifactSourceKind.LOCAL_DOWNLOAD,
+                    url = ArtifactManifestValidator.LOCAL_DOWNLOAD_URL,
+                ),
+            ),
+            rollbackId = "${config.effectiveCatalogVersion()}-${component.componentId}",
+            deviceSetup = component.deviceSetup,
+            sortOrder = component.sortOrder,
+            localOnly = true,
+        )
+        when (val validation = ArtifactManifestValidator.validate(manifest)) {
+            is ManifestValidation.Invalid -> return ManifestBuildResult.Failure(validation.reasonCode, retryable = false)
+            ManifestValidation.Valid -> Unit
+        }
+        onProgress(
+            CatalogPreparationProgress(
+                componentId = component.componentId,
+                phase = InstallPhase.CHECK,
+                status = ComponentProgressStatus.COMPLETED,
+                bytesWritten = file.length(),
+                totalBytes = file.length(),
+                indeterminate = false,
+            ),
+        )
+        return ManifestBuildResult.Success(manifest)
     }
 
     private fun inspectArchive(archive: File, apkFile: File, expectedEntryName: String?): ArchiveInspection? {

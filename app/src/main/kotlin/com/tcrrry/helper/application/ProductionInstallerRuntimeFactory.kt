@@ -1,6 +1,7 @@
 package com.tcrrry.helper.application
 
 import android.content.Context
+import android.os.Environment
 import com.tcrrry.helper.application.artifact.ArtifactCatalogSessionAdapter
 import com.tcrrry.helper.application.artifact.ArtifactPreparationCoordinator
 import com.tcrrry.helper.application.artifact.InstallerCatalogLoader
@@ -43,27 +44,26 @@ object ProductionInstallerRuntimeFactory {
         val applicationContext = context.applicationContext
         val catalogRuntime = ReleaseCatalogRuntimeConfig
         val sourcePolicy = catalogRuntime.sourcePolicy
-        val artifactCache = ArtifactCache(File(applicationContext.cacheDir, ARTIFACT_CACHE_DIRECTORY))
+        val artifactCache = ArtifactCache(
+            root = File(applicationContext.cacheDir, ARTIFACT_CACHE_DIRECTORY),
+            publicDownloadRoot = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+            contentResolver = applicationContext.contentResolver,
+        )
         val maintenanceSessionStore = MaintenanceSessionStore(
             file = File(applicationContext.filesDir, MAINTENANCE_SESSION_FILE),
             sourcePolicy = sourcePolicy,
         )
         val persistedMaintenanceSnapshot = maintenanceSessionStore.load()
         val apkMetadataReader = AndroidApkMetadataReader(applicationContext)
-        // Debug may receive a locally provisioned ADB credential for the
-        // explicitly authorized lab target; Release always returns null.
-        val adbKeyPair = catalogRuntime.createDeviceAdbKeyPair(applicationContext)
         // Discovery probes must fail quickly, while a retained installation lease
         // needs enough read time for ADB sync and the car's package manager.
         val discoveryDeviceConnectionFactory = DadbDeviceConnectionFactory(
             readTimeoutMillis = DISCOVERY_READ_TIMEOUT_MILLIS,
-            adbKeyPair = adbKeyPair,
         )
         val installationDeviceConnectionFactory = DadbDeviceConnectionFactory(
             readTimeoutMillis = INSTALLATION_READ_TIMEOUT_MILLIS,
             installedApkCacheDirectory = File(applicationContext.cacheDir, INSTALLED_APK_VERIFICATION_DIRECTORY),
             installedApkMetadataReader = apkMetadataReader,
-            adbKeyPair = adbKeyPair,
         )
         val distributionConfigAdapter = catalogRuntime.createDistributionConfigAdapter(applicationContext).withRevisionStore(
             FileCatalogRevisionStore(File(applicationContext.filesDir, CATALOG_REVISION_FILE)),

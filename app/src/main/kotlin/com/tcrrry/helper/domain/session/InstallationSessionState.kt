@@ -16,6 +16,7 @@ enum class InstallationSessionState {
     AUTHORIZING,
     VERIFYING_DEVICE,
     SUCCEEDED,
+    COMPLETED_WITH_ERRORS,
     PAUSED,
     FAILED,
     MAINTENANCE,
@@ -47,6 +48,7 @@ enum class InstallPhase {
 
 enum class ResultKind {
     SUCCESS,
+    PARTIAL_FAILURE,
     PAUSED,
     DOWNLOAD_FAILED,
     INSTALLATION_FAILED,

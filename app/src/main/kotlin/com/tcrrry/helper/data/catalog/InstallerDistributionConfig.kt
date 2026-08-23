@@ -3,6 +3,8 @@ package com.tcrrry.helper.data.catalog
 import com.tcrrry.helper.domain.artifact.InstallerComponentTrustRegistry
 import com.tcrrry.helper.domain.artifact.InstallerPublisherTrustRegistry
 import com.tcrrry.helper.domain.artifact.ReleaseSourcePolicy
+import com.tcrrry.helper.domain.artifact.formatArtifactSizeLabel
+import com.tcrrry.helper.domain.artifact.formatArtifactVersionLabel
 import com.tcrrry.helper.domain.device.AuthorizationSetupDeclaration
 import com.tcrrry.helper.domain.device.AuthorizationPlanFactory
 import com.tcrrry.helper.domain.device.ManagedComponent
@@ -78,10 +80,12 @@ data class InstallerAppSourceDocument(
     val archiveFileName: String,
     val displayName: String,
     val description: String = "",
-    /** Optional signed copy used only before the APK is downloaded and verified. */
-    val versionLabel: String? = null,
-    /** Optional signed copy used only for the selection-page size estimate. */
-    val sizeLabel: String? = null,
+    /** Android integer version code entered by Cloud release tooling. */
+    val versionCode: Long = 0L,
+    /** Android version name entered by Cloud release tooling. */
+    val versionName: String = "",
+    /** APK body size in bytes entered by Cloud release tooling. */
+    val apkSizeBytes: Long = 0L,
     val enabled: Boolean = true,
     val installPolicy: String = "optional",
     val sortOrder: Int = 0,
@@ -177,12 +181,21 @@ data class InstallerComponentSource(
     val apkEntryName: String = "",
     val clientSupported: Boolean = true,
     val trustProfileId: String = "",
-    /** Presentation-only metadata; the APK remains the identity authority. */
-    val versionLabel: String? = null,
-    /** Presentation-only estimate observed from config or the folder listing. */
-    val sizeLabel: String? = null,
+    /** Cloud-declared Android version metadata. */
+    val versionCode: Long = 0L,
+    val versionName: String = "",
+    val apkSizeBytes: Long = 0L,
 ) {
     val appId: String get() = componentId
+
+    val displayVersionLabel: String?
+        get() = formatArtifactVersionLabel(versionName)
+
+    val displaySizeLabel: String?
+        get() = formatArtifactSizeLabel(apkSizeBytes)
+
+    val hasReleaseMetadata: Boolean
+        get() = versionCode > 0L && versionName.isNotBlank() && apkSizeBytes > 0L
 
 }
 
@@ -507,10 +520,14 @@ class CloudInstallerDistributionConfigAdapter(
             if (document.description.toByteArray().size > MAX_DESCRIPTION_BYTES) {
                 return AppsValidation.Failure("distribution_config_description_invalid")
             }
-            if (!isValidDisplayLabel(document.versionLabel, MAX_VERSION_LABEL_BYTES) ||
-                !isValidDisplayLabel(document.sizeLabel, MAX_SIZE_LABEL_BYTES)
-            ) {
-                return AppsValidation.Failure("distribution_config_display_metadata_invalid")
+            if (document.versionCode <= 0L) {
+                return AppsValidation.Failure("distribution_config_version_code_invalid")
+            }
+            if (!isValidVersionName(document.versionName)) {
+                return AppsValidation.Failure("distribution_config_version_name_invalid")
+            }
+            if (document.apkSizeBytes <= 0L || document.apkSizeBytes > MAX_APK_SIZE_BYTES) {
+                return AppsValidation.Failure("distribution_config_apk_size_invalid")
             }
             if (document.minClientSchemaVersion <= 0) {
                 return AppsValidation.Failure("distribution_config_min_client_schema_invalid")
@@ -566,14 +583,15 @@ class CloudInstallerDistributionConfigAdapter(
                 required = required,
                 displayName = document.displayName,
                 description = document.description,
-                versionLabel = document.versionLabel,
-                sizeLabel = document.sizeLabel,
                 enabled = document.enabled,
                 sortOrder = document.sortOrder,
                 minClientSchemaVersion = document.minClientSchemaVersion,
                 deviceSetup = setup,
                 trustProfileId = document.trustProfileId,
                 clientSupported = document.minClientSchemaVersion <= SUPPORTED_SCHEMA_VERSION,
+                versionCode = document.versionCode,
+                versionName = document.versionName,
+                apkSizeBytes = document.apkSizeBytes,
             )
         }.sortedWith(compareBy<InstallerComponentSource> { it.sortOrder }.thenBy { it.componentId })
         return AppsValidation.Success(apps)
@@ -581,11 +599,9 @@ class CloudInstallerDistributionConfigAdapter(
 
     private fun isValidPassword(value: String): Boolean = value.toByteArray(Charsets.UTF_8).size <= MAX_PASSWORD_BYTES
 
-    private fun isValidDisplayLabel(value: String?, maxBytes: Int): Boolean = value == null || (
-        value.isNotBlank() &&
-            value.toByteArray(Charsets.UTF_8).size <= maxBytes &&
-            value.none { it.isISOControl() }
-    )
+    private fun isValidVersionName(value: String): Boolean =
+        value.toByteArray(Charsets.UTF_8).size <= MAX_VERSION_LABEL_BYTES &&
+            VERSION_NAME_PATTERN.matches(value)
 
     private fun isSafeArchiveName(value: String): Boolean = value.isNotBlank() &&
         value.endsWith(".zip", ignoreCase = true) &&
@@ -614,10 +630,11 @@ class CloudInstallerDistributionConfigAdapter(
         const val MAX_DISPLAY_NAME_BYTES = 128
         const val MAX_DESCRIPTION_BYTES = 512
         const val MAX_VERSION_LABEL_BYTES = 64
-        const val MAX_SIZE_LABEL_BYTES = 32
+        const val MAX_APK_SIZE_BYTES = 1L shl 30
         const val MAX_CATALOG_VERSION_BYTES = 128
         const val MAX_COMPONENT_NAME_CHARS = 256
         const val MAX_CLOCK_SKEW_SECONDS = 300L
+        val VERSION_NAME_PATTERN = Regex("^[A-Za-z0-9][A-Za-z0-9._+\\-]{0,63}$")
         val SUPPORTED_SIGNATURE_ALGORITHMS = setOf("SHA256withECDSA", "Ed25519")
         val APP_ID_PATTERN = Regex("^[a-z0-9][a-z0-9._-]{0,63}$")
         val CHANNEL_PATTERN = Regex("^[a-z][a-z0-9-]{0,31}$")
