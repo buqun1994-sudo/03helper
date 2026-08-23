@@ -242,7 +242,7 @@ class InstallationSessionTest {
     }
 
     @Test
-    fun `required components remain selected and incomplete optional metadata blocks start`() {
+    fun `required components remain selected while lightweight catalog defers optional metadata`() {
         val session = connectedSession(
             includeOptional = false,
             catalog = components.map { component ->
@@ -257,8 +257,8 @@ class InstallationSessionTest {
         session.dispatch(InstallationSessionCommand.ToggleOptionalComponent("file-manager", selected = true))
         session.dispatch(InstallationSessionCommand.StartInstallation)
 
-        assertEquals(InstallationSessionState.FAILED, session.currentSnapshot().state)
-        assertEquals("component_metadata_incomplete", session.currentSnapshot().failure?.reasonCode)
+        assertEquals(InstallationSessionState.SELECTION_CONFIRMED, session.currentSnapshot().state)
+        assertEquals(null, session.currentSnapshot().failure)
     }
 
     @Test
@@ -597,6 +597,52 @@ class InstallationSessionTest {
         assertFalse(session.currentSnapshot().maintenance.availableManifests.isEmpty())
     }
 
+    @Test
+    fun `maintenance refresh exposes a newly declared missing app without replacing installed baseline`() {
+        val installed = fullManifest("desktop", versionCode = 1)
+        val session = maintenanceSession(manifests = listOf(installed))
+        session.dispatch(InstallationSessionCommand.MaintenanceAction(MaintenanceActionId.CHECK_UPDATES))
+        session.dispatchEvent(
+            InstallationSessionEvent.MaintenanceCatalogRefreshed(
+                catalogVersion = "catalog-3",
+                keyId = "key-1",
+                signatureAlgorithm = "Ed25519",
+                manifests = listOf(installed),
+                apps = listOf(
+                    ComponentDescriptor("desktop", "Desktop", required = true, status = ComponentStatus.AVAILABLE),
+                    ComponentDescriptor("lyrics", "Lyrics", required = false, status = ComponentStatus.DIRECTORY_MISSING),
+                ),
+                appFailures = mapOf("lyrics" to "lanzou_folder_missing_lyrics"),
+                catalogRevision = 3L,
+            ),
+        )
+
+        val snapshot = session.currentSnapshot()
+        assertEquals(listOf(installed), snapshot.artifactManifests)
+        assertEquals(listOf(installed), snapshot.maintenance.availableManifests)
+        assertEquals(ComponentStatus.DIRECTORY_MISSING, snapshot.components.single { it.id == "lyrics" }.status)
+        assertEquals("catalog-3", snapshot.maintenance.availableCatalogVersion)
+    }
+
+    @Test
+    fun `maintenance refresh rejects a lower catalog revision`() {
+        val installed = fullManifest("desktop", versionCode = 1)
+        val session = maintenanceSession(manifests = listOf(installed), catalogRevision = 5L)
+        session.dispatch(InstallationSessionCommand.MaintenanceAction(MaintenanceActionId.CHECK_UPDATES))
+        session.dispatchEvent(
+            InstallationSessionEvent.MaintenanceCatalogRefreshed(
+                catalogVersion = "catalog-old",
+                keyId = "key-1",
+                signatureAlgorithm = "Ed25519",
+                manifests = listOf(installed),
+                catalogRevision = 4L,
+            ),
+        )
+
+        assertEquals(null, session.currentSnapshot().maintenance.activeAction)
+        assertEquals("maintenance_catalog_rollback", session.currentSnapshot().maintenance.lastAction?.reasonCode)
+    }
+
     private fun connectedSession(
         includeOptional: Boolean,
         catalog: List<ComponentDescriptor> = components,
@@ -625,6 +671,7 @@ class InstallationSessionTest {
     private fun maintenanceSession(
         connected: Boolean = true,
         manifests: List<ArtifactManifest> = emptyList(),
+        catalogRevision: Long = 0L,
     ): InstallationSession {
         val device = confirmedDevice.copy(
             connectionStatus = if (connected) DeviceConnectionStatus.CONFIRMED else DeviceConnectionStatus.DISCONNECTED,
@@ -638,6 +685,7 @@ class InstallationSessionTest {
                 components = if (manifests.isEmpty()) components else manifests.map { it.toComponentDescriptor() },
                 selectedOptionalComponentIds = emptySet(),
                 artifactManifests = manifests,
+                catalogRevision = catalogRevision,
                 evidence = SessionEvidence(installed = manifests.map { it.componentId }.toSet()),
             ),
         )

@@ -1,12 +1,14 @@
 package com.tcrrry.helper.application.maintenance
 
 import com.tcrrry.helper.application.session.InstallationSessionEventPort
+import com.tcrrry.helper.application.artifact.toComponentDescriptors
 import com.tcrrry.helper.data.catalog.CatalogLoadResult
 import com.tcrrry.helper.data.download.ArtifactCache
 import com.tcrrry.helper.domain.device.DeviceActionConnectionLease
 import com.tcrrry.helper.domain.device.ManagedApplicationProbe
 import com.tcrrry.helper.domain.device.ManagedApplicationsResult
 import com.tcrrry.helper.domain.device.MaintenanceDeviceResult
+import com.tcrrry.helper.domain.device.ManagedComponent
 import com.tcrrry.helper.domain.session.InstallationSessionEvent
 import com.tcrrry.helper.domain.session.InstallationSessionSnapshot
 import com.tcrrry.helper.domain.session.MaintenanceActionId
@@ -40,9 +42,9 @@ class MaintenanceController(
             when (actionId) {
                 MaintenanceActionId.CHECK_UPDATES -> checkUpdates(actionId, snapshot, eventPort)
                 MaintenanceActionId.REPAIR_CONFIGURATION -> repairConfiguration(actionId, snapshot, connection, eventPort)
-                MaintenanceActionId.MANAGE_APPS -> inspectApplications(actionId, connection, eventPort)
-                MaintenanceActionId.LAUNCH_LYRICS -> launch(actionId, "lyrics", connection, eventPort)
-                MaintenanceActionId.LAUNCH_DESKTOP -> launch(actionId, "desktop", connection, eventPort)
+                MaintenanceActionId.MANAGE_APPS -> inspectApplications(actionId, snapshot, connection, eventPort)
+                MaintenanceActionId.LAUNCH_LYRICS -> launch(actionId, "lyrics", snapshot, connection, eventPort)
+                MaintenanceActionId.LAUNCH_DESKTOP -> launch(actionId, "desktop", snapshot, connection, eventPort)
                 MaintenanceActionId.CLEANUP -> {
                     artifactCache.clearAll()
                     complete(actionId, "cache_cleared", eventPort)
@@ -86,14 +88,42 @@ class MaintenanceController(
                         keyId = result.catalog.keyId,
                         signatureAlgorithm = result.catalog.signatureAlgorithm,
                         manifests = result.catalog.manifests,
+                        catalogRevision = result.catalog.catalogRevision,
+                        apps = result.catalog.toComponentDescriptors(snapshot.device?.androidSdk),
+                        appFailures = result.catalog.appFailures.associate { it.componentId to it.reasonCode },
                     ),
                 )
                 val currentById = snapshot.artifactManifests.associateBy { it.componentId }
                 val nextById = result.catalog.manifests.associateBy { it.componentId }
-                val changed = currentById.keys != nextById.keys || nextById.any { (componentId, manifest) ->
+                val currentComponents = snapshot.components
+                    .filter { it.status != com.tcrrry.helper.domain.session.ComponentStatus.UNLISTED }
+                    .associateBy { it.id }
+                val nextComponents = result.catalog.toComponentDescriptors(snapshot.device?.androidSdk)
+                    .associateBy { it.id }
+                val currentDeclaredIds = currentComponents.keys
+                val nextDeclaredIds = if (result.catalog.apps.isNotEmpty()) {
+                    result.catalog.apps.filter { it.enabled }.map { it.componentId }.toSet()
+                } else {
+                    nextById.keys
+                }
+                val catalogChanged = snapshot.catalogVersion != result.catalog.catalogVersion ||
+                    snapshot.catalogRevision != result.catalog.catalogRevision ||
+                    currentDeclaredIds != nextDeclaredIds
+                val descriptorChanged = nextComponents.any { (componentId, next) ->
+                    val current = currentComponents[componentId] ?: return@any true
+                    current.displayName != next.displayName ||
+                        current.description != next.description ||
+                        current.required != next.required ||
+                        current.versionLabel != next.versionLabel ||
+                        current.sizeLabel != next.sizeLabel ||
+                        current.compatibilityLabel != next.compatibilityLabel ||
+                        current.compatibilityState != next.compatibilityState ||
+                        current.errorReason != next.errorReason
+                }
+                val manifestChanged = currentById.keys != nextById.keys || nextById.any { (componentId, manifest) ->
                     currentById[componentId]?.let { current ->
                         current.version != manifest.version ||
-                            current.archiveSizeBytes != manifest.archiveSizeBytes ||
+                        current.archiveSizeBytes != manifest.archiveSizeBytes ||
                             !current.archiveSha256.equals(manifest.archiveSha256, ignoreCase = true) ||
                             current.apkSizeBytes != manifest.apkSizeBytes ||
                             !current.apkSha256.equals(manifest.apkSha256, ignoreCase = true) ||
@@ -101,7 +131,15 @@ class MaintenanceController(
                             current.packageName != manifest.packageName
                     } ?: true
                 }
-                complete(actionId, if (changed) "updates_available" else "up_to_date", eventPort)
+                complete(
+                    actionId,
+                    if (catalogChanged || descriptorChanged || manifestChanged) {
+                        "updates_available"
+                    } else {
+                        "up_to_date"
+                    },
+                    eventPort,
+                )
             }
         }
     }
@@ -113,7 +151,8 @@ class MaintenanceController(
         eventPort: InstallationSessionEventPort,
     ) {
         val selected = snapshot.components
-            .filter { it.required || it.id in snapshot.selectedOptionalComponentIds }
+            .filter { it.id == com.tcrrry.helper.domain.device.AuthorizationPlanFactory.DESKTOP_COMPONENT_ID ||
+                it.id in snapshot.selectedOptionalComponentIds }
             .map { it.id }
             .toSet()
         if (selected.isEmpty() || !snapshot.evidence.installed.containsAll(selected)) {
@@ -141,6 +180,7 @@ class MaintenanceController(
 
     private suspend fun inspectApplications(
         actionId: MaintenanceActionId,
+        snapshot: InstallationSessionSnapshot,
         connection: com.tcrrry.helper.domain.device.DeviceConnectionLease?,
         eventPort: InstallationSessionEventPort,
     ) {
@@ -149,7 +189,26 @@ class MaintenanceController(
             fail(actionId, "device_action_gateway_unavailable", retryable = false, eventPort)
             return
         }
-        when (val result = gateway.inspectManagedApplications()) {
+        val components = (snapshot.artifactManifests.map {
+            ManagedComponent(
+                componentId = it.componentId,
+                packageName = it.packageName,
+                setup = it.deviceSetup,
+                order = it.sortOrder,
+            )
+        } + snapshot.maintenance.availableManifests.map {
+            ManagedComponent(
+                componentId = it.componentId,
+                packageName = it.packageName,
+                setup = it.deviceSetup,
+                order = it.sortOrder,
+            )
+        } + snapshot.maintenance.managedApplications
+            .filter { application -> snapshot.artifactManifests.none { it.componentId == application.componentId } }
+            .filter { application -> snapshot.maintenance.availableManifests.none { it.componentId == application.componentId } }
+            .map { application -> ManagedComponent(application.componentId, application.packageName) })
+            .distinctBy { it.componentId }
+        when (val result = gateway.inspectManagedApplications(components)) {
             is ManagedApplicationsResult.Failed -> fail(actionId, result.failure.reasonCode, result.failure.retryable, eventPort)
             is ManagedApplicationsResult.Completed -> {
                 eventPort.emit(
@@ -165,6 +224,7 @@ class MaintenanceController(
     private suspend fun launch(
         actionId: MaintenanceActionId,
         componentId: String,
+        snapshot: InstallationSessionSnapshot,
         connection: com.tcrrry.helper.domain.device.DeviceConnectionLease?,
         eventPort: InstallationSessionEventPort,
     ) {
@@ -173,7 +233,23 @@ class MaintenanceController(
             fail(actionId, "device_action_gateway_unavailable", retryable = false, eventPort)
             return
         }
-        when (val result = gateway.launchManagedComponent(componentId)) {
+        val manifest = snapshot.artifactManifests.firstOrNull { it.componentId == componentId }
+        val component = if (manifest != null) {
+            ManagedComponent(
+                componentId = manifest.componentId,
+                packageName = manifest.packageName,
+                setup = manifest.deviceSetup,
+                order = manifest.sortOrder,
+            )
+        } else {
+            com.tcrrry.helper.domain.device.AuthorizationPlanFactory.allManagedComponents()
+                .firstOrNull { it.componentId == componentId }
+        }
+        if (component == null) {
+            fail(actionId, "maintenance_component_unavailable", retryable = false, eventPort)
+            return
+        }
+        when (val result = gateway.launchManagedComponent(component)) {
             is MaintenanceDeviceResult.Completed -> complete(actionId, result.resultCode, eventPort)
             is MaintenanceDeviceResult.Failed -> fail(actionId, result.failure.reasonCode, result.failure.retryable, eventPort)
         }

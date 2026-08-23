@@ -62,13 +62,15 @@ class ArtifactDownloader(
     suspend fun download(
         manifest: ArtifactManifest,
         request: ResolvedDownloadRequest,
+        progressListener: (DownloadProgress) -> Unit = onProgress,
     ): ArtifactDownloadResult = withContext(Dispatchers.IO) {
-        downloadInternal(manifest, request)
+        downloadInternal(manifest, request, progressListener)
     }
 
     private suspend fun downloadInternal(
         manifest: ArtifactManifest,
         request: ResolvedDownloadRequest,
+        progressListener: (DownloadProgress) -> Unit,
     ): ArtifactDownloadResult {
         val requestValidation = sourcePolicy.validateResolvedRequest(request)
         if (requestValidation is com.tcrrry.helper.domain.artifact.SourcePolicyValidation.Rejected) {
@@ -125,7 +127,7 @@ class ArtifactDownloader(
                         return failed(manifest, request, "download_size_exceeds_manifest", written, clearPartial = true)
                     }
                     output.write(buffer, 0, count)
-                    onProgress(DownloadProgress(written, manifest.archiveSizeBytes, resumed))
+                    progressListener(DownloadProgress(written, manifest.archiveSizeBytes, resumed))
                 }
                 output.fd.sync()
                 if (written != manifest.archiveSizeBytes) {
@@ -181,6 +183,11 @@ data class DynamicArchiveDownload(
     val sha256: String,
 )
 
+data class DynamicDownloadProgress(
+    val bytesWritten: Long,
+    val expectedBytes: Long?,
+)
+
 sealed interface DynamicArchiveDownloadResult {
     data class Completed(val archive: DynamicArchiveDownload) : DynamicArchiveDownloadResult
     data class Failed(val reasonCode: String, val retryable: Boolean) : DynamicArchiveDownloadResult
@@ -195,6 +202,7 @@ class DynamicArtifactDownloader(
     suspend fun download(
         request: ResolvedDownloadRequest,
         destination: File,
+        progressListener: (DynamicDownloadProgress) -> Unit = {},
     ): DynamicArchiveDownloadResult = withContext(Dispatchers.IO) {
         val validation = sourcePolicy.validateResolvedRequest(request)
         if (validation is com.tcrrry.helper.domain.artifact.SourcePolicyValidation.Rejected) {
@@ -237,6 +245,7 @@ class DynamicArtifactDownloader(
                         return@withContext DynamicArchiveDownloadResult.Failed("dynamic_archive_size_exceeds_limit", retryable = false)
                     }
                     output.write(buffer, 0, count)
+                    progressListener(DynamicDownloadProgress(written, response.contentLength))
                 }
                 output.fd.sync()
             }

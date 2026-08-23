@@ -196,6 +196,19 @@ class InstallationSessionF2Test {
     }
 
     @Test
+    fun `retrying an unavailable catalog clears the stale preparation error`() {
+        val session = connectedSession()
+        session.dispatchEvent(InstallationSessionEvent.CatalogFailed("catalog_android_profile_missing"))
+
+        session.dispatch(InstallationSessionCommand.RetryInstallation)
+
+        val snapshot = session.currentSnapshot()
+        assertEquals(InstallationSessionState.CONNECTED, snapshot.state)
+        assertEquals(null, snapshot.failure)
+        assertEquals(null, snapshot.checkpoint)
+    }
+
+    @Test
     fun `trusted catalog cannot start on an incompatible confirmed device`() {
         val manifests = listOf(
             manifest().copy(compatibility = CompatibilityRange(minAndroidSdk = 29)),
@@ -215,6 +228,55 @@ class InstallationSessionF2Test {
 
         assertEquals(InstallationSessionState.FAILED, session.currentSnapshot().state)
         assertEquals("component_incompatible", session.currentSnapshot().failure?.reasonCode)
+    }
+
+    @Test
+    fun `dynamic catalog rows retain per app failures and require a desktop manifest`() {
+        val desktop = desktopManifest()
+        val lyrics = manifest()
+        val session = InstallationSession()
+        session.dispatchEvent(
+            InstallationSessionEvent.CatalogResolved(
+                catalogVersion = "android-v3",
+                keyId = "key-1",
+                signatureAlgorithm = "SHA256withECDSA",
+                manifests = listOf(desktop, lyrics),
+                apps = listOf(
+                    ComponentDescriptor("desktop", "Desktop", required = true, status = ComponentStatus.AVAILABLE),
+                    ComponentDescriptor("lyrics", "Lyrics", required = false, status = ComponentStatus.AVAILABLE),
+                ),
+                appFailures = mapOf("lyrics" to "lanzou_folder_missing_lyrics"),
+                catalogRevision = 3L,
+            ),
+            sequence = 1L,
+        )
+
+        val loaded = session.currentSnapshot()
+        assertEquals(ComponentStatus.AVAILABLE, loaded.components.single { it.id == "desktop" }.status)
+        assertEquals(ComponentStatus.DIRECTORY_MISSING, loaded.components.single { it.id == "lyrics" }.status)
+        assertEquals(
+            "lanzou_folder_missing_lyrics",
+            loaded.components.single { it.id == "lyrics" }.errorReason,
+        )
+        assertEquals(3L, loaded.catalogRevision)
+
+        val missingDesktop = InstallationSession()
+        missingDesktop.dispatchEvent(
+            InstallationSessionEvent.CatalogResolved(
+                catalogVersion = "android-v3",
+                keyId = "key-1",
+                signatureAlgorithm = "SHA256withECDSA",
+                manifests = listOf(lyrics),
+                apps = listOf(
+                    ComponentDescriptor("desktop", "Desktop", required = true),
+                    ComponentDescriptor("lyrics", "Lyrics", required = false),
+                ),
+                catalogRevision = 3L,
+            ),
+            sequence = 1L,
+        )
+        assertEquals(InstallationSessionState.FAILED, missingDesktop.currentSnapshot().state)
+        assertEquals("catalog_desktop_unavailable", missingDesktop.currentSnapshot().failure?.reasonCode)
     }
 
     private fun connectedSession(): InstallationSession {

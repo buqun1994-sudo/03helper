@@ -22,11 +22,12 @@
     <string name="connection_reconnect">重新连接</string>
     <string name="selection_title">选择要安装的应用</string>
     <string name="selection_description">“03桌面”为必装项，其他应用请按需选择</string>
-    <string name="selection_connected_device">已连接到 %1$s</string>
+    <string name="selection_prepare_loading_title">正在准备安装应用</string>
+    <string name="selection_prepare_loading_description">正在读取最新应用清单，请稍候。</string>
     <string name="required_label">必装</string>
     <string name="optional_label">可选</string>
     <string name="selection_summary">本次安装：%1$d 个应用 · %2$s</string>
-    <string name="selection_start">开始安装</string>
+    <string name="selection_start">开始下载并安装</string>
     <string name="selection_prepare_failed_title">暂时无法准备安装应用</string>
     <string name="selection_refresh">重新获取</string>
     <string name="installing_title">正在安装</string>
@@ -36,6 +37,10 @@
     <string name="phase_send">正在发送到车机</string>
     <string name="phase_configure">正在授权</string>
     <string name="phase_verify">正在检查是否可用</string>
+    <string name="component_progress_title">应用进度</string>
+    <string name="component_progress_waiting">等待处理</string>
+    <string name="component_progress_done">已完成</string>
+    <string name="component_progress_failed">未完成</string>
     <string name="install_cancel">取消本次安装</string>
     <string name="result_success_title">安装完成</string>
     <string name="result_success_description">安装和授权已完成，请在车机开始使用。</string>
@@ -61,8 +66,6 @@
     <string name="maintenance_reconnect">重新连接</string>
     <string name="maintenance_reconnecting">正在连接</string>
     <string name="maintenance_disconnect">断开车机连接</string>
-    <string name="component_unsupported">当前车机暂不支持此应用</string>
-    <string name="component_compatibility_unknown">暂时无法确认是否支持</string>
     <string name="maintenance_common">常用</string>
     <string name="maintenance_apps">应用</string>
     <string name="maintenance_storage">存储与诊断</string>

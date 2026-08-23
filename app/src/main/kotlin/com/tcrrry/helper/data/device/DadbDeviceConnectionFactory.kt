@@ -1,5 +1,6 @@
 package com.tcrrry.helper.data.device
 
+import dadb.AdbKeyPair
 import dadb.Dadb
 import com.tcrrry.helper.data.artifact.ApkMetadataReader
 import com.tcrrry.helper.domain.device.ConnectedDevice
@@ -26,6 +27,7 @@ class DadbDeviceConnectionFactory(
     private val readTimeoutMillis: Int = DEFAULT_READ_TIMEOUT_MILLIS,
     private val installedApkCacheDirectory: File? = null,
     private val installedApkMetadataReader: ApkMetadataReader? = null,
+    private val adbKeyPair: AdbKeyPair? = null,
 ) : DeviceConnectionFactory {
     override suspend fun open(endpoint: DeviceEndpoint): DeviceConnectionAttempt = withContext(Dispatchers.IO) {
         var adb: Dadb? = null
@@ -33,7 +35,7 @@ class DadbDeviceConnectionFactory(
             adb = Dadb.create(
                 endpoint.host,
                 endpoint.port,
-                null,
+                adbKeyPair,
                 connectTimeoutMillis,
                 readTimeoutMillis,
             )

@@ -30,7 +30,9 @@ import com.tcrrry.helper.domain.artifact.SourcePlan
 import com.tcrrry.helper.domain.artifact.SourceSelectionEvidence
 import com.tcrrry.helper.domain.device.ApkDeclarationMetadata
 import com.tcrrry.helper.domain.session.ComponentCheck
+import com.tcrrry.helper.domain.session.ComponentProgressStatus
 import com.tcrrry.helper.domain.session.FailureCategory
+import com.tcrrry.helper.domain.session.InstallPhase
 import com.tcrrry.helper.domain.session.InstallationSessionEvent
 import java.io.File
 import kotlinx.coroutines.CancellationException
@@ -43,7 +45,10 @@ data class PreparedArtifact(
 )
 
 sealed interface ArtifactPreparationResult {
-    data class Prepared(val artifacts: List<PreparedArtifact>) : ArtifactPreparationResult
+    data class Prepared(
+        val artifacts: List<PreparedArtifact>,
+        val failures: List<ArtifactFailure> = emptyList(),
+    ) : ArtifactPreparationResult
     data class Failed(val failure: ArtifactFailure) : ArtifactPreparationResult
 }
 
@@ -82,6 +87,7 @@ class ArtifactPreparationCoordinator(
         }
 
         val prepared = mutableListOf<AttemptSuccess>()
+        val failures = mutableListOf<ArtifactFailure>()
         try {
             manifests.forEach { manifest ->
                 val plan = sourcePolicy.plan(manifest)
@@ -92,8 +98,19 @@ class ArtifactPreparationCoordinator(
                         reasonCode = plan.reasonCode,
                         retryable = false,
                     )
-                    failBatch(prepared, failure)
-                    return ArtifactPreparationResult.Failed(failure)
+                    if (manifest.componentId == DESKTOP_COMPONENT_ID) {
+                        failBatch(prepared, failure)
+                        return ArtifactPreparationResult.Failed(failure)
+                    }
+                    failures += failure
+                    eventPort.emit(
+                        InstallationSessionEvent.ArtifactUnavailable(
+                            componentId = manifest.componentId,
+                            reasonCode = failure.reasonCode,
+                            sourceKind = failure.sourceKind,
+                        ),
+                    )
+                    return@forEach
                 }
                 val sources = (plan as SourcePlan.Accepted).sources
                 var success: AttemptSuccess? = null
@@ -104,6 +121,17 @@ class ArtifactPreparationCoordinator(
                         is AttemptResult.Success -> success = attempt.value
                         is AttemptResult.Failed -> {
                             lastFailure = attempt.failure
+                            emitProgress(
+                                manifest.componentId,
+                                when (attempt.failure.phase) {
+                                    ArtifactFailurePhase.DOWNLOAD,
+                                    ArtifactFailurePhase.SOURCE_RESOLUTION,
+                                    -> InstallPhase.FETCH
+                                    else -> InstallPhase.CHECK
+                                },
+                                ComponentProgressStatus.FAILED,
+                                indeterminate = false,
+                            )
                             val terminal = index == sources.lastIndex
                             eventPort.emit(
                                 InstallationSessionEvent.SourceFailed(
@@ -125,8 +153,19 @@ class ArtifactPreparationCoordinator(
                         reasonCode = "all_sources_failed",
                         retryable = true,
                     )
-                    prepared.forEach { cache.clearArtifact(it.manifest) }
-                    return ArtifactPreparationResult.Failed(failure)
+                    if (manifest.componentId == DESKTOP_COMPONENT_ID) {
+                        prepared.forEach { cache.clearArtifact(it.manifest) }
+                        return ArtifactPreparationResult.Failed(failure)
+                    }
+                    failures += failure
+                    eventPort.emit(
+                        InstallationSessionEvent.ArtifactUnavailable(
+                            componentId = manifest.componentId,
+                            reasonCode = failure.reasonCode,
+                            sourceKind = failure.sourceKind,
+                        ),
+                    )
+                    return@forEach
                 }
                 prepared += success!!
             }
@@ -150,6 +189,7 @@ class ArtifactPreparationCoordinator(
                     declarations = success.verifiedApk.metadata?.declarations,
                 )
             },
+            failures = failures,
         )
     }
 
@@ -157,39 +197,101 @@ class ArtifactPreparationCoordinator(
         manifest: ArtifactManifest,
         source: ArtifactSource,
     ): AttemptResult {
-        val request = when (source.kind) {
-            ArtifactSourceKind.LANZOU_SHARE -> when (val resolution = lanzouSourceAdapter.resolve(source)) {
-                is LanzouResolutionResult.Success -> resolution.request
-                is LanzouResolutionResult.Failure -> return AttemptResult.Failed(
-                    resolution.failure.copy(componentId = manifest.componentId),
+        emitProgress(manifest.componentId, InstallPhase.FETCH, ComponentProgressStatus.RUNNING)
+        val paths = cache.paths(manifest)
+        var cachedArchive: VerifiedArchive? = null
+        var download: ArtifactDownloadResult.Completed? = null
+
+        // The selected-catalog pass may already have downloaded this exact ZIP
+        // to the same cache key. Verify that complete part before resolving a
+        // second short-lived URL; this keeps one user action to one download
+        // while retaining the normal archive and APK identity gates below.
+        val hasCompleteCachedArchive = runCatching {
+            cache.resumeMetadataMatches(manifest, source.kind.wireName) &&
+                paths.archivePart.length() == manifest.archiveSizeBytes
+        }.getOrDefault(false)
+        if (hasCompleteCachedArchive) {
+            cachedArchive = when (val result = archiveVerifier.verify(manifest, paths.archivePart)) {
+                is ArchiveIdentityResult.Verified -> result.archive
+                is ArchiveIdentityResult.Failed -> {
+                    cache.clearArtifact(manifest)
+                    null
+                }
+            }
+            if (cachedArchive != null) {
+                download = ArtifactDownloadResult.Completed(
+                    archivePart = paths.archivePart,
+                    sizeBytes = manifest.archiveSizeBytes,
+                    resumed = true,
+                )
+                emitProgress(
+                    componentId = manifest.componentId,
+                    phase = InstallPhase.FETCH,
+                    status = ComponentProgressStatus.RUNNING,
+                    bytesWritten = manifest.archiveSizeBytes,
+                    totalBytes = manifest.archiveSizeBytes,
+                    indeterminate = false,
+                )
+            }
+        }
+
+        if (download == null) {
+            val request = when (source.kind) {
+                ArtifactSourceKind.LANZOU_SHARE -> when (val resolution = lanzouSourceAdapter.resolve(source)) {
+                    is LanzouResolutionResult.Success -> resolution.request
+                    is LanzouResolutionResult.Failure -> return AttemptResult.Failed(
+                        resolution.failure.copy(componentId = manifest.componentId),
+                    )
+                }
+
+                ArtifactSourceKind.R2,
+                ArtifactSourceKind.GITHUB_RELEASES,
+                -> ResolvedDownloadRequest(
+                    sourceKind = source.kind,
+                    url = source.url,
                 )
             }
 
-            ArtifactSourceKind.R2,
-            ArtifactSourceKind.GITHUB_RELEASES,
-            -> ResolvedDownloadRequest(
-                sourceKind = source.kind,
-                url = source.url,
-            )
+            download = when (val result = downloader.download(
+                manifest,
+                request,
+                progressListener = { progress ->
+                    emitProgress(
+                        componentId = manifest.componentId,
+                        phase = InstallPhase.FETCH,
+                        status = ComponentProgressStatus.RUNNING,
+                        bytesWritten = progress.bytesWritten,
+                        totalBytes = progress.expectedBytes,
+                        indeterminate = false,
+                    )
+                },
+            )) {
+                is ArtifactDownloadResult.Completed -> result
+                is ArtifactDownloadResult.Failed -> return AttemptResult.Failed(
+                    result.failure.copy(
+                        componentId = manifest.componentId,
+                        sourceKind = source.kind,
+                    ),
+                )
+            }
         }
-
-        val download = when (val result = downloader.download(manifest, request)) {
-            is ArtifactDownloadResult.Completed -> result
-            is ArtifactDownloadResult.Failed -> return AttemptResult.Failed(
-                result.failure.copy(
-                    componentId = manifest.componentId,
-                    sourceKind = source.kind,
-                ),
-            )
-        }
-        val verifiedArchive = when (val result = archiveVerifier.verify(manifest, download.archivePart)) {
+        val completedDownload = checkNotNull(download)
+        emitProgress(
+            manifest.componentId,
+            InstallPhase.FETCH,
+            ComponentProgressStatus.COMPLETED,
+            bytesWritten = completedDownload.sizeBytes,
+            totalBytes = manifest.archiveSizeBytes,
+            indeterminate = false,
+        )
+        emitProgress(manifest.componentId, InstallPhase.CHECK, ComponentProgressStatus.RUNNING)
+        val verifiedArchive = cachedArchive ?: when (val result = archiveVerifier.verify(manifest, completedDownload.archivePart)) {
             is ArchiveIdentityResult.Verified -> result.archive
             is ArchiveIdentityResult.Failed -> {
                 cache.clearArtifact(manifest)
                 return AttemptResult.Failed(result.failure.copy(sourceKind = source.kind))
             }
         }
-        val paths = cache.paths(manifest)
         val extractedApk = when (val result = archiveExtractor.extract(manifest, verifiedArchive, paths.apkPart)) {
             is ArchiveExtractionResult.Extracted -> result.apk
             is ArchiveExtractionResult.Failed -> {
@@ -213,6 +315,14 @@ class ArtifactPreparationCoordinator(
             }
         }
         cache.clearArchive(manifest)
+        emitProgress(
+            manifest.componentId,
+            InstallPhase.CHECK,
+            ComponentProgressStatus.COMPLETED,
+            bytesWritten = manifest.archiveSizeBytes,
+            totalBytes = manifest.archiveSizeBytes,
+            indeterminate = false,
+        )
         return AttemptResult.Success(
             AttemptSuccess(
                 manifest = manifest,
@@ -221,6 +331,26 @@ class ArtifactPreparationCoordinator(
                 verifiedArchive = verifiedArchive,
                 extractedApk = extractedApk,
                 verifiedApk = verifiedApk,
+            ),
+        )
+    }
+
+    private fun emitProgress(
+        componentId: String,
+        phase: InstallPhase,
+        status: ComponentProgressStatus,
+        bytesWritten: Long = 0L,
+        totalBytes: Long = 0L,
+        indeterminate: Boolean = true,
+    ) {
+        eventPort.emit(
+            InstallationSessionEvent.ComponentProgressUpdated(
+                componentId = componentId,
+                phase = phase,
+                status = status,
+                bytesWritten = bytesWritten,
+                totalBytes = totalBytes,
+                indeterminate = indeterminate,
             ),
         )
     }
@@ -309,5 +439,9 @@ class ArtifactPreparationCoordinator(
     private sealed interface AttemptResult {
         data class Success(val value: AttemptSuccess) : AttemptResult
         data class Failed(val failure: ArtifactFailure) : AttemptResult
+    }
+
+    private companion object {
+        const val DESKTOP_COMPONENT_ID = "desktop"
     }
 }

@@ -7,9 +7,14 @@ import com.tcrrry.helper.domain.artifact.ArtifactVersion
 import com.tcrrry.helper.domain.artifact.CompatibilityRange
 import com.tcrrry.helper.domain.artifact.toComponentDescriptor
 import com.tcrrry.helper.domain.device.AuthorizationPlanFactory
+import com.tcrrry.helper.domain.device.AuthorizationSetupDeclaration
 import com.tcrrry.helper.domain.device.DeviceCapability
+import com.tcrrry.helper.domain.device.ManagedAppOp
+import com.tcrrry.helper.domain.device.ManagedSecureComponentList
 import com.tcrrry.helper.domain.session.DeviceConnectionStatus
 import com.tcrrry.helper.domain.session.DeviceSummary
+import com.tcrrry.helper.domain.session.ComponentDescriptor
+import com.tcrrry.helper.domain.session.ComponentStatus
 import com.tcrrry.helper.domain.session.InstallationSessionSnapshot
 import com.tcrrry.helper.domain.session.InstallationSessionState
 import com.tcrrry.helper.domain.session.MaintenanceActionId
@@ -56,6 +61,103 @@ class MaintenanceSessionStoreTest {
         file.writeText("{not-json")
         assertNull(store.load())
         assertFalse(store.save(InstallationSessionSnapshot(InstallationSessionState.IDLE)))
+    }
+
+    @Test
+    fun `dynamic app identity and typed setup survive a cold start`() {
+        val file = Files.createTempDirectory("maintenance-store-dynamic").resolve("session.json").toFile()
+        val setup = AuthorizationSetupDeclaration(
+            appOps = setOf(ManagedAppOp.SYSTEM_ALERT_WINDOW),
+            secureComponents = setOf(
+                AuthorizationSetupDeclaration.SecureComponent(
+                    setting = ManagedSecureComponentList.ENABLED_ACCESSIBILITY_SERVICES,
+                    targetComponent = "com.tcrrry.notes/com.tcrrry.notes.Service",
+                ),
+            ),
+            launchComponent = "com.tcrrry.notes/com.tcrrry.notes.MainActivity",
+        )
+        val desktop = manifest("desktop", 1L, required = true)
+        val notes = manifest("notes", 1L, required = false).copy(
+            packageName = "com.tcrrry.notes",
+            deviceSetup = setup,
+            sortOrder = 30,
+        )
+        val snapshot = maintenanceSnapshot(listOf(desktop, notes), listOf(desktop, notes)).copy(
+            selectedOptionalComponentIds = setOf("notes"),
+            maintenance = maintenanceSnapshot(listOf(desktop, notes), listOf(desktop, notes)).maintenance.copy(
+                managedApplications = listOf(
+                    ManagedApplicationStatus("desktop", AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME, true),
+                    ManagedApplicationStatus("notes", "com.tcrrry.notes", true),
+                ),
+            ),
+        )
+        val store = MaintenanceSessionStore(file)
+
+        assertTrue(store.save(snapshot))
+        val restored = store.load()
+
+        assertEquals("com.tcrrry.notes", restored?.artifactManifests?.single { it.componentId == "notes" }?.packageName)
+        assertEquals(setup, restored?.artifactManifests?.single { it.componentId == "notes" }?.deviceSetup)
+        assertEquals(setOf("notes"), restored?.selectedOptionalComponentIds)
+    }
+
+    @Test
+    fun `invalid stored status or typed setup is rejected instead of downgraded`() {
+        val root = Files.createTempDirectory("maintenance-store-strict").toFile()
+        val file = root.resolve("session.json")
+        try {
+            val snapshot = maintenanceSnapshot(manifests(1L), manifests(2L))
+            val store = MaintenanceSessionStore(file)
+            assertTrue(store.save(snapshot))
+            file.writeText(file.readText().replace("\"status\":\"AVAILABLE\"", "\"status\":\"NOT_A_STATUS\""))
+            assertNull(store.load())
+
+            val setup = AuthorizationSetupDeclaration(appOps = setOf(ManagedAppOp.SYSTEM_ALERT_WINDOW))
+            val dynamic = manifest("notes", 1L, required = false).copy(
+                packageName = "com.tcrrry.notes",
+                deviceSetup = setup,
+            )
+            val setupSnapshot = maintenanceSnapshot(
+                listOf(manifest("desktop", 1L, required = true), dynamic),
+                listOf(manifest("desktop", 2L, required = true), dynamic),
+            ).copy(selectedOptionalComponentIds = setOf("notes"))
+            assertTrue(store.save(setupSnapshot))
+            file.writeText(file.readText().replace("SYSTEM_ALERT_WINDOW", "NOT_A_TYPED_ACTION"))
+            assertNull(store.load())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `installed unlisted component is restored only once`() {
+        val file = Files.createTempDirectory("maintenance-store-unlisted").resolve("session.json").toFile()
+        val desktop = manifest("desktop", 1L, required = true)
+        val base = maintenanceSnapshot(listOf(desktop), listOf(desktop)).copy(
+            selectedOptionalComponentIds = emptySet(),
+        )
+        val legacy = ComponentDescriptor(
+            id = "legacy",
+            displayName = "legacy",
+            required = false,
+            status = ComponentStatus.UNLISTED,
+            errorReason = "unlisted",
+        )
+        val snapshot = base.copy(
+            components = base.components + legacy,
+            evidence = base.evidence.copy(installed = setOf("desktop", "legacy")),
+            maintenance = base.maintenance.copy(
+                managedApplications = listOf(
+                    ManagedApplicationStatus("desktop", AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME, true),
+                    ManagedApplicationStatus("legacy", "com.tcrrry.legacy", true),
+                ),
+            ),
+        )
+        val store = MaintenanceSessionStore(file)
+
+        assertTrue(store.save(snapshot))
+        val restored = store.load() ?: error("snapshot_not_restored")
+        assertEquals(1, restored.components.count { it.id == "legacy" })
     }
 
     private fun maintenanceSnapshot(
@@ -125,7 +227,7 @@ class MaintenanceSessionStoreTest {
             AuthorizationPlanFactory.DESKTOP_COMPONENT_ID -> AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME
             AuthorizationPlanFactory.LYRICS_COMPONENT_ID -> AuthorizationPlanFactory.LYRICS_PACKAGE_NAME
             AuthorizationPlanFactory.FILE_MANAGER_COMPONENT_ID -> AuthorizationPlanFactory.FILE_MANAGER_PACKAGE_NAME
-            else -> error("unexpected component")
+            else -> "com.tcrrry.$componentId"
         }
         return ArtifactManifest(
             schemaVersion = 1,

@@ -22,46 +22,40 @@
 
 ### 3.1 控制面与对象流分离
 
-1. 03helper 需要一个很小的 schema V2 签名配置作为控制面，配置描述当前蓝奏根文件夹、运行时密码、未来历史版本蓝奏文件夹、对应密码、固定组件文件映射和配置版本；包名、证书、APK entry 名称与兼容范围由客户端内置信任清单固定维护，包体版本、大小和摘要由客户端从当前 ZIP 内的 APK 读取。
-2. 安装包对象流不经过 03helper 自有服务器。客户端每次从配置取得同一个受密码保护的蓝奏根文件夹，在隐藏 WebView 中完成验证并枚举文件，再按固定文件映射下载实际存在的 ZIP；desktop 必须存在，其他可选 ZIP 可以缺失。根文件夹是唯一的“最新版本”真值，人工替换 ZIP 即可发布更新。
+1. 03helper 需要一个很小的 schema V3 签名配置作为控制面，配置描述当前蓝奏根文件夹、运行时密码、`environment`、`channel`、`catalogVersion`、`catalogRevision` 和动态 `apps[]`；每个条目可声明展示信息、安装策略、排序、客户端能力门槛和受限 typed `deviceSetup`。包名、证书、最低 SDK 和 APK 实际身份由客户端读取并用官方发布者证书根校验，包体版本、大小和摘要由客户端从当前 ZIP 内 APK 读取。
+2. 安装包对象流不经过 03helper 自有服务器。客户端每次从配置取得同一个受密码保护的蓝奏根文件夹，在隐藏 WebView 中完成验证并枚举文件，只下载启用 `apps[]` 声明的 ZIP；未声明文件忽略，desktop 必须存在，其他可选 ZIP 可以缺失并单项隔离。根文件夹是唯一的“最新版本”真值，上传一批不可变 ZIP、完成预检并发布新配置即可更新或新增 APP。
 3. R2 / GitHub Releases 不参与当前根文件夹自动版本判断；后续若增加备用对象，必须继续由同一签名配置声明并保持组件版本一致，不能让多个来源各自决定“最新版本”。
 4. 600GB/月额度只用于评估对象流量，不用于否定小清单控制面；几 KB 的清单请求不构成 APK 直链流量。
 
 ### 3.2 Android 清单适配边界
 
-V2 已冻结独立的 Android distribution-config 控制面。领域对象和签名 envelope 的本地实现位于 `com.tcrrry.helper.domain.artifact` 与 `data/catalog`；这只代表客户端协议已实现，不代表 Cloud 生产配置已经发布。
+V3 已冻结独立的 Android distribution-config 控制面。领域对象和签名 envelope 的本地实现位于 `com.tcrrry.helper.domain.artifact` 与 `data/catalog`；这只代表客户端协议已实现，不代表 Cloud 生产配置已经发布。
 
-公共生产入口为 `GET https://api.9.9studio.fun/api/03helper/android-config`，Debug staging 入口为 `GET https://api-staging.9studio.fun/api/03helper/android-config`。envelope 固定包含 `schemaVersion=2`、`configVersion`、`keyId`、`signatureAlgorithm`、`payloadBase64` 和 `signatureBase64`；客户端先对 Base64 解码后的原始 UTF-8 字节验签，再严格解析 payload。payload 固定包含 `schemaVersion=2`、`channel`、`expiresAt`、`folderUrl`、`folderPassword`、`previousVersionsUrl`、`previousVersionsPassword` 和三个固定组件的 `componentId`、`archiveFileName`、`required`。两个密码字段允许空字符串，空字符串表示无密码；`expiresAt=2099-12-31T23:59:59.000Z` 是当前长效发布配置约定。
+公共生产入口为 `GET https://api.9.9studio.fun/api/03helper/android-config`，Debug staging 入口为 `GET https://api-staging.9studio.fun/api/03helper/android-config`。envelope 使用 `schemaVersion=3`；payload 包含 `environment`、`channel`、`issuedAtUtc`、`expiresAt`、`catalogVersion`、`catalogRevision`、文件夹字段和动态 `apps[]`。客户端先对 Base64 解码后的原始 UTF-8 字节验签，再严格解析 payload；payload 最大 512 KiB，未知字段、危险文件名、过期快照和修订回滚均拒绝。
 
 当前 staging 信任根已轮换为 `keyId=03helper-staging-config-2026-08-22-v1`，算法为 `SHA256withECDSA`、P-256 (`prime256v1`)，客户端内置公钥 SPKI DER SHA-256 为 `8c2573689e87e6c426add9f2249186ec7b6c0e8f44b196ea669c820adb1283d3`。Cloud 只能注入与该指纹匹配的 PKCS#8 私钥；旧 `03helper-real-debug-2026-08-20-v4` 已废弃且不做兼容。配置加密密钥 `ANDROID_CONFIG_ENCRYPTION_KEY_BASE64` 与签名私钥是两套独立材料。
 
-`previousVersionsUrl` 只作为未来人工历史版本入口的签名配置能力准备；当前客户端不把它接入自动更新、版本比较或备用源。非空时必须是 HTTPS 蓝奏文件夹地址，不能包含用户名、密码、query 或 fragment；为空时 `previousVersionsPassword` 必须同时为空。未来历史版本手动选择流程必须另行校验实际 APK 身份，不能复用当前固定三 ZIP 自动更新目录规则。
+历史版本字段不属于当前 v3 主链；回滚通过新 `catalogRevision` 指向旧的不可变目录完成。客户端按 `environment + channel` 持久化最高修订号，旧签名快照不能覆盖新状态。
 
-包名、证书 SHA-256、APK 入口文件名、显示名和最低 SDK 属于 `03helper` 随包内置的组件信任清单，网络 payload 不得覆盖。未知算法、未知 key、字段缺失、过期或固定组件映射不合法均 fail closed。
+包名、证书 SHA-256 和最低 SDK 不由网络 payload 覆盖：包名、版本和最低 SDK 从 APK 读取，证书必须属于客户端内置官方发布者证书集合及其包名命名空间。未知算法、未知 key、字段缺失、过期或桌面条目缺失均 fail closed。
 
-客户端从实际归档构造的 `ArtifactManifest` 仍包含 `archiveFormat`、`archiveSizeBytes`、`archiveSha256`、`apkEntryName`、`apkSizeBytes`、`apkSha256`、`packageName`、`apkVersion` 和 `certificateSha256`；这些字段不是 Cloud V2 payload 字段，而是本地校验结果与内置信任值的合并结果。
+客户端从实际归档构造的 `ArtifactManifest` 仍包含 `archiveFormat`、`archiveSizeBytes`、`archiveSha256`、`apkEntryName`、`apkSizeBytes`、`apkSha256`、`packageName`、`apkVersion` 和 `certificateSha256`；这些字段不是 Cloud v3 payload 字段，而是本地校验结果。
 
-组件配置项只允许固定的三个组件：
-
-1. `desktop`：`03desktop-debug.zip`，唯一必装组件。
-2. `lyrics`：`03lyrics-debug.zip`，可选组件。
-3. `file-manager`：`fossify-file-manager-car-debug.zip`，可选组件。
-
-配置不得携带任意 shell、脚本、第三方直链转换服务、动态权限或任意包体 URL。Cloud 只提供签名配置和受控文件夹发布能力；发现设备、ADB、安装、授权、解压和运行验证仍由 03helper 自己负责。
+`apps[]` 的数量和条目由 Cloud 动态维护；`desktop` 必须启用，其余 APP 可选。配置不得携带任意 shell、脚本、第三方直链转换服务或任意包体 URL；`deviceSetup` 只能使用客户端预定义强类型动作。Cloud 只提供签名配置和受控文件夹发布能力；发现设备、ADB、安装、授权、解压和运行验证仍由 03helper 自己负责。
 
 ### 3.3 Android ZIP 发布流程
 
 1. 各产品仓库先生成已签名 APK，分别由 03 歌词、03桌面和文件管理器仓库负责包身份、版本和证书；03helper 不复制产品源码，也不重新签名。
-2. Cloud release 流程为每个组件生成一个 ZIP，归档根目录只放一个预期 APK；服务端只保存固定文件名和必选性，包名、证书和兼容参数由客户端内置清单负责，包体版本、大小和摘要不预先写死。
-3. 最多三个 ZIP 上传到同一个受密码保护的蓝奏根文件夹。文件夹只能包含这三个固定 ZIP，desktop ZIP 必须存在，lyrics / file-manager ZIP 可以缺失，不能放 APK、说明文件、重复文件或未知文件；人工替换 ZIP 是唯一发布动作。
-4. 客户端每次检查更新重新打开根文件夹，按固定文件映射处理实际存在的 ZIP，逐个下载、解压唯一对应 APK，并读取 APK 版本、大小和 SHA-256 生成本次 `ArtifactManifest`。任一实际组件身份、文件集合或归档结构不符合约束，整次配置拒绝。
+2. Cloud release 流程为每个 APP 生成一个 ZIP，归档根目录只放一个 APK；服务端只保存 `apps[]` 中的文件名和展示 / 安装策略。
+3. 全部 ZIP 上传到同一个受密码保护的不可变蓝奏目录。目录可包含人工维护的其它文件；客户端只处理签名 `apps[]` 声明的 ZIP，desktop ZIP 必须存在，其余 APP 可以缺失。
+4. 客户端连接后先重新打开根文件夹并按动态文件映射发布轻量应用列表；用户确认后才对已选 APP（最多 2 个并发）下载、解压、读取 APK 元数据并生成本次 `ArtifactManifest`；单个可选 APP 失败不阻断其它 APP。
 5. 只有正式 staging 下载、解压、APK 包身份 / 证书校验和 ADB 安装验证全部通过，才允许把签名配置切到公开状态。当前真实组件 Debug 包只进入 03helper Debug 变体的本地签名验证 profile；它们可以证明客户端完整工程链，但不代表 Cloud production 配置或公开候选通过。
 6. 密码只作为签名 payload 的运行时字段下发给客户端；Cloud 不向客户端下发网盘账号、R2 密钥、GitHub PAT 或任意命令，客户端不记录密码和短时下载上下文。
 
 ### 3.4 当前 F3 真实 Debug 验证资料
 
-1. Debug 配置的根文件夹地址由服务端签名 payload 提供；客户端只按内置 `archiveFileName` 映射 `03desktop-debug.zip`、`03lyrics-debug.zip` 和 `fossify-file-manager-car-debug.zip`。
-2. 实际存在的 ZIP 根目录均只能有一个预期 APK；APK 包名和 Debug 证书由客户端从归档读取并与内置清单比对，版本由 APK 动态读取。Debug 使用完整安装、一次统一授权和可用性主链，不存在安装专用成功态；03桌面是唯一必装核心，其他组件可选。
+1. Debug 配置的根文件夹地址和 `apps[]` 由服务端签名 payload 提供；客户端按动态 `archiveFileName` 映射处理实际声明的 ZIP。
+2. 每个声明 ZIP 根目录只能有一个 APK；APK 包名、版本、最低 SDK 和证书由客户端从归档读取，证书与包名必须落在本地发布者信任根内。Debug 使用完整安装、按签名 `apps[]` 生成的版本化授权计划和可用性主链；03桌面是唯一必装核心，其他组件可选。
 3. 蓝奏页面验证后产生的 `zipN.webgetstore.com` 地址带短时上下文，只在内存中交给原生下载器，不能写入配置、文档或诊断。
 4. 这些资料只用于 Debug 工程验证，不代表 Cloud production 配置、正式签名或公开候选已经发布；根文件夹密码不写入仓库文档。
 

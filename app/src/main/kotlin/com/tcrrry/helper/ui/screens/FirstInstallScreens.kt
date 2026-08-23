@@ -40,7 +40,9 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import com.tcrrry.helper.R
 import com.tcrrry.helper.domain.session.DeviceConnectionStatus
+import com.tcrrry.helper.domain.device.AuthorizationPlanFactory
 import com.tcrrry.helper.domain.session.InstallPhase
+import com.tcrrry.helper.domain.session.ComponentProgressStatus
 import com.tcrrry.helper.domain.session.ResultKind
 import com.tcrrry.helper.ui.components.AnimatedEntry
 import com.tcrrry.helper.ui.components.ComponentLogo
@@ -50,6 +52,7 @@ import com.tcrrry.helper.ui.components.PrimaryActionButton
 import com.tcrrry.helper.ui.components.StatusIcon
 import com.tcrrry.helper.ui.components.TaskTopBar
 import com.tcrrry.helper.ui.state.ComponentRow
+import com.tcrrry.helper.ui.state.ComponentInstallProgressRow
 import com.tcrrry.helper.ui.state.ConnectionVariant
 import com.tcrrry.helper.ui.state.DeviceRow
 import com.tcrrry.helper.ui.state.InstallUiIntent
@@ -291,26 +294,10 @@ private fun SelectionScreen(
         Spacer(modifier = Modifier.height(8.dp))
         Text(text = stringResource(R.string.selection_description), style = MaterialTheme.typography.bodyLarge, color = InstallerColors.AuxiliaryWhite)
         Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            StatusIcon(
-                name = "circle_check",
-                contentDescription = stringResource(R.string.selection_connected_device, state.deviceName),
-                tint = InstallerColors.Success,
-                size = InstallerDimensions.SmallIconSize,
-            )
-            Text(
-                text = stringResource(R.string.selection_connected_device, state.deviceName),
-                style = MaterialTheme.typography.bodyMedium,
-                color = InstallerColors.AuxiliaryWhite,
-            )
-        }
-        Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
 
-        if (state.components.isEmpty()) {
+        if (state.preparing) {
+            SelectionPreparing(modifier = Modifier.weight(1f))
+        } else if (state.components.isEmpty()) {
             SelectionUnavailable(onIntent = onIntent, modifier = Modifier.weight(1f))
         } else {
             LazyColumn(
@@ -351,6 +338,33 @@ private fun SelectionScreen(
 }
 
 @Composable
+private fun SelectionPreparing(modifier: Modifier) {
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.Center,
+    ) {
+        CircularProgressIndicator(
+            color = InstallerColors.White,
+            strokeWidth = 2.dp,
+            modifier = Modifier.size(28.dp),
+        )
+        Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
+        Text(
+            text = stringResource(R.string.selection_prepare_loading_title),
+            style = MaterialTheme.typography.headlineSmall,
+            color = InstallerColors.White,
+        )
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = stringResource(R.string.selection_prepare_loading_description),
+            style = MaterialTheme.typography.bodyLarge,
+            color = InstallerColors.AuxiliaryWhite,
+        )
+    }
+}
+
+@Composable
 private fun SelectionUnavailable(
     onIntent: (InstallUiIntent) -> Unit,
     modifier: Modifier,
@@ -381,11 +395,18 @@ private fun SelectionUnavailable(
 
 @Composable
 private fun ComponentChoiceRow(component: ComponentRow, onToggle: (Boolean) -> Unit) {
-    val selected = component.required || component.selected
-    val supported = component.compatibilityState != com.tcrrry.helper.domain.session.ComponentCompatibility.UNSUPPORTED
+    val mandatory = component.id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
+    val selected = mandatory || component.selected
+    val supported = component.compatibilityState != com.tcrrry.helper.domain.session.ComponentCompatibility.UNSUPPORTED &&
+        component.status in setOf(
+            com.tcrrry.helper.domain.session.ComponentStatus.AVAILABLE,
+            com.tcrrry.helper.domain.session.ComponentStatus.NEW,
+            com.tcrrry.helper.domain.session.ComponentStatus.UPDATE_AVAILABLE,
+            com.tcrrry.helper.domain.session.ComponentStatus.READING,
+        )
     PressableSurface(
-        onClick = { if (!component.required && supported) onToggle(!selected) },
-        enabled = !component.required && supported,
+        onClick = { if (!mandatory && supported) onToggle(!selected) },
+        enabled = !mandatory && supported,
         minHeight = InstallerDimensions.ComponentItemMinHeight,
         modifier = Modifier
             .testTag("component_${component.id}")
@@ -403,8 +424,15 @@ private fun ComponentChoiceRow(component: ComponentRow, onToggle: (Boolean) -> U
             )
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text(text = component.displayName, style = MaterialTheme.typography.bodyLarge, color = InstallerColors.White)
-                    if (component.required) {
+                    Text(
+                        text = component.displayName,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = InstallerColors.White,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    if (mandatory) {
                         StatusIcon(
                             name = "lock_keyhole",
                             contentDescription = stringResource(R.string.required_label),
@@ -417,30 +445,17 @@ private fun ComponentChoiceRow(component: ComponentRow, onToggle: (Boolean) -> U
                     }
                 }
                 Text(
-                    text = when (component.compatibilityState) {
-                        com.tcrrry.helper.domain.session.ComponentCompatibility.UNSUPPORTED ->
-                            stringResource(R.string.component_unsupported)
-                        com.tcrrry.helper.domain.session.ComponentCompatibility.UNKNOWN ->
-                            listOfNotNull(component.versionLabel, component.sizeLabel)
-                                .joinToString(" · ")
-                                .ifBlank { stringResource(R.string.component_compatibility_unknown) }
-                        com.tcrrry.helper.domain.session.ComponentCompatibility.SUPPORTED ->
-                            listOfNotNull(component.versionLabel, component.sizeLabel)
-                                .joinToString(" · ")
-                                .ifBlank { stringResource(R.string.unknown_value) }
-                    },
+                    text = listOfNotNull(component.versionLabel, component.sizeLabel)
+                        .joinToString(" · ")
+                        .ifBlank { stringResource(R.string.unknown_value) },
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (component.compatibilityState == com.tcrrry.helper.domain.session.ComponentCompatibility.UNSUPPORTED) {
-                        InstallerColors.Warning
-                    } else {
-                        InstallerColors.AuxiliaryWhite
-                    },
+                    color = InstallerColors.AuxiliaryWhite,
                 )
             }
             Checkbox(
                 checked = selected,
-                onCheckedChange = if (component.required || !supported) null else onToggle,
-                enabled = !component.required && supported,
+                onCheckedChange = if (mandatory || !supported) null else onToggle,
+                enabled = !mandatory && supported,
                 colors = CheckboxDefaults.colors(
                     checkedColor = InstallerColors.White,
                     uncheckedColor = InstallerColors.WhiteBorder,
@@ -495,6 +510,24 @@ private fun InstallingScreen(
                     )
                 }
             }
+            if (state.componentProgress.isNotEmpty()) {
+                item(key = "component-progress-title") {
+                    Text(
+                        text = stringResource(R.string.component_progress_title),
+                        style = MaterialTheme.typography.titleMedium,
+                        color = InstallerColors.White,
+                        modifier = Modifier.padding(top = InstallerDimensions.ContentSpacing),
+                    )
+                }
+                itemsIndexed(
+                    state.componentProgress,
+                    key = { _, item -> "component-${item.componentId}" },
+                ) { index, item ->
+                    AnimatedEntry(visible = true, index = phases.size + index) {
+                        ComponentProgressRow(item)
+                    }
+                }
+            }
         }
         Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
         PressableSurface(
@@ -511,6 +544,103 @@ private fun InstallingScreen(
         }
         Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
     }
+}
+
+@Composable
+private fun ComponentProgressRow(item: ComponentInstallProgressRow) {
+    val animatedProgress by animateFloatAsState(
+        targetValue = item.progress.fraction ?: 0f,
+        animationSpec = InstallerMotion.progress(),
+        label = "componentProgress",
+    )
+    PressableSurface(
+        onClick = {},
+        enabled = false,
+        minHeight = InstallerDimensions.ListItemMinHeight,
+        containerColor = if (item.status == ComponentProgressStatus.RUNNING) {
+            InstallerColors.WhiteSurface
+        } else {
+            Color.Transparent
+        },
+        borderColor = if (item.status == ComponentProgressStatus.RUNNING) {
+            InstallerColors.WhiteBorder
+        } else {
+            Color.Transparent
+        },
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            ComponentLogo(
+                iconKey = item.iconKey,
+                contentDescription = item.displayName,
+                modifier = Modifier.size(36.dp),
+            )
+            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = item.displayName,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = InstallerColors.White,
+                        modifier = Modifier.weight(1f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = stringResource(
+                            when (item.status) {
+                                ComponentProgressStatus.PENDING -> R.string.component_progress_waiting
+                                ComponentProgressStatus.RUNNING -> phaseLabel(item.phase)
+                                ComponentProgressStatus.COMPLETED -> R.string.component_progress_done
+                                ComponentProgressStatus.FAILED -> R.string.component_progress_failed
+                            },
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (item.status == ComponentProgressStatus.COMPLETED) {
+                            InstallerColors.Success
+                        } else {
+                            InstallerColors.AuxiliaryWhite
+                        },
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                when {
+                    item.status == ComponentProgressStatus.COMPLETED -> LinearProgressIndicator(
+                        progress = { 1f },
+                        color = InstallerColors.Success,
+                        trackColor = InstallerColors.WhiteBorder,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    item.progress.indeterminate -> LinearProgressIndicator(
+                        color = InstallerColors.White,
+                        trackColor = InstallerColors.WhiteBorder,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    else -> LinearProgressIndicator(
+                        progress = { animatedProgress },
+                        color = InstallerColors.White,
+                        trackColor = InstallerColors.WhiteBorder,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
+            }
+        }
+    }
+}
+
+private fun phaseLabel(phase: InstallPhase): Int = when (phase) {
+    InstallPhase.FETCH -> R.string.phase_fetch
+    InstallPhase.CHECK -> R.string.phase_check
+    InstallPhase.SEND -> R.string.phase_send
+    InstallPhase.CONFIGURE -> R.string.phase_configure
+    InstallPhase.VERIFY -> R.string.phase_verify
 }
 
 @Composable
@@ -616,7 +746,7 @@ private fun ResultScreen(
         if (state.componentResults.isNotEmpty()) {
             state.componentResults.forEachIndexed { index, result ->
                 AnimatedEntry(visible = true, index = index) {
-                    ResultRow(result.componentName, result.installed, result.configured, result.available)
+                    ResultRow(result.componentName, result.installed, result.configured, result.available, result.errorReason)
                 }
             }
         }
@@ -636,7 +766,13 @@ private data class ResultCopy(
 )
 
 @Composable
-private fun ResultRow(componentName: String, installed: Boolean, configured: Boolean, available: Boolean) {
+private fun ResultRow(
+    componentName: String,
+    installed: Boolean,
+    configured: Boolean,
+    available: Boolean,
+    errorReason: String?,
+) {
     PressableSurface(onClick = {}, enabled = false, containerColor = InstallerColors.WhiteSurface) {
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -650,6 +786,9 @@ private fun ResultRow(componentName: String, installed: Boolean, configured: Boo
                     style = MaterialTheme.typography.bodySmall,
                     color = InstallerColors.AuxiliaryWhite,
                 )
+                errorReason?.let { reason ->
+                    Text(text = reason, style = MaterialTheme.typography.bodySmall, color = InstallerColors.Warning)
+                }
             }
             StatusIcon(
                 name = if (installed && configured && available) "circle_check" else "circle_alert",

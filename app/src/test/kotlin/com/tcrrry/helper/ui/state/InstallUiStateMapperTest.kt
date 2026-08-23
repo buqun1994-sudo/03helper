@@ -69,7 +69,19 @@ class InstallUiStateMapperTest {
         val blocked = InstallUiStateMapper.map(
             selectionSnapshot(
                 components = ready.components.map {
-                    ComponentDescriptor(it.id, it.displayName, it.required, it.versionLabel, it.sizeLabel, it.compatibilityLabel)
+                    ComponentDescriptor(
+                        it.id,
+                        it.displayName,
+                        it.required,
+                        it.versionLabel,
+                        it.sizeLabel,
+                        it.compatibilityLabel,
+                        status = if (it.id == "files") {
+                            com.tcrrry.helper.domain.session.ComponentStatus.DIRECTORY_MISSING
+                        } else {
+                            com.tcrrry.helper.domain.session.ComponentStatus.READING
+                        },
+                    )
                 },
                 selectedOptionalIds = setOf("files"),
             ),
@@ -130,6 +142,21 @@ class InstallUiStateMapperTest {
 
         assertTrue(state.components.isEmpty())
         assertFalse(state.canStart)
+        assertFalse(state.preparing)
+    }
+
+    @Test
+    fun `connected catalog load is shown as preparation instead of failure`() {
+        val state = InstallUiStateMapper.map(
+            InstallationSessionSnapshot(
+                state = InstallationSessionState.CONNECTED,
+                device = device,
+            ),
+        ) as InstallUiState.Selection
+
+        assertTrue(state.components.isEmpty())
+        assertTrue(state.preparing)
+        assertFalse(state.canStart)
     }
 
     @Test
@@ -160,7 +187,7 @@ class InstallUiStateMapperTest {
     }
 
     @Test
-    fun `selection start requires confirmed device and complete metadata`() {
+    fun `selection start requires confirmed device while lightweight metadata may be pending`() {
         val unconfirmed = InstallUiStateMapper.map(
             selectionSnapshot(
                 components = listOf(
@@ -179,7 +206,7 @@ class InstallUiStateMapperTest {
                 ).map { it.copy(versionLabel = null) },
             ),
         ) as InstallUiState.Selection
-        assertFalse(incomplete.canStart)
+        assertTrue(incomplete.canStart)
     }
 
     @Test

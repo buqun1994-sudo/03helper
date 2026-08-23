@@ -6,7 +6,7 @@ object ArtifactManifestValidator {
     const val MAX_ARCHIVE_SIZE_BYTES = 1L shl 30
     const val MAX_APK_SIZE_BYTES = 1L shl 30
 
-    private val componentIdPattern = Regex("^[a-z][a-z0-9-]{1,63}$")
+    private val componentIdPattern = Regex("^[a-z][a-z0-9-]{0,63}$")
     private val packageNamePattern = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$")
     private val sha256Pattern = Regex("^[0-9a-fA-F]{64}$")
 
@@ -14,6 +14,7 @@ object ArtifactManifestValidator {
         manifest.schemaVersion != SUPPORTED_SCHEMA_VERSION -> invalid("manifest_schema_unsupported")
         !componentIdPattern.matches(manifest.componentId) -> invalid("component_id_invalid")
         manifest.displayName.isBlank() -> invalid("component_display_name_missing")
+        manifest.description.toByteArray(Charsets.UTF_8).size > 512 -> invalid("component_description_invalid")
         manifest.version.isInvalid() -> invalid("component_version_invalid")
         manifest.apkVersion.isInvalid() -> invalid("apk_version_invalid")
         manifest.compatibility.isInvalid() -> invalid("compatibility_range_invalid")
@@ -56,14 +57,20 @@ object ArtifactManifestValidator {
     private fun isSimpleZipName(value: String): Boolean =
         value.isNotBlank() &&
             value.endsWith(".zip", ignoreCase = true) &&
-            value.none { it == '/' || it == '\\' || it == '\u0000' } &&
+            value.none {
+                it == '/' || it == '\\' || it == '\u0000' || it == ':' || it.isISOControl()
+            } &&
+            !value.startsWith('.') &&
             value != "." &&
             value != ".."
 
     private fun isSimpleApkName(value: String): Boolean =
         value.isNotBlank() &&
             value.endsWith(".apk", ignoreCase = true) &&
-            value.none { it == '/' || it == '\\' || it == '\u0000' } &&
+            value.none {
+                it == '/' || it == '\\' || it == '\u0000' || it == ':' || it.isISOControl()
+            } &&
+            !value.startsWith('.') &&
             value != "." &&
             value != ".."
 

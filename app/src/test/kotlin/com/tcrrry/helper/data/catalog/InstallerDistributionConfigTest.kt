@@ -3,6 +3,7 @@ package com.tcrrry.helper.data.catalog
 import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.Signature
+import java.nio.file.Files
 import java.time.Instant
 import java.util.Base64
 import kotlinx.coroutines.runBlocking
@@ -14,20 +15,16 @@ import org.junit.Test
 
 class InstallerDistributionConfigTest {
     @Test
-    fun `ECDSA verifies the exact payload bytes without reserialization`() = runBlocking {
+    fun `v3 verifies exact payload bytes and exposes dynamic apps`() = runBlocking {
         val keys = KeyPairGenerator.getInstance("EC").apply { initialize(256) }.generateKeyPair()
         val payloadBytes = payloadJsonWithWhitespace().toByteArray(Charsets.UTF_8)
-        val envelope = signedEnvelope(keys, "SHA256withECDSA", payloadBytes)
 
-        val result = adapter(envelope, keys).load()
-
+        val result = adapter(signedEnvelope(keys, "SHA256withECDSA", payloadBytes), keys).load()
         val config = (result as DistributionConfigLoadResult.Success).config
-        assertEquals(3, config.components.size)
-        assertEquals("com.tcrrry.desktop", config.components.first().packageName)
-        assertEquals("", config.previousVersionsUrl)
-        assertEquals("", config.previousVersionsPassword)
+
+        assertEquals(listOf("desktop", "lyrics", "notes"), config.apps.map { it.appId })
+        assertEquals(7L, config.catalogRevision)
         assertFalse(config.toString().contains("test-password"))
-        assertFalse(envelope.toString().contains(payloadBytes.decodeToString()))
     }
 
     @Test
@@ -41,18 +38,14 @@ class InstallerDistributionConfigTest {
         )
 
         val result = adapter(envelope, keys).load()
-
         assertEquals("distribution_config_signature_invalid", (result as DistributionConfigLoadResult.Failure).reasonCode)
     }
 
     @Test
-    fun `Ed25519 is accepted only with its trusted public key`() = runBlocking {
+    fun `Ed25519 is accepted with the trusted public key`() = runBlocking {
         val keys = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
         val payloadBytes = payloadJsonWithWhitespace().toByteArray(Charsets.UTF_8)
-        val envelope = signedEnvelope(keys, "Ed25519", payloadBytes)
-
-        val result = adapter(envelope, keys).load()
-
+        val result = adapter(signedEnvelope(keys, "Ed25519", payloadBytes), keys).load()
         assertTrue(result is DistributionConfigLoadResult.Success)
     }
 
@@ -65,180 +58,344 @@ class InstallerDistributionConfigTest {
             signatureAlgorithm = "SHA512withECDSA",
         )
 
-        val keyResult = adapter(unknownKey, keys).load()
-        val algorithmResult = adapter(unknownAlgorithm, keys).load()
-
-        assertEquals("distribution_config_signature_invalid", (keyResult as DistributionConfigLoadResult.Failure).reasonCode)
         assertEquals(
-            "distribution_config_signature_algorithm_invalid",
-            (algorithmResult as DistributionConfigLoadResult.Failure).reasonCode,
+            "distribution_config_signature_invalid",
+            (adapter(unknownKey, keys).load() as DistributionConfigLoadResult.Failure).reasonCode,
+        )
+        assertEquals(
+            "distribution_config_envelope_fields_missing",
+            (adapter(unknownAlgorithm, keys).load() as DistributionConfigLoadResult.Failure).reasonCode,
         )
     }
 
     @Test
-    fun `schema expiry and network identity overrides are rejected`() = runBlocking {
+    fun `expiry and identity fields are rejected`() = runBlocking {
         val keys = KeyPairGenerator.getInstance("EC").apply { initialize(256) }.generateKeyPair()
-        val validPayload = payloadJsonWithWhitespace()
-        val expiredPayload = validPayload.replace("2099-12-31T00:00:00Z", "2020-01-01T00:00:00Z")
-        val identityOverridePayload = validPayload.replace(
-            "{\"componentId\":\"desktop\",\"archiveFileName\":\"03desktop-debug.zip\",\"required\":true}",
-            "{\"componentId\":\"desktop\",\"archiveFileName\":\"03desktop-debug.zip\",\"required\":true,\"packageName\":\"com.attacker.app\"}",
+        val expired = payloadJsonWithWhitespace().replace("2099-12-31T00:00:00Z", "2020-01-01T00:00:00Z")
+        val identityOverride = payloadJsonWithWhitespace().replace(
+            "\"appId\":\"desktop\",\"archiveFileName\":\"03desktop-debug.zip\"",
+            "\"appId\":\"desktop\",\"archiveFileName\":\"03desktop-debug.zip\",\"packageName\":\"com.attacker.app\"",
         )
 
-        val expired = adapter(
-            signedEnvelope(keys, "SHA256withECDSA", expiredPayload.toByteArray(Charsets.UTF_8)),
-            keys,
-        ).load()
-        val identityOverride = adapter(
-            signedEnvelope(keys, "SHA256withECDSA", identityOverridePayload.toByteArray(Charsets.UTF_8)),
-            keys,
-        ).load()
-
-        assertEquals("distribution_config_expired", (expired as DistributionConfigLoadResult.Failure).reasonCode)
-        assertEquals("distribution_config_payload_invalid", (identityOverride as DistributionConfigLoadResult.Failure).reasonCode)
+        assertEquals(
+            "distribution_config_expired",
+            (adapter(signedEnvelope(keys, "SHA256withECDSA", expired.toByteArray()), keys).load()
+                as DistributionConfigLoadResult.Failure).reasonCode,
+        )
+        assertEquals(
+            "distribution_config_payload_invalid",
+            (adapter(signedEnvelope(keys, "SHA256withECDSA", identityOverride.toByteArray()), keys).load()
+                as DistributionConfigLoadResult.Failure).reasonCode,
+        )
     }
 
     @Test
-    fun `empty passwords and a protected previous folder are accepted`() = runBlocking {
+    fun `revision store rejects rollback`() = runBlocking {
         val keys = KeyPairGenerator.getInstance("EC").apply { initialize(256) }.generateKeyPair()
-        val payload = payloadJsonWithWhitespace()
-            .replace("\"folderPassword\": \"test-password\"", "\"folderPassword\": \"\"")
-            .replace(
-                "\"previousVersionsUrl\": \"\"",
-                "\"previousVersionsUrl\": \"https://wwatl.lanzouw.com/bprevious123\"",
-            )
-            .replace(
-                "\"previousVersionsPassword\": \"\"",
-                "\"previousVersionsPassword\": \"history-password\"",
-            )
+        val store = InMemoryCatalogRevisionStore()
+        val first = adapter(signedEnvelope(keys, "SHA256withECDSA", payloadJsonWithWhitespace().toByteArray()), keys, store).load()
+        assertTrue(first is DistributionConfigLoadResult.Success)
+        val older = payloadJsonWithWhitespace().replace(Regex("\\\"catalogRevision\\\"\\s*:\\s*7"), "\"catalogRevision\": 6")
+        assertEquals(
+            "distribution_config_rollback",
+            reason(
+                adapter(
+                    signedEnvelope(keys, "SHA256withECDSA", older.toByteArray()).copy(catalogRevision = 6L),
+                    keys,
+                    store,
+                ),
+            ),
+        )
+    }
 
-        val result = adapter(
-            signedEnvelope(keys, "SHA256withECDSA", payload.toByteArray(Charsets.UTF_8)),
-            keys,
-        ).load()
+    @Test
+    fun `v3 rejects duplicate ids unsafe archive names and invalid desktop policy`() = runBlocking {
+        val keys = KeyPairGenerator.getInstance("EC").apply { initialize(256) }.generateKeyPair()
 
+        assertEquals(
+            "distribution_config_app_duplicate",
+            failureReason(
+                keys,
+                payloadDocument(apps = defaultApps().toMutableList().apply {
+                    this[1] = this[1].copy(appId = "desktop")
+                }),
+            ),
+        )
+        assertEquals(
+            "distribution_config_archive_file_name_invalid",
+            failureReason(
+                keys,
+                payloadDocument(apps = defaultApps().toMutableList().apply {
+                    this[1] = this[1].copy(archiveFileName = "../lyrics.zip")
+                }),
+            ),
+        )
+        assertEquals(
+            "distribution_config_desktop_missing",
+            failureReason(
+                keys,
+                payloadDocument(apps = defaultApps().map { app ->
+                    if (app.appId == "desktop") app.copy(enabled = false) else app
+                }),
+            ),
+        )
+        assertEquals(
+            "distribution_config_desktop_missing",
+            failureReason(
+                keys,
+                payloadDocument(apps = defaultApps().map { app ->
+                    if (app.appId == "desktop") app.copy(installPolicy = "optional") else app
+                }),
+            ),
+        )
+    }
+
+    @Test
+    fun `debug profile rejects a production environment`() = runBlocking {
+        val keys = KeyPairGenerator.getInstance("EC").apply { initialize(256) }.generateKeyPair()
+
+        assertEquals(
+            "distribution_config_environment_invalid",
+            failureReason(keys, payloadDocument(environment = "production")),
+        )
+    }
+
+    @Test
+    fun `desktop capability is fatal but optional capability is isolated`() = runBlocking {
+        val keys = KeyPairGenerator.getInstance("EC").apply { initialize(256) }.generateKeyPair()
+        assertEquals(
+            "distribution_config_desktop_client_schema_unsupported",
+            failureReason(
+                keys,
+                payloadDocument(apps = defaultApps().map { app ->
+                    if (app.appId == "desktop") app.copy(minClientSchemaVersion = 4) else app
+                }),
+            ),
+        )
+
+        val optionalUnsupported = defaultApps().map { app ->
+            if (app.appId == "lyrics") app.copy(minClientSchemaVersion = 4) else app
+        }
+        val result = loadDocument(keys, payloadDocument(apps = optionalUnsupported))
         val config = (result as DistributionConfigLoadResult.Success).config
-        assertEquals("", config.folderPassword)
-        assertEquals("https://wwatl.lanzouw.com/bprevious123", config.previousVersionsUrl)
-        assertEquals("history-password", config.previousVersionsPassword)
+        assertFalse(config.apps.single { it.appId == "lyrics" }.clientSupported)
+        assertTrue(config.apps.single { it.appId == "desktop" }.clientSupported)
     }
 
     @Test
-    fun `previous password without a URL is rejected`() = runBlocking {
+    fun `v3 rejects duplicate typed setup and an inverted time window`() = runBlocking {
         val keys = KeyPairGenerator.getInstance("EC").apply { initialize(256) }.generateKeyPair()
-        val payload = payloadJsonWithWhitespace().replace(
-            "\"previousVersionsPassword\": \"\"",
-            "\"previousVersionsPassword\": \"orphaned-password\"",
-        )
-
-        val result = adapter(
-            signedEnvelope(keys, "SHA256withECDSA", payload.toByteArray(Charsets.UTF_8)),
-            keys,
-        ).load()
-
-        assertEquals(
-            "distribution_config_previous_password_without_url",
-            (result as DistributionConfigLoadResult.Failure).reasonCode,
-        )
-    }
-
-    @Test
-    fun `previous URL query and non-folder path are rejected`() = runBlocking {
-        val keys = KeyPairGenerator.getInstance("EC").apply { initialize(256) }.generateKeyPair()
-        val queryPayload = payloadJsonWithWhitespace().replace(
-            "\"previousVersionsUrl\": \"\"",
-            "\"previousVersionsUrl\": \"https://wwatl.lanzouw.com/bprevious123?x=1\"",
-        )
-        val filePayload = payloadJsonWithWhitespace().replace(
-            "\"previousVersionsUrl\": \"\"",
-            "\"previousVersionsUrl\": \"https://wwatl.lanzouw.com/i123\"",
-        )
-
-        val queryResult = adapter(
-            signedEnvelope(keys, "SHA256withECDSA", queryPayload.toByteArray(Charsets.UTF_8)),
-            keys,
-        ).load()
-        val fileResult = adapter(
-            signedEnvelope(keys, "SHA256withECDSA", filePayload.toByteArray(Charsets.UTF_8)),
-            keys,
-        ).load()
-
-        assertEquals(
-            "distribution_config_previous_url_invalid",
-            (queryResult as DistributionConfigLoadResult.Failure).reasonCode,
+        val duplicateSetup = InstallerDeviceSetupDocument(
+            appOps = listOf("SYSTEM_ALERT_WINDOW", "SYSTEM_ALERT_WINDOW"),
         )
         assertEquals(
-            "distribution_config_previous_url_invalid",
-            (fileResult as DistributionConfigLoadResult.Failure).reasonCode,
+            "distribution_config_device_setup_duplicate",
+            failureReason(
+                keys,
+                payloadDocument(apps = defaultApps().map { app ->
+                    if (app.appId == "notes") app.copy(deviceSetup = duplicateSetup) else app
+                }),
+            ),
+        )
+        assertEquals(
+            "distribution_config_time_window_invalid",
+            failureReason(
+                keys,
+                payloadDocument(
+                    issuedAtUtc = "2026-08-22T00:04:00Z",
+                    expiresAt = "2026-08-22T00:03:00Z",
+                ),
+            ),
         )
     }
 
     @Test
-    fun `payload without the historical fields is rejected as an incomplete V2 document`() = runBlocking {
+    fun `same revision with a different catalog version is rejected`() = runBlocking {
         val keys = KeyPairGenerator.getInstance("EC").apply { initialize(256) }.generateKeyPair()
-        val legacyPayload = payloadJsonWithWhitespace()
-            .replace("\"previousVersionsUrl\": \"\",", "")
-            .replace("\"previousVersionsPassword\": \"\",", "")
-
-        val result = adapter(
-            signedEnvelope(keys, "SHA256withECDSA", legacyPayload.toByteArray(Charsets.UTF_8)),
-            keys,
-        ).load()
-
-        assertEquals("distribution_config_payload_invalid", (result as DistributionConfigLoadResult.Failure).reasonCode)
+        val store = InMemoryCatalogRevisionStore()
+        assertTrue(loadDocument(keys, payloadDocument(catalogVersion = "catalog-a"), store) is DistributionConfigLoadResult.Success)
+        assertEquals(
+            "distribution_config_revision_store_failed",
+            failureReason(
+                keys,
+                payloadDocument(catalogVersion = "catalog-b"),
+                store,
+            ),
+        )
     }
+
+    @Test
+    fun `file revision store survives recreation and rejects an older snapshot`() = runBlocking {
+        val keys = KeyPairGenerator.getInstance("EC").apply { initialize(256) }.generateKeyPair()
+        val root = Files.createTempDirectory("catalog-revision-store").toFile()
+        try {
+            val file = root.resolve("revisions.properties")
+            assertTrue(loadDocument(keys, payloadDocument(catalogRevision = 9L), FileCatalogRevisionStore(file)) is DistributionConfigLoadResult.Success)
+            val older = payloadDocument(catalogRevision = 8L)
+            assertEquals(
+                "distribution_config_rollback",
+                failureReason(keys, older, FileCatalogRevisionStore(file)),
+            )
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    private fun reason(adapter: CloudInstallerDistributionConfigAdapter): String =
+        (runBlocking { adapter.load() } as DistributionConfigLoadResult.Failure).reasonCode
 
     private fun adapter(
         envelope: SignedInstallerConfigEnvelope,
         trustedKeyPair: KeyPair,
+        revisionStore: CatalogRevisionStore = InMemoryCatalogRevisionStore(),
     ): CloudInstallerDistributionConfigAdapter {
         val body = CloudReleaseCatalogAdapter.STRICT_JSON.encodeToString(envelope).toByteArray(Charsets.UTF_8)
         return CloudInstallerDistributionConfigAdapter(
-            transport = ReleaseCatalogTransport {
-                CatalogHttpResponse(200, body, "application/json")
-            },
+            transport = ReleaseCatalogTransport { CatalogHttpResponse(200, body, "application/json") },
             signatureVerifier = JcaCatalogSignatureVerifier(
-                TrustedCatalogKeyResolver { keyId ->
-                    trustedKeyPair.public.encoded.takeIf { keyId == "test-key" }
-                },
+                TrustedCatalogKeyResolver { keyId -> trustedKeyPair.public.encoded.takeIf { keyId == "test-key" } },
             ),
             expectedChannel = "debug",
             now = { Instant.parse("2026-08-22T00:00:00Z") },
+            revisionStore = revisionStore,
         )
     }
 
-    private fun signedEnvelope(
+    private fun failureReason(
         keys: KeyPair,
-        algorithm: String,
+        document: InstallerDistributionConfigPayload,
+        revisionStore: CatalogRevisionStore = InMemoryCatalogRevisionStore(),
+    ): String = (loadDocument(keys, document, revisionStore) as DistributionConfigLoadResult.Failure).reasonCode
+
+    private fun loadDocument(
+        keys: KeyPair,
+        document: InstallerDistributionConfigPayload,
+        revisionStore: CatalogRevisionStore = InMemoryCatalogRevisionStore(),
+    ): DistributionConfigLoadResult = runBlocking {
+        val payload = CloudReleaseCatalogAdapter.STRICT_JSON.encodeToString(document).toByteArray(Charsets.UTF_8)
+        adapter(
+            signedEnvelopeForDocument(keys, payload, document.catalogVersion, document.catalogRevision),
+            keys,
+            revisionStore,
+        ).load()
+    }
+
+    private fun signedEnvelopeForDocument(
+        keys: KeyPair,
         payloadBytes: ByteArray,
+        catalogVersion: String,
+        catalogRevision: Long,
     ): SignedInstallerConfigEnvelope {
+        val signer = Signature.getInstance("SHA256withECDSA").apply {
+            initSign(keys.private)
+            update(payloadBytes)
+        }
+        return SignedInstallerConfigEnvelope(
+            schemaVersion = 3,
+            configVersion = catalogVersion,
+            keyId = "test-key",
+            signatureAlgorithm = "SHA256withECDSA",
+            payloadBase64 = Base64.getEncoder().encodeToString(payloadBytes),
+            signatureBase64 = Base64.getEncoder().encodeToString(signer.sign()),
+            catalogVersion = catalogVersion,
+            catalogRevision = catalogRevision,
+        )
+    }
+
+    private fun payloadDocument(
+        apps: List<InstallerAppSourceDocument> = defaultApps(),
+        environment: String = "staging",
+        issuedAtUtc: String = "2026-08-22T00:00:00Z",
+        expiresAt: String = "2099-12-31T00:00:00Z",
+        catalogVersion: String = "android-debug-test-007",
+        catalogRevision: Long = 7L,
+    ): InstallerDistributionConfigPayload = InstallerDistributionConfigPayload(
+        schemaVersion = 3,
+        environment = environment,
+        channel = "debug",
+        issuedAtUtc = issuedAtUtc,
+        expiresAt = expiresAt,
+        catalogVersion = catalogVersion,
+        catalogRevision = catalogRevision,
+        folderUrl = "https://wwatl.lanzouw.com/b0fqlrcyb",
+        folderPassword = "test-password",
+        previousVersionsUrl = "",
+        previousVersionsPassword = "",
+        apps = apps,
+    )
+
+    private fun defaultApps(): List<InstallerAppSourceDocument> = listOf(
+        InstallerAppSourceDocument(
+            appId = "desktop",
+            archiveFileName = "03desktop-debug.zip",
+            displayName = "03桌面",
+            description = "车机桌面",
+            enabled = true,
+            installPolicy = "required",
+            sortOrder = 10,
+            minClientSchemaVersion = 3,
+            trustProfileId = "nine-studio",
+            deviceSetup = InstallerDeviceSetupDocument(),
+        ),
+        InstallerAppSourceDocument(
+            appId = "lyrics",
+            archiveFileName = "03lyrics-debug.zip",
+            displayName = "03歌词",
+            description = "歌词",
+            enabled = true,
+            installPolicy = "optional",
+            sortOrder = 20,
+            minClientSchemaVersion = 3,
+            trustProfileId = "nine-studio",
+            deviceSetup = InstallerDeviceSetupDocument(),
+        ),
+        InstallerAppSourceDocument(
+            appId = "notes",
+            archiveFileName = "03notes-debug.zip",
+            displayName = "Notes",
+            description = "Notes",
+            enabled = true,
+            installPolicy = "optional",
+            sortOrder = 30,
+            minClientSchemaVersion = 3,
+            trustProfileId = "nine-studio",
+            deviceSetup = InstallerDeviceSetupDocument(),
+        ),
+    )
+
+    private fun signedEnvelope(keys: KeyPair, algorithm: String, payloadBytes: ByteArray): SignedInstallerConfigEnvelope {
         val signer = Signature.getInstance(algorithm).apply {
             initSign(keys.private)
             update(payloadBytes)
         }
         return SignedInstallerConfigEnvelope(
-            schemaVersion = 2,
-            configVersion = "android-debug-test-001",
+            schemaVersion = 3,
+            configVersion = "android-debug-test-007",
             keyId = "test-key",
             signatureAlgorithm = algorithm,
             payloadBase64 = Base64.getEncoder().encodeToString(payloadBytes),
             signatureBase64 = Base64.getEncoder().encodeToString(signer.sign()),
+            catalogRevision = 7L,
         )
     }
 
     private fun payloadJsonWithWhitespace(): String = """
         {
-          "schemaVersion": 2,
+          "schemaVersion": 3,
+          "environment": "staging",
           "channel": "debug",
+          "issuedAtUtc": "2026-08-22T00:00:00Z",
           "expiresAt": "2099-12-31T00:00:00Z",
+          "catalogVersion": "android-debug-test-007",
+          "catalogRevision": 7,
           "folderUrl": "https://wwatl.lanzouw.com/b0fqlrcyb",
           "folderPassword": "test-password",
           "previousVersionsUrl": "",
           "previousVersionsPassword": "",
-          "components": [
-            {"componentId":"desktop","archiveFileName":"03desktop-debug.zip","required":true},
-            {"componentId":"lyrics","archiveFileName":"03lyrics-debug.zip","required":false},
-            {"componentId":"file-manager","archiveFileName":"fossify-file-manager-car-debug.zip","required":false}
+          "apps": [
+            {"appId":"desktop","archiveFileName":"03desktop-debug.zip","displayName":"03桌面","description":"车机桌面","enabled":true,"installPolicy":"required","sortOrder":10,"minClientSchemaVersion":3,"trustProfileId":"nine-studio","deviceSetup":{"profileId":"","actionIds":[]}},
+            {"appId":"lyrics","archiveFileName":"03lyrics-debug.zip","displayName":"03歌词","description":"歌词","enabled":true,"installPolicy":"optional","sortOrder":20,"minClientSchemaVersion":3,"trustProfileId":"nine-studio","deviceSetup":{"profileId":"","actionIds":[]}},
+            {"appId":"notes","archiveFileName":"03notes-debug.zip","displayName":"Notes","description":"Notes","enabled":true,"installPolicy":"optional","sortOrder":30,"minClientSchemaVersion":3,"trustProfileId":"nine-studio","deviceSetup":{"profileId":"","actionIds":[]}}
           ]
         }
     """.trimIndent()

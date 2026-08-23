@@ -152,6 +152,7 @@ class InstallationSession(
                 },
                 currentComponentName = if (maintenanceReconnect) current.currentComponentName else null,
                 progress = if (maintenanceReconnect) current.progress else null,
+                componentProgress = if (maintenanceReconnect) current.componentProgress else emptyMap(),
                 failure = null,
                 checkpoint = null,
                 evidence = if (maintenanceReconnect) current.evidence else SessionEvidence(),
@@ -282,6 +283,7 @@ class InstallationSession(
                 selectedOptionalComponentIds = emptySet(),
                 currentComponentName = null,
                 progress = null,
+                componentProgress = emptyMap(),
                 failure = null,
                 checkpoint = null,
                 evidence = SessionEvidence(),
@@ -390,6 +392,7 @@ class InstallationSession(
                 selectedOptionalComponentIds = emptySet(),
                 currentComponentName = null,
                 progress = null,
+                componentProgress = emptyMap(),
                 failure = null,
                 checkpoint = null,
                 evidence = SessionEvidence(),
@@ -416,10 +419,13 @@ class InstallationSession(
                 reasonCode = "unknown_component",
             )
 
-            component.required -> {
-                // Required components are an invariant, not a UI-only checkbox rule.
+            isMandatory(component) -> {
+                // The desktop is the only core invariant. Other required entries
+                // are recommendations and remain user-selectable.
                 return
             }
+
+            !isSelectable(component) -> return
 
             command.selected -> publish(
                 current.copy(
@@ -458,6 +464,13 @@ class InstallationSession(
                 totalCount = selected.size,
                 indeterminate = true,
             ),
+            componentProgress = selected.associate { component ->
+                component.id to ComponentProgress(
+                    componentId = component.id,
+                    phase = InstallPhase.FETCH,
+                    status = ComponentProgressStatus.PENDING,
+                )
+            },
             failure = null,
             evidence = SessionEvidence(),
             componentResults = buildComponentResults(SessionEvidence(), current),
@@ -509,6 +522,12 @@ class InstallationSession(
 
     private fun resumeFromCheckpoint() {
         val current = _snapshot.value
+        if (current.state == InstallationSessionState.CONNECTED && current.failure != null) {
+            // Catalog retry has no installation checkpoint. Clear the stale
+            // preparation error so the UI can show the new load in progress.
+            publish(current.copy(failure = null))
+            return
+        }
         if (current.state != InstallationSessionState.PAUSED && current.state != InstallationSessionState.FAILED) {
             return
         }
@@ -533,6 +552,7 @@ class InstallationSession(
             selectedOptionalComponentIds = checkpoint.selectedOptionalComponentIds,
             currentComponentName = checkpoint.currentComponentName,
             progress = checkpoint.progress,
+            componentProgress = checkpoint.componentProgress,
             failure = null,
             evidence = checkpoint.evidence,
             componentResults = buildComponentResults(checkpoint.evidence, current),
@@ -721,6 +741,13 @@ class InstallationSession(
                 totalCount = selected.size,
                 indeterminate = true,
             ),
+            componentProgress = selected.associate { component ->
+                component.id to ComponentProgress(
+                    componentId = component.id,
+                    phase = InstallPhase.FETCH,
+                    status = ComponentProgressStatus.PENDING,
+                )
+            },
             failure = null,
             evidence = SessionEvidence(),
             componentResults = buildComponentResults(SessionEvidence(), candidate),
@@ -747,6 +774,7 @@ class InstallationSession(
             is InstallationSessionEvent.DeviceConnectionFailed -> handleDeviceConnectionFailed(event)
             is InstallationSessionEvent.CatalogResolved -> handleCatalogResolved(event)
             is InstallationSessionEvent.DistributionConfigResolved -> handleDistributionConfigResolved(event)
+            is InstallationSessionEvent.SelectedCatalogResolved -> handleSelectedCatalogResolved(event)
             is InstallationSessionEvent.CatalogFailed -> handleCatalogFailed(event.reasonCode)
 
             is InstallationSessionEvent.SourceResolved -> handleSourceResolved(event)
@@ -755,6 +783,8 @@ class InstallationSession(
             is InstallationSessionEvent.ArchiveVerified -> handleArchiveVerified(event)
             is InstallationSessionEvent.ApkExtracted -> handleApkExtracted(event)
             is InstallationSessionEvent.ArtifactsVerified -> handleArtifactsVerified(event)
+            is InstallationSessionEvent.ArtifactUnavailable -> handleArtifactUnavailable(event)
+            is InstallationSessionEvent.ComponentProgressUpdated -> handleComponentProgressUpdated(event)
             is InstallationSessionEvent.InstallationStarted -> handleInstallationStarted(event.componentIds)
             is InstallationSessionEvent.InstallationCompleted -> handleInstallationCompleted(event)
             is InstallationSessionEvent.AuthorizationCompleted -> handleAuthorizationCompleted(event)
@@ -980,14 +1010,23 @@ class InstallationSession(
         )
     }
 
-    private fun handleCatalogResolved(event: InstallationSessionEvent.CatalogResolved) {
+    private fun handleCatalogResolved(
+        event: InstallationSessionEvent.CatalogResolved,
+        allowSelectionConfirmed: Boolean = false,
+    ) {
         val current = _snapshot.value
-        if (current.state !in CATALOG_ACCEPTING_STATES) {
+        if (current.state !in CATALOG_ACCEPTING_STATES &&
+            !(allowSelectionConfirmed && current.state == InstallationSessionState.SELECTION_CONFIRMED)
+        ) {
             fail(FailureCategory.UNKNOWN, reasonCode = "catalog_event_out_of_order")
             return
         }
         if (event.catalogVersion.isBlank() || event.keyId.isBlank() || event.signatureAlgorithm.isBlank()) {
             fail(FailureCategory.VERIFICATION, retryable = false, reasonCode = "catalog_trust_evidence_missing")
+            return
+        }
+        if (event.catalogRevision < _snapshot.value.catalogRevision) {
+            fail(FailureCategory.VERIFICATION, retryable = false, reasonCode = "catalog_rollback")
             return
         }
         if (event.signatureAlgorithm !in SUPPORTED_CATALOG_SIGNATURE_ALGORITHMS) {
@@ -1012,31 +1051,97 @@ class InstallationSession(
                 is com.tcrrry.helper.domain.artifact.SourcePlan.Accepted -> Unit
             }
         }
-        val components = event.manifests.map { it.toComponentDescriptor(current.device?.androidSdk) }
-        val optionalIds = components.filterNot { it.required }.map { it.id }.toSet()
+        val manifestDescriptors = event.manifests.map { it.toComponentDescriptor(current.device?.androidSdk) }
+        val components = if (event.apps.isEmpty()) {
+            manifestDescriptors.map { descriptor ->
+                event.appFailures[descriptor.id]?.let { reason ->
+                    descriptor.copy(status = catalogFailureStatus(reason), errorReason = reason)
+                } ?: descriptor
+            }
+        } else {
+            event.apps.map { app ->
+                val manifest = manifestDescriptors.firstOrNull { it.id == app.id }
+                val failure = event.appFailures[app.id]
+                app.copy(
+                    versionLabel = manifest?.versionLabel ?: app.versionLabel,
+                    sizeLabel = manifest?.sizeLabel ?: app.sizeLabel,
+                    compatibilityLabel = manifest?.compatibilityLabel ?: app.compatibilityLabel,
+                    compatibilityState = manifest?.compatibilityState ?: app.compatibilityState,
+                    status = failure?.let(::catalogFailureStatus) ?: app.status,
+                    errorReason = failure ?: app.errorReason,
+                )
+            }
+        }
+        val componentIds = components.map { it.id }.toSet()
+        val manifestIds = event.manifests.map { it.componentId }.toSet()
+        if (
+            componentIds.size != components.size ||
+            components.none { it.id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID } ||
+            AuthorizationPlanFactory.DESKTOP_COMPONENT_ID !in manifestIds ||
+            event.manifests.any { it.componentId !in componentIds }
+        ) {
+            fail(FailureCategory.VERIFICATION, retryable = false, reasonCode = "catalog_desktop_unavailable")
+            return
+        }
+        val selectableIds = components.filter { component ->
+            !isMandatory(component) && component.id in manifestIds && isSelectable(component)
+        }.map { it.id }.toSet()
+        val recommendedIds = components.filter { component ->
+            !isMandatory(component) && component.required && component.id in selectableIds
+        }.map { it.id }.toSet()
+        val preservingSelection = allowSelectionConfirmed && current.state == InstallationSessionState.SELECTION_CONFIRMED
+        val nextSelectedIds = (current.selectedOptionalComponentIds intersect selectableIds) + recommendedIds
+        val next = current.copy(
+            components = components,
+            artifactManifests = event.manifests,
+            catalogVersion = event.catalogVersion,
+            catalogRevision = event.catalogRevision.coerceAtLeast(current.catalogRevision),
+            catalogKeyId = event.keyId,
+            catalogSignatureAlgorithm = event.signatureAlgorithm,
+            selectedOptionalComponentIds = nextSelectedIds,
+            currentComponentName = if (preservingSelection) {
+                components.firstOrNull { isMandatory(it) || it.id in nextSelectedIds }?.displayName
+            } else {
+                null
+            },
+            progress = if (preservingSelection) current.progress else null,
+            evidence = if (preservingSelection) current.evidence else SessionEvidence(),
+            componentResults = if (preservingSelection) current.componentResults else emptyList(),
+            checkpoint = if (preservingSelection) current.checkpoint else null,
+            selectedSources = if (preservingSelection) current.selectedSources else emptyMap(),
+            sourceFailures = if (preservingSelection) current.sourceFailures else emptyList(),
+            archiveDownloads = if (preservingSelection) current.archiveDownloads else emptyMap(),
+            archiveVerifications = if (preservingSelection) current.archiveVerifications else emptyMap(),
+            apkExtractions = if (preservingSelection) current.apkExtractions else emptyMap(),
+            failure = null,
+        )
         publish(
-            current.copy(
-                components = components,
-                artifactManifests = event.manifests,
-                catalogVersion = event.catalogVersion,
-                catalogKeyId = event.keyId,
-                catalogSignatureAlgorithm = event.signatureAlgorithm,
-                selectedOptionalComponentIds = current.selectedOptionalComponentIds.filterTo(mutableSetOf()) {
-                    it in optionalIds
-                },
-                currentComponentName = null,
-                progress = null,
-                evidence = SessionEvidence(),
-                componentResults = emptyList(),
-                checkpoint = null,
-                selectedSources = emptyMap(),
-                sourceFailures = emptyList(),
-                archiveDownloads = emptyMap(),
-                archiveVerifications = emptyMap(),
-                apkExtractions = emptyMap(),
-                failure = null,
-            ),
+            if (preservingSelection) {
+                next.copy(
+                    state = current.state,
+                    componentProgress = current.componentProgress.filterKeys { it in nextSelectedIds ||
+                        components.any { component -> isMandatory(component) && component.id == it }
+                    },
+                )
+            } else {
+                next.copy(componentProgress = emptyMap())
+            },
             acceptedEventSequence,
+        )
+    }
+
+    private fun handleSelectedCatalogResolved(event: InstallationSessionEvent.SelectedCatalogResolved) {
+        handleCatalogResolved(
+            InstallationSessionEvent.CatalogResolved(
+                catalogVersion = event.catalogVersion,
+                keyId = event.keyId,
+                signatureAlgorithm = event.signatureAlgorithm,
+                manifests = event.manifests,
+                catalogRevision = event.catalogRevision,
+                apps = event.apps,
+                appFailures = event.appFailures,
+            ),
+            allowSelectionConfirmed = true,
         )
     }
 
@@ -1072,35 +1177,34 @@ class InstallationSession(
             return
         }
         if (event.configVersion.isBlank() || event.keyId.isBlank() ||
-            event.signatureAlgorithm !in SUPPORTED_CATALOG_SIGNATURE_ALGORITHMS
+            event.signatureAlgorithm !in SUPPORTED_CATALOG_SIGNATURE_ALGORITHMS ||
+            event.catalogRevision < current.catalogRevision
         ) {
             fail(FailureCategory.VERIFICATION, retryable = false, reasonCode = "distribution_config_metadata_invalid")
             return
         }
-        val components = event.components
+        val components = event.components.filter { it.status != ComponentStatus.UNLISTED }
         val ids = components.map { it.id }
         if (
             ids.size != ids.toSet().size ||
-            ids.toSet() != MANAGED_COMPONENT_PACKAGES.keys ||
-            components.count { it.required } != 1 ||
-            components.none { it.id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID && it.required } ||
-            components.any { it.id != AuthorizationPlanFactory.DESKTOP_COMPONENT_ID && it.required } ||
-            components.any { it.displayName.isBlank() || it.versionLabel.isNullOrBlank() || it.sizeLabel.isNullOrBlank() }
+            components.none { it.id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID } ||
+            components.any { it.displayName.isBlank() }
         ) {
             fail(FailureCategory.VERIFICATION, retryable = false, reasonCode = "distribution_config_components_invalid")
             return
         }
-        val optionalIds = components.filterNot { it.required }.map { it.id }.toSet()
+        val selectableIds = components.filterNot(::isMandatory).map { it.id }.toSet()
+        val recommendedIds = components.filter { it.required && !isMandatory(it) }.map { it.id }.toSet()
         publish(
             current.copy(
                 components = components,
                 artifactManifests = emptyList(),
                 catalogVersion = event.configVersion,
+                catalogRevision = event.catalogRevision.coerceAtLeast(current.catalogRevision),
                 catalogKeyId = event.keyId,
                 catalogSignatureAlgorithm = event.signatureAlgorithm,
-                selectedOptionalComponentIds = current.selectedOptionalComponentIds.filterTo(mutableSetOf()) {
-                    it in optionalIds
-                },
+                selectedOptionalComponentIds =
+                    (current.selectedOptionalComponentIds intersect selectableIds) + recommendedIds,
                 currentComponentName = null,
                 progress = null,
                 evidence = SessionEvidence(),
@@ -1146,6 +1250,10 @@ class InstallationSession(
                 ),
                 acceptedEventSequence,
             )
+            val component = current.components.firstOrNull { it.id == event.componentId }
+            if (component != null && !isMandatory(component)) {
+                return
+            }
             fail(
                 category = FailureCategory.DOWNLOAD,
                 componentName = componentName(current, event.componentId),
@@ -1157,6 +1265,92 @@ class InstallationSession(
         publish(
             current.copy(
                 sourceFailures = (current.sourceFailures + failureRecord).takeLast(MAX_SOURCE_FAILURE_RECORDS),
+            ),
+            acceptedEventSequence,
+        )
+    }
+
+    private fun handleArtifactUnavailable(event: InstallationSessionEvent.ArtifactUnavailable) {
+        val current = _snapshot.value
+        if (current.state !in F2_PIPELINE_STATES && current.state != InstallationSessionState.VERIFYING_ARTIFACTS) {
+            return
+        }
+        val component = current.components.firstOrNull { it.id == event.componentId } ?: return
+        if (isMandatory(component)) {
+            fail(FailureCategory.DOWNLOAD, componentName = component.displayName, reasonCode = event.reasonCode)
+            return
+        }
+        val status = when {
+            event.reasonCode.contains("certificate") -> ComponentStatus.APK_SIGNATURE_MISMATCH
+            event.reasonCode.contains("archive") || event.reasonCode.contains("zip") -> ComponentStatus.ZIP_VALIDATION_FAILED
+            event.reasonCode.contains("missing") -> ComponentStatus.DIRECTORY_MISSING
+            else -> ComponentStatus.TEMPORARILY_UNAVAILABLE
+        }
+        publish(
+            current.copy(
+                selectedOptionalComponentIds = current.selectedOptionalComponentIds - event.componentId,
+                components = current.components.map { item ->
+                    if (item.id == event.componentId) item.copy(status = status, errorReason = event.reasonCode) else item
+                },
+                sourceFailures = (current.sourceFailures + SourceFailureRecord(
+                    componentId = event.componentId,
+                    sourceKind = event.sourceKind ?: ArtifactSourceKind.LANZOU_SHARE,
+                    reasonCode = event.reasonCode,
+                    retryable = false,
+                )).takeLast(MAX_SOURCE_FAILURE_RECORDS),
+            ),
+            acceptedEventSequence,
+        )
+    }
+
+    private fun handleComponentProgressUpdated(event: InstallationSessionEvent.ComponentProgressUpdated) {
+        val current = _snapshot.value
+        if (current.state !in ACTIVE_INSTALL_STATES) {
+            return
+        }
+        if (event.componentId !in selectedComponentIds(current)) {
+            return
+        }
+        val total = event.totalBytes.coerceAtLeast(0L)
+        val written = event.bytesWritten.coerceIn(0L, total.takeIf { it > 0L } ?: Long.MAX_VALUE)
+        val fraction = event.fraction?.takeIf { it.isFinite() }?.coerceIn(0f, 1f)
+            ?: total.takeIf { it > 0L }?.let { written.toFloat() / it.toFloat() }
+        val status = event.status
+        val updated = ComponentProgress(
+            componentId = event.componentId,
+            phase = event.phase,
+            status = status,
+            bytesWritten = written,
+            totalBytes = total,
+            fraction = if (status == ComponentProgressStatus.COMPLETED) 1f else fraction,
+            indeterminate = status == ComponentProgressStatus.RUNNING &&
+                event.indeterminate && fraction == null,
+        )
+        val progressByComponent = current.componentProgress + (event.componentId to updated)
+        val selectedIds = selectedComponentIds(current)
+        val completedCount = progressByComponent.values.count {
+            it.componentId in selectedIds && it.status == ComponentProgressStatus.COMPLETED
+        }
+        val running = progressByComponent.values.firstOrNull {
+            it.componentId in selectedIds && it.status == ComponentProgressStatus.RUNNING
+        }
+        val aggregateFraction = if (selectedIds.isEmpty()) {
+            null
+        } else {
+            val completed = completedCount.toFloat()
+            val activeFraction = running?.fraction ?: 0f
+            ((completed + activeFraction) / selectedIds.size.toFloat()).coerceIn(0f, 1f)
+        }
+        publish(
+            current.copy(
+                componentProgress = progressByComponent,
+                currentComponentName = componentName(current, event.componentId),
+                progress = current.progress?.copy(
+                    completedCount = completedCount,
+                    totalCount = selectedIds.size,
+                    fraction = aggregateFraction,
+                    indeterminate = running?.indeterminate ?: false,
+                ),
             ),
             acceptedEventSequence,
         )
@@ -1182,6 +1376,7 @@ class InstallationSession(
             } else {
                 selections.associate { it.componentId to it.sourceKind }
             },
+            componentProgress = markComponents(current, InstallPhase.FETCH, ComponentProgressStatus.RUNNING),
         )
     }
 
@@ -1201,6 +1396,7 @@ class InstallationSession(
             state = InstallationSessionState.VERIFYING_ARCHIVE,
             progress = progress(0.25f, indeterminate = true),
             archiveDownloads = if (archives.isEmpty()) current.archiveDownloads else archives.associateBy { it.componentId },
+            componentProgress = markComponents(current, InstallPhase.CHECK, ComponentProgressStatus.RUNNING),
         )
     }
 
@@ -1224,6 +1420,7 @@ class InstallationSession(
             } else {
                 verifications.associateBy { it.componentId }
             },
+            componentProgress = markComponents(current, InstallPhase.CHECK, ComponentProgressStatus.RUNNING),
         )
     }
 
@@ -1243,6 +1440,7 @@ class InstallationSession(
             state = InstallationSessionState.VERIFYING_ARTIFACTS,
             progress = progress(0.55f, indeterminate = true),
             apkExtractions = if (extractions.isEmpty()) current.apkExtractions else extractions.associateBy { it.componentId },
+            componentProgress = markComponents(current, InstallPhase.CHECK, ComponentProgressStatus.RUNNING),
         )
     }
 
@@ -1272,6 +1470,7 @@ class InstallationSession(
             evidence = evidence,
             componentResults = buildComponentResults(evidence, current),
             progress = progress(0.6f, indeterminate = false),
+            componentProgress = markComponents(current, InstallPhase.CHECK, ComponentProgressStatus.COMPLETED),
         )
     }
 
@@ -1291,6 +1490,7 @@ class InstallationSession(
         transition(
             state = InstallationSessionState.INSTALLING,
             progress = progress(0.65f, indeterminate = true),
+            componentProgress = markComponents(current, InstallPhase.SEND, ComponentProgressStatus.RUNNING),
         )
     }
 
@@ -1504,7 +1704,7 @@ class InstallationSession(
             !value.contains('\u0000')
 
     private fun selectedComponentIds(snapshot: InstallationSessionSnapshot): Set<String> =
-        snapshot.components.filter { it.required || it.id in snapshot.selectedOptionalComponentIds }
+        snapshot.components.filter { isMandatory(it) || it.id in snapshot.selectedOptionalComponentIds }
             .map { it.id }
             .toSet()
 
@@ -1532,6 +1732,8 @@ class InstallationSession(
             evidence = evidence,
             componentResults = buildComponentResults(evidence, current),
             progress = progress(0.78f, indeterminate = true),
+            componentProgress = markComponents(current, InstallPhase.SEND, ComponentProgressStatus.COMPLETED)
+                .markPhase(InstallPhase.CONFIGURE, ComponentProgressStatus.RUNNING),
         )
     }
 
@@ -1573,6 +1775,8 @@ class InstallationSession(
             evidence = evidence,
             componentResults = buildComponentResults(evidence, current),
             progress = progress(0.9f, indeterminate = true),
+            componentProgress = markComponents(current, InstallPhase.CONFIGURE, ComponentProgressStatus.COMPLETED)
+                .markPhase(InstallPhase.VERIFY, ComponentProgressStatus.RUNNING),
         )
     }
 
@@ -1603,6 +1807,7 @@ class InstallationSession(
             componentResults = results,
             progress = progress(1.0f, indeterminate = false, completedCount = selectedComponents(current).size),
             checkpoint = null,
+            componentProgress = markComponents(current, InstallPhase.VERIFY, ComponentProgressStatus.COMPLETED),
         )
     }
 
@@ -1722,11 +1927,29 @@ class InstallationSession(
         event: InstallationSessionEvent.MaintenanceApplicationsResolved,
     ) {
         val current = _snapshot.value
+        val expectedPackages = buildMap {
+            current.artifactManifests.forEach { put(it.componentId, it.packageName) }
+            current.maintenance.availableManifests.forEach { put(it.componentId, it.packageName) }
+            current.maintenance.managedApplications.forEach { put(it.componentId, it.packageName) }
+            if (isEmpty()) {
+                current.components.forEach { descriptor ->
+                    when (descriptor.id) {
+                        AuthorizationPlanFactory.DESKTOP_COMPONENT_ID ->
+                            put(descriptor.id, AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME)
+                        AuthorizationPlanFactory.LYRICS_COMPONENT_ID ->
+                            put(descriptor.id, AuthorizationPlanFactory.LYRICS_PACKAGE_NAME)
+                        AuthorizationPlanFactory.FILE_MANAGER_COMPONENT_ID ->
+                            put(descriptor.id, AuthorizationPlanFactory.FILE_MANAGER_PACKAGE_NAME)
+                    }
+                }
+            }
+        }
         if (current.state != InstallationSessionState.MAINTENANCE ||
             current.maintenance.activeAction != MaintenanceActionId.MANAGE_APPS ||
             event.applications.any { application ->
-                val expectedPackage = MANAGED_COMPONENT_PACKAGES[application.componentId]
-                expectedPackage == null || application.packageName != expectedPackage
+                val expectedPackage = expectedPackages[application.componentId]
+                application.componentId !in expectedPackages ||
+                    (expectedPackage != null && application.packageName != expectedPackage)
             }
         ) {
             if (
@@ -1739,7 +1962,7 @@ class InstallationSession(
         }
         if (
             event.applications.map { it.componentId }.toSet().size != event.applications.size ||
-            event.applications.map { it.componentId }.toSet() != MANAGED_COMPONENT_PACKAGES.keys
+            event.applications.map { it.componentId }.toSet() != expectedPackages.keys
         ) {
             failMaintenanceAction("maintenance_applications_incomplete", retryable = false)
             return
@@ -1767,6 +1990,20 @@ class InstallationSession(
             failMaintenanceAction("maintenance_catalog_metadata_invalid", retryable = false)
             return
         }
+        val revisionFloor = maxOf(
+            current.catalogRevision,
+            current.maintenance.availableCatalogRevision,
+        )
+        if (event.catalogRevision < revisionFloor ||
+            (event.catalogRevision > 0L && event.catalogRevision == current.catalogRevision &&
+                current.catalogVersion != null && current.catalogVersion != event.catalogVersion) ||
+            (event.catalogRevision > 0L && event.catalogRevision == current.maintenance.availableCatalogRevision &&
+                current.maintenance.availableCatalogVersion != null &&
+                current.maintenance.availableCatalogVersion != event.catalogVersion)
+        ) {
+            failMaintenanceAction("maintenance_catalog_rollback", retryable = false)
+            return
+        }
         when (val validation = ArtifactManifestValidator.validateCatalog(event.manifests)) {
             is ManifestValidation.Invalid -> {
                 failMaintenanceAction(validation.reasonCode, retryable = false)
@@ -1778,34 +2015,101 @@ class InstallationSession(
             failMaintenanceAction("maintenance_catalog_source_invalid", retryable = false)
             return
         }
-        val androidSdk = current.device?.androidSdk
-        if (
-            androidSdk != null && event.manifests.any { manifest ->
-                androidSdk < manifest.compatibility.minAndroidSdk ||
-                    manifest.compatibility.maxAndroidSdk?.let { androidSdk > it } == true
+        val manifestDescriptors = event.manifests.map { manifest ->
+            val descriptor = manifest.toComponentDescriptor(current.device?.androidSdk)
+            when {
+                descriptor.compatibilityState == ComponentCompatibility.UNSUPPORTED ->
+                    descriptor.copy(status = ComponentStatus.CLIENT_CAPABILITY_INSUFFICIENT, errorReason = "component_incompatible")
+                current.artifactManifests.none { it.componentId == manifest.componentId } ->
+                    descriptor.copy(status = ComponentStatus.NEW)
+                current.artifactManifests.firstOrNull { it.componentId == manifest.componentId }?.let { old ->
+                    old.version != manifest.version ||
+                        !old.apkSha256.equals(manifest.apkSha256, ignoreCase = true)
+                } == true -> descriptor.copy(status = ComponentStatus.UPDATE_AVAILABLE)
+                else -> descriptor
             }
+        }
+        val components = if (event.apps.isEmpty()) {
+            manifestDescriptors
+        } else {
+            val manifestsById = manifestDescriptors.associateBy { it.id }
+            event.apps.map { app ->
+                manifestsById[app.id]?.let { manifest ->
+                    app.copy(
+                        versionLabel = manifest.versionLabel,
+                        sizeLabel = manifest.sizeLabel,
+                        compatibilityLabel = manifest.compatibilityLabel,
+                        compatibilityState = manifest.compatibilityState,
+                        status = manifest.status,
+                        errorReason = manifest.errorReason ?: app.errorReason,
+                    )
+                } ?: app.copy(
+                    status = event.appFailures[app.id]?.let(::catalogFailureStatus)
+                        ?: app.status,
+                    errorReason = event.appFailures[app.id] ?: app.errorReason,
+                )
+            }
+        }
+        val componentIds = components.map { it.id }.toSet()
+        if (componentIds.size != components.size ||
+            components.none { it.id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID } ||
+            event.manifests.any { it.componentId !in componentIds }
         ) {
-            failMaintenanceAction("component_incompatible", retryable = false)
+            failMaintenanceAction("maintenance_catalog_components_invalid", retryable = false)
             return
         }
-        val components = event.manifests.map { it.toComponentDescriptor(current.device?.androidSdk) }
-        val optionalIds = components.filterNot { it.required }.map { it.id }.toSet()
-        val currentIds = current.artifactManifests.map { it.componentId }.toSet()
+        val selectableIds = components.filterNot(::isMandatory)
+            .filter { isSelectable(it) }
+            .map { it.id }.toSet()
+        val availableIds = components.map { it.id }.toSet()
+        val installedIds = current.evidence.installed + current.maintenance.managedApplications
+            .filter { it.installed }
+            .map { it.componentId }
+        val retainedCurrentManifests = current.artifactManifests.filter {
+            it.componentId in availableIds || it.componentId in installedIds
+        }
+        val currentIds = retainedCurrentManifests.map { it.componentId }.toSet()
+        val retainedUnlistedIds = current.components
+            .filter { it.id !in availableIds && it.id in installedIds }
+            .map { it.id }
+            .toSet()
+        val unlisted = buildList {
+            current.components
+                .filter { it.id !in availableIds && it.id in installedIds }
+                .forEach { add(it.copy(status = ComponentStatus.UNLISTED, errorReason = "unlisted")) }
+            current.maintenance.managedApplications
+                .filter { it.installed && it.componentId !in availableIds && it.componentId !in retainedUnlistedIds }
+                .sortedBy { it.componentId }
+                .forEach { application ->
+                    add(
+                        ComponentDescriptor(
+                            id = application.componentId,
+                            displayName = application.componentId,
+                            required = false,
+                            status = ComponentStatus.UNLISTED,
+                            errorReason = "unlisted",
+                        ),
+                    )
+                }
+        }.distinctBy { it.id }
+        val mergedComponents = components + unlisted
         publish(
             current.copy(
                 maintenance = current.maintenance.copy(
                     availableManifests = event.manifests,
                     availableCatalogVersion = event.catalogVersion,
+                    availableCatalogRevision = event.catalogRevision,
                     availableCatalogKeyId = event.keyId,
                     availableCatalogSignatureAlgorithm = event.signatureAlgorithm,
                 ),
-                components = if (currentIds.isEmpty()) components else current.components,
-                artifactManifests = if (currentIds.isEmpty()) event.manifests else current.artifactManifests,
+                components = mergedComponents,
+                artifactManifests = if (currentIds.isEmpty()) event.manifests else retainedCurrentManifests,
                 catalogVersion = if (currentIds.isEmpty()) event.catalogVersion else current.catalogVersion,
+                catalogRevision = if (currentIds.isEmpty()) event.catalogRevision else current.catalogRevision,
                 catalogKeyId = if (currentIds.isEmpty()) event.keyId else current.catalogKeyId,
                 catalogSignatureAlgorithm = if (currentIds.isEmpty()) event.signatureAlgorithm else current.catalogSignatureAlgorithm,
                 selectedOptionalComponentIds = current.selectedOptionalComponentIds.filterTo(mutableSetOf()) {
-                    it in optionalIds
+                    it in selectableIds
                 },
             ),
             acceptedEventSequence,
@@ -1913,6 +2217,7 @@ class InstallationSession(
     private fun transition(
         state: InstallationSessionState,
         progress: SessionProgress? = _snapshot.value.progress,
+        componentProgress: Map<String, ComponentProgress> = _snapshot.value.componentProgress,
         evidence: SessionEvidence = _snapshot.value.evidence,
         componentResults: List<ComponentResult> = _snapshot.value.componentResults,
         checkpoint: SessionCheckpoint? = _snapshot.value.checkpoint,
@@ -1925,6 +2230,7 @@ class InstallationSession(
         val next = current.copy(
             state = state,
             progress = progress,
+            componentProgress = componentProgress,
             evidence = evidence,
             componentResults = componentResults,
             checkpoint = checkpoint,
@@ -1947,6 +2253,40 @@ class InstallationSession(
         fraction = fraction.coerceIn(0f, 1f),
         indeterminate = indeterminate,
     )
+
+    private fun markComponents(
+        snapshot: InstallationSessionSnapshot,
+        phase: InstallPhase,
+        status: ComponentProgressStatus,
+    ): Map<String, ComponentProgress> = selectedComponents(snapshot).associate { component ->
+        val previous = snapshot.componentProgress[component.id]
+        component.id to ComponentProgress(
+            componentId = component.id,
+            phase = phase,
+            status = status,
+            bytesWritten = if (status == ComponentProgressStatus.COMPLETED) {
+                previous?.totalBytes ?: 0L
+            } else {
+                previous?.bytesWritten ?: 0L
+            },
+            totalBytes = previous?.totalBytes ?: 0L,
+            fraction = if (status == ComponentProgressStatus.COMPLETED) 1f else previous?.fraction,
+            indeterminate = status == ComponentProgressStatus.RUNNING && previous?.fraction == null,
+        )
+    }
+
+    private fun Map<String, ComponentProgress>.markPhase(
+        phase: InstallPhase,
+        status: ComponentProgressStatus,
+    ): Map<String, ComponentProgress> = mapValues { (componentId, previous) ->
+        previous.copy(
+            componentId = componentId,
+            phase = phase,
+            status = status,
+            fraction = if (status == ComponentProgressStatus.COMPLETED) 1f else null,
+            indeterminate = status == ComponentProgressStatus.RUNNING,
+        )
+    }
 
     private fun pause(
         category: FailureCategory,
@@ -2007,7 +2347,9 @@ class InstallationSession(
                 is ManifestValidation.Invalid -> return validation.reasonCode
                 ManifestValidation.Valid -> Unit
             }
-            if (snapshot.artifactManifests.map { it.componentId }.toSet() != components.map { it.id }.toSet()) {
+            val manifestIds = snapshot.artifactManifests.map { it.componentId }.toSet()
+            val componentIds = components.map { it.id }.toSet()
+            if (!manifestIds.all { it in componentIds }) {
                 return "catalog_component_mapping_invalid"
             }
             val device = snapshot.device ?: return "device_not_confirmed"
@@ -2020,6 +2362,7 @@ class InstallationSession(
                 return "device_capability_missing"
             }
             val selectedIds = selectedComponents(snapshot).map { it.id }.toSet()
+            if (!selectedIds.all { it in manifestIds }) return "component_unavailable"
             val incompatible = snapshot.artifactManifests.any { manifest ->
                 manifest.componentId in selectedIds &&
                     (androidSdk < manifest.compatibility.minAndroidSdk ||
@@ -2030,17 +2373,22 @@ class InstallationSession(
         if (components.any { it.id.isBlank() || it.displayName.isBlank() }) return "component_identity_missing"
         if (components.map { it.id }.toSet().size != components.size) return "component_identity_duplicate"
 
-        val desktop = components.firstOrNull { it.id == "desktop" }
+        val desktop = components.firstOrNull { it.id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID }
         if (desktop == null) return "required_components_missing"
         if (!desktop.required) return "required_component_unlocked"
-        if (components.any { it.id != "desktop" && it.required }) return "optional_component_locked"
+        // Cloud controls installPolicy; multiple required apps are valid. The
+        // desktop entry remains the only mandatory core invariant.
 
-        val optionalIds = components.filterNot { it.required }.map { it.id }.toSet()
-        if (!snapshot.selectedOptionalComponentIds.all { it in optionalIds }) return "unknown_component"
+        val selectableIds = components.filterNot(::isMandatory).map { it.id }.toSet()
+        if (!snapshot.selectedOptionalComponentIds.all { it in selectableIds }) return "unknown_component"
 
         val selected = selectedComponents(snapshot)
         if (selected.isEmpty()) return "required_components_missing"
-        if (selected.any { component ->
+        if (snapshot.artifactManifests.isEmpty()) {
+            if (selected.any { component -> !isSelectable(component) }) {
+                return "component_unavailable"
+            }
+        } else if (selected.any { component ->
                 component.versionLabel.isNullOrBlank() ||
                     component.sizeLabel.isNullOrBlank() ||
                     component.compatibilityLabel.isNullOrBlank()
@@ -2066,12 +2414,42 @@ class InstallationSession(
     }
 
     private fun selectedComponents(snapshot: InstallationSessionSnapshot): List<ComponentDescriptor> =
-        snapshot.components.filter { it.required || it.id in snapshot.selectedOptionalComponentIds }
+        snapshot.components.filter { isMandatory(it) || it.id in snapshot.selectedOptionalComponentIds }
+
+    private fun isMandatory(component: ComponentDescriptor): Boolean =
+        component.id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
+
+    private fun isSelectable(component: ComponentDescriptor): Boolean = component.status in setOf(
+        ComponentStatus.AVAILABLE,
+        ComponentStatus.NEW,
+        ComponentStatus.UPDATE_AVAILABLE,
+        ComponentStatus.READING,
+    ) && component.compatibilityState != ComponentCompatibility.UNSUPPORTED
+
+    private fun catalogFailureStatus(reasonCode: String): ComponentStatus = when {
+        reasonCode.contains("missing") -> ComponentStatus.DIRECTORY_MISSING
+        reasonCode.contains("certificate") -> ComponentStatus.APK_SIGNATURE_MISMATCH
+        reasonCode.contains("archive") || reasonCode.contains("zip") -> ComponentStatus.ZIP_VALIDATION_FAILED
+        reasonCode.contains("schema") || reasonCode.contains("capability") ->
+            ComponentStatus.CLIENT_CAPABILITY_INSUFFICIENT
+        else -> ComponentStatus.TEMPORARILY_UNAVAILABLE
+    }
 
     private fun buildComponentResults(
         evidence: SessionEvidence,
         snapshot: InstallationSessionSnapshot,
-    ): List<ComponentResult> = selectedComponents(snapshot).map { component ->
+    ): List<ComponentResult> = snapshot.components.filter { component ->
+        isMandatory(component) ||
+            component.id in snapshot.selectedOptionalComponentIds ||
+            component.errorReason != null ||
+            component.status in setOf(
+                ComponentStatus.DIRECTORY_MISSING,
+                ComponentStatus.ZIP_VALIDATION_FAILED,
+                ComponentStatus.APK_SIGNATURE_MISMATCH,
+                ComponentStatus.CLIENT_CAPABILITY_INSUFFICIENT,
+                ComponentStatus.TEMPORARILY_UNAVAILABLE,
+            )
+    }.map { component ->
         ComponentResult(
             componentName = component.displayName,
             installed = component.id in evidence.installed,
@@ -2111,6 +2489,7 @@ class InstallationSession(
         selectedOptionalComponentIds = snapshot.selectedOptionalComponentIds,
         currentComponentName = snapshot.currentComponentName,
         progress = snapshot.progress,
+        componentProgress = snapshot.componentProgress,
         evidence = snapshot.evidence,
         selectedSources = snapshot.selectedSources,
         archiveDownloads = snapshot.archiveDownloads,
@@ -2177,12 +2556,6 @@ class InstallationSession(
     private companion object {
         const val MAX_SOURCE_FAILURE_RECORDS = 32
         val SUPPORTED_CATALOG_SIGNATURE_ALGORITHMS = setOf("SHA256withECDSA", "Ed25519")
-        val MANAGED_COMPONENT_PACKAGES = mapOf(
-            AuthorizationPlanFactory.DESKTOP_COMPONENT_ID to AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME,
-            AuthorizationPlanFactory.LYRICS_COMPONENT_ID to AuthorizationPlanFactory.LYRICS_PACKAGE_NAME,
-            AuthorizationPlanFactory.FILE_MANAGER_COMPONENT_ID to AuthorizationPlanFactory.FILE_MANAGER_PACKAGE_NAME,
-        )
-
         val CATALOG_ACCEPTING_STATES = setOf(
             InstallationSessionState.IDLE,
             InstallationSessionState.DISCOVERING,

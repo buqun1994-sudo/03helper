@@ -1,5 +1,14 @@
 # 03helper 进度
 
+## 2026-08-23 连接后快速清单与逐应用安装进度
+
+1. 已将首次连接后的目录主链拆为两段：`FolderArtifactCatalogAdapter.loadSelection()` 只验签配置、读取一次蓝奏根目录并发布轻量应用列表；连接阶段不下载 ZIP、不解析 APK。
+2. 已将用户确认文案改为“开始下载并安装”，确认后仅针对已选 APP 生成真实清单并进入原有下载、校验、安装、授权和可用性主链；选中清单准备使用最多 2 个并发任务。
+3. 已把逐应用 `ComponentProgressUpdated` 事件接入会话与进度页：下载阶段显示真实字节进度，校验、发送、授权和可用性阶段显示对应应用的独立状态与进度条。
+4. 选择行不再渲染兼容性说明“适用于当前车机”；兼容性仍由会话内部门禁校验。产品、计划和验证文档已同步当前物理边界；带日期的历史章节保留原样。
+5. 本轮直接相关验证已完成：`:app:compileDebugKotlin`、`:app:testDebugUnitTest`（131 项）、`:app:lintDebug` 和 `:app:assembleDebug` 均通过；新增缓存复用回归用例确认同一选择动作不会重复解析 / 下载 ZIP。
+6. 最新 Debug APK 为 `com.tcrrry.helper` / `0.1.0 (1)` / `MainActivity`，SHA-256 为 `f1800d666d75badacb5c4f57f8c508c7a08f7213d9314b27c44a603282f29539`；已在指定测试手机 `SM-F946B` 保留数据覆盖安装并启动，系统返回 `Success` / `Status: ok`。新安卓机已由主机完成配对并切到测试用 TCP ADB，但因其 Android 11 安全 ADB 需要客户端密钥，当前助手仍未把主机连接误报为应用连接，目标机未安装助手 APK。
+
 ## 2026-08-18 底座初始化
 
 1. 已建立独立本地仓库目录 `03helper`，并记录从 `03lyrics` 复制上下文、约束、文档路由、规则和工作流的来源锚点。
@@ -82,11 +91,18 @@
 14. 进一步核对生产接线：`MainActivity` 当前只创建 `InstallationSession`，`ArtifactCatalogSessionAdapter` 与 `ArtifactPreparationCoordinator` 尚未在生产入口组装；在 Cloud Android profile / 公钥和组件映射具备前，当前 APK 不能从主界面触发真实蓝奏云下载。该阻断独立于 R2 / GitHub 尚未上传对象。
 15. 用户实测反馈：手机安装助手查找不到车机，但电脑上的既有 ADB 助手可以找到并连接。源码与运行边界确认这不是两个工具争抢连接；电脑 ADB 会话不会被手机应用复用，当前安装助手也没有发起 LAN / ADB discovery 请求，因此 F2 后续真实来源测试会在生产入口前置处停止。
 
+## 2026-08-23 选择页状态与展示收窄
+
+1. 实机日志确认连接成功后的 `CONNECTED` 会话会先异步读取 V3 配置、蓝奏根目录和各组件 ZIP；此前空组件列表直接被投影成“暂时无法准备安装应用”，因此用户会在目录准备期间看到约十几秒的误导性失败文案。客户端接口连续请求稳定返回，问题是 UI 把“准备中”和“失败”合并，不是云端协议字段不一致。
+2. `InstallUiState.Selection` 新增准备中投影；选择页在目录未完成时显示“正在准备安装应用”和进行中指示，只有带失败原因的空列表才显示“重新获取”。
+3. 按用户原始范围收窄首次安装组件行：保留本地 APP logo、名称、必装 / 可选、版本、体积和兼容范围；云端 `description`、目录状态、单项错误和连接确认行不再渲染在该框中，但仍保留在内部协议、校验和结果证据链。
+4. 已通过 `:app:testDebugUnitTest` 与 `:app:assembleDebug`；最终 `app-debug.apk`（SHA-256 `295f998b0b6ad30edb7f90fb35f321358e2f06ed793dfe3314bc4d16089ce2a1`）已按本机显式 serial 保留数据覆盖安装，包身份 `com.tcrrry.helper` / `0.1.0 (1)` 与 `MainActivity` 启动入口核对通过，启动后进程保持运行。未提交、未推送、未发布。
+
 ## 当前未完成事项
 
 1. 由项目 / Cloud 发布方提供并接入可验证的 Android profile、公钥、组件映射、ZIP / APK 身份和正式签名资料；资料缺失时客户端继续保持 fail closed。
-2. 真实 Android System WebView 蓝奏云回调、真实 ZIP 和正常三组件主链已经通过；仍需补做切网 / Range 续传、主源失败清理以及 R2 / GitHub Releases 对象上传后的回滚链验证。
-3. 真实 `S56_HQX` 正常安装、统一授权和 03 桌面启动可用性已经通过；仍需补做断线恢复，并用独立设备验证异常和破坏性动作门禁。
+2. 2026-08-20 的三组件蓝奏云 / 车机主链是带日期的历史验真事实；当前 V3 staging 配置、根目录和动态 APP 清单已完成客户端选择页验证，真实 WebView 下载、ZIP / APK 校验、切网 / Range 和车机安装授权仍需人工主测，不能把历史 fixture 结果当作当前发布通过。
+3. 新安卓机模拟车机已完成主机配对；Debug 测试包通过三星应用沙盒内主动 provision 的 ADB 密钥完成发现与连接，Release 不读取该密钥。该接线只用于本机临时测试，不构成正式车机连接或发布能力。
 4. F4 常用维护动作已完成应用层接线（检查更新、保留数据重装、修复授权、受控应用状态、缓存清理和脱敏诊断）；卸载、清除数据、降级、重启和其它高级动作仍未施工，真实目标车机维护主测待执行。
 5. 为 03 歌词、03桌面和文件管理器取得可审计的包身份、兼容范围、发布签名和合规材料。
 
@@ -257,3 +273,56 @@ F2 Debug APK 已按用户授权安装到指定手机。该段记录的是 F2 交
 4. 独立密码学探针确认私钥为 PKCS#8、曲线为 `prime256v1`，派生公钥与 APK asset 一致，实际 `SHA256withECDSA` DER 签名验签通过；配置加密密钥已另行生成并与签名私钥分开保存。
 5. 本轮 `testDebugUnitTest` 共 `113` 项通过，Debug / Release 编译、Debug Lint、Debug 主包与 AndroidTest 构建、项目文档 / Skill / 本机环境检查和 `git diff --check` 均通过。最新 Debug APK SHA-256 为 `94d121a574a202d237f626c8e9de9330767b46ec6bdb7c5031c7ee7410f57167`。
 6. 指定测试手机上的启动 smoke 为 `2/2` 通过；smoke 结束后再次保留数据覆盖安装最新主 Debug APK，系统返回 `Success`，最终包为 `com.tcrrry.helper`、`0.1.0 (1)`、Launcher `MainActivity`。未安装到车机，未清数据、卸载、降级或重启。
+## 2026-08-23 Android 动态 APP 分发客户端改造
+
+1. 客户端控制面已切换为严格 schema V3：`apps[]`、`environment`、`issuedAtUtc`、`catalogVersion` 和 `catalogRevision`；运行时不再接受 v2 或从 `components` 补回固定清单。客户端按环境 / 频道持久化最高修订号，拒绝签名快照回滚。
+2. 蓝奏根目录按动态声明逐项处理：未声明文件忽略，声明但缺失的可选 APP 单项标记，desktop 缺失才阻断；每个 ZIP 独立完成单 APK 根目录检查、APK 元数据读取、SHA-256 和本地官方发布者证书根校验。
+3. 安装与授权链已支持动态条目和 `sortOrder`；Cloud 的 `deviceSetup` 只能编译为客户端强类型动作，ADB 写入前读取现有安全列表并执行 Android 9 容量预检，写入后回读验证并保留原有条目。
+4. 会话、维护持久化和下载界面已增加动态应用行、描述、版本、下载 / 安装状态和单项错误原因；维护刷新可识别新增、移除和不在当前目录的已安装 APP。
+5. 收尾验证已完成：`./gradlew test` 的 Debug 单元测试 `125` 项、Release 对应测试套件均为 0 failures / 0 errors；`:app:lintDebug`、`:app:assembleDebug`、`:app:assembleRelease`、`check-local-environment.mjs`、`check-project-docs.mjs`、`check-skills.mjs` 和 `git diff --check` 均通过。Debug 产物为 `app/build/outputs/apk/debug/app-debug.apk`，Release 产物为 `app/build/outputs/apk/release/app-release-unsigned.apk`。
+6. 本轮没有可用的在线 Android 设备：本机上下文指定的 ADB 返回空设备列表，因此未执行覆盖安装、instrumentation smoke 或 Android 9 车机授权 / 安装；不把构建和 JVM 测试写成设备闭环通过。Cloud v3 staging 真实配置、蓝奏目录和车机主测继续作为外部待验证项。
+7. 本轮不提交、不推送、不发布，也未清数据、卸载、降级或重启设备。
+
+## 2026-08-23 V3 动态目录收尾审计
+
+1. 收尾审计补齐构建变体绑定：Debug 仅接受 `environment=staging`、`channel=debug`，Release 仅接受 `environment=production`、`channel=release`；不匹配的签名快照在目录处理前拒绝。
+2. 收紧单项失败边界：ZIP / APK 已通过读取但在缓存写入等环节发生的非取消异常，只生成当前 APP 的 `distribution_app_processing_failed`，并清理该 APP 的暂存缓存，不再把可选 APP 异常升级为整目录失败。
+3. 协议文案统一使用 V3 的 `installPolicy` 字段；`required` 仅作为客户端内部的安装建议投影。
+4. 授权计划不再为已知 APP 覆盖服务端排序：动态清单传入的 `sortOrder` 直接决定安装 / 授权计划顺序，旧兼容入口保留显式的 0/1/2 默认顺序。
+5. 本轮精简验证通过：指定 JDK17 下 Debug / Release 各 `127` 项 JVM 单测均为 0 failures / 0 errors，`./gradlew test :app:lintDebug :app:assembleDebug :app:assembleRelease --console=plain` 成功；`check-local-environment.mjs`、`check-project-docs.mjs`、`check-skills.mjs` 和 `git diff --check` 均通过。
+6. ADB 当前仍返回空设备列表，因此没有执行覆盖安装、instrumentation smoke 或 Android 9 车机安装 / 授权；未把这些项目写成通过。本轮仍不提交、不推送、不发布，也未清数据、卸载、降级或重启设备。
+
+## 2026-08-23 动态目录最终边界复核
+
+1. 将已知内置 `appId` 的实际包名绑定和 typed `deviceSetup` 包归属校验前移到单 APP 清单构建阶段；错误可选 APP 现在只进入自身失败状态，不会在用户开始批量安装后才拒绝整批。
+2. 新增授权组件门禁回归用例；最终 Debug / Release 各 `128` 项 JVM 测试均为 0 failures / 0 errors，Debug Lint、Debug / Release 构建、项目文档、Skill、本机环境和 `git diff --check` 均通过。
+3. 最新 Debug APK 为 `com.tcrrry.helper` / `0.1.0 (1)` / `MainActivity`，SHA-256 为 `0993303491d7cda6919e06d11acb9f491eb3e21145f21e3aacf9c93ca54988ff`；Release 未签名 APK SHA-256 为 `3487c596c8ab284d465ac266393645f04f694737e132f5a36a9b2af76e1b46da`。设备仍无在线 ADB，未执行覆盖安装或真实车机动作。
+
+## 2026-08-23 文档口径清理与 Debug 包交付
+
+1. 当前物理边界文案已统一为 Cloud schema V3 动态配置：签名 `apps[]`、`catalogRevision` 防回滚、客户端本地官方发布者证书根校验；来源锚点、产品基线、长期总纲、首版计划、安全边界、验证矩阵和 Cloud 接线均不再把 V2 请求或固定组件映射写成当前主链。
+2. 授权边界已统一为按签名 `apps[]` 动态生成的版本化 typed 授权计划；固定综合授权命令只在带日期的历史进度事实中保留，未改写历史记录。
+3. 本轮通过 `node scripts/check-project-docs.mjs`、`node scripts/check-skills.mjs`、`node scripts/check-local-environment.mjs`、`git diff --check`、Debug 单测、Debug Lint 和 Debug 构建。最新 Debug APK 为 `com.tcrrry.helper` / `0.1.0 (1)` / `MainActivity`，SHA-256 为 `a254e39d91576c59efd89784a4ec5f260d77f9119fa5583774c99ef705d85687`，APK Signature Scheme v2 验证通过。
+4. 已在显式测试手机 `SM-F946B` 上执行保留数据覆盖安装，系统返回 `Success`；随后启动 `MainActivity`，状态为 `ok`，进程保持运行，最近日志未发现应用致命异常。未清数据、卸载、降级、重启或触碰车机包；剩余真实 Cloud / 车机主链交给用户人工主测。
+
+## 2026-08-23 Cloud V3 实际字段对齐与 Debug 交付
+
+1. 只读核对 staging 公共接口确认真实 V3 envelope 在外层携带 `catalogRevision`；payload 追加 `previousVersionsUrl` / `previousVersionsPassword`，每个 APP 携带 `trustProfileId`，`deviceSetup` 使用 `profileId` / `actionIds`。客户端 DTO、版本一致性校验、历史字段传递、本地信任档案和授权计划门禁已同步到该实际协议。
+2. `trustProfileId` 只映射到客户端内置 `nine-studio` / `fossify-approved` 信任档案；未知档案、已知 APP 档案错配、未知 profile / action 或包归属不符均 fail closed，不开启未知字段吞掉逻辑。
+3. 直接相关的动态配置与根目录适配器 JVM 用例 `19/19` 通过；未执行与本次字段对齐无关的全量 instrumentation 或车机写入测试。
+4. `:app:assembleDebug` 成功，Debug APK SHA-256 为 `065f458a975a5f7cfd8450bb2a58d2c32060733e32d53e562b2cf160ff870416`；使用显式测试手机保留数据覆盖安装返回 `Success`，`com.tcrrry.helper` / `0.1.0 (1)` 的 `MainActivity` 已启动并保持前台。
+5. 本轮未提交、未推送、未发布，未清数据、卸载、降级或重启设备；真实 staging 根目录下载、车机安装授权和维护动作交由用户人工主测。
+
+## 2026-08-24 Debug 无线车机模拟测试接线
+
+1. Debug 构建新增仅限本机测试的 ADB 密钥读取入口：应用只从自身 `files/debug-adb/adbkey` 与 `adbkey.pub` 读取已由测试人员主动放入的密钥；Release 构建始终不读取任何应用内 ADB 密钥。密钥不进入 APK、Git、日志或网络。
+2. `DadbDeviceConnectionFactory` 的发现与安装连接统一使用该 Debug 密钥；未配置密钥时保持原有失败行为，不改变正式设备连接协议。
+3. 指定测试手机 `SM-F946B` 已以保留数据方式覆盖安装最新 Debug APK（`com.tcrrry.helper`、`0.1.0 (1)`、`MainActivity`，SHA-256 `f698806fe47c14c43c0876f524fdddabe0ed38a026bcda3a73858dfb95afa2a0`）。启动后自动发现并确认 `RMX1901` 模拟车机，点选后进入应用选择页；助手进程保持前台运行。
+4. Realme 仅作为模拟车机，未安装 `com.tcrrry.helper`；本轮已完成 Cloud staging 配置验签与根目录枚举并进入应用选择页，但未触发下载、APK 安装、授权或维护写入，后续由用户继续人工主测。
+
+## 2026-08-24 选择页轻量元数据恢复
+
+1. 修正根目录 WebView 解析：同时兼容蓝奏当前 `#ready` 行结构与旧 `.mbx` 结构，读取 ZIP 名称、大小和时间；安全大小会在用户确认前投影到选择页。
+2. 轻量选择清单在没有 APK 下载的前提下使用签名 `catalogVersion` 作为版本标签，目录实际 APK 校验完成后由 `versionName` 和真实归档大小覆盖；因此选择页不再把所有版本 / 大小统一显示为“待准备”。
+3. 增加展示字段边界和根目录大小回归用例；当前仍不把目录展示值当作 APK 身份证明，安装前完整 ZIP / APK 校验门禁不变。
+4. 最新 Debug APK 为 `com.tcrrry.helper` / `0.1.0 (1)`，SHA-256 为 `e567852e1075af08a44f94d5531018e96d14c2a227efc3bda42e506d60e6d965`；已在显式测试手机保留数据覆盖安装并启动 `MainActivity`，选择页实机看到 `android-debug-2026-08-22-002 · 2.0 MB`、`4.9 MB`、`25.7 MB` 三项信息，Realme 未安装助手。

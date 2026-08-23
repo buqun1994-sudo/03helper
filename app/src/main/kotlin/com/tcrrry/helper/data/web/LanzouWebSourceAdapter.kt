@@ -32,7 +32,7 @@ sealed interface LanzouResolutionResult {
     data class Failure(val failure: ArtifactFailure) : LanzouResolutionResult
 }
 
-/** Converts one fixed Lanzou share page into an in-memory download request. */
+/** Converts one signed-configured Lanzou share page into an in-memory download request. */
 class LanzouWebSourceAdapter(
     private val hostFactory: LanzouWebViewHostFactory,
     private val sourcePolicy: ReleaseSourcePolicy = ReleaseSourcePolicy(),

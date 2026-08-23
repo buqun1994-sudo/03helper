@@ -20,6 +20,8 @@ data class InstallationSessionSnapshot(
     val selectedOptionalComponentIds: Set<String> = emptySet(),
     val currentComponentName: String? = null,
     val progress: SessionProgress? = null,
+    /** Per-application progress projected from the same installation event stream. */
+    val componentProgress: Map<String, ComponentProgress> = emptyMap(),
     val failure: SessionFailure? = null,
     val componentResults: List<ComponentResult> = emptyList(),
     val sessionId: Long = 0L,
@@ -29,6 +31,7 @@ data class InstallationSessionSnapshot(
     val evidence: SessionEvidence = SessionEvidence(),
     val artifactManifests: List<ArtifactManifest> = emptyList(),
     val catalogVersion: String? = null,
+    val catalogRevision: Long = 0L,
     val catalogKeyId: String? = null,
     val catalogSignatureAlgorithm: String? = null,
     val selectedSources: Map<String, ArtifactSourceKind> = emptyMap(),
@@ -63,6 +66,9 @@ data class ComponentDescriptor(
     val compatibilityState: ComponentCompatibility = ComponentCompatibility.SUPPORTED,
     /** Stable local asset key; remote data cannot select an arbitrary drawable. */
     val iconKey: String = id,
+    val description: String = "",
+    val status: ComponentStatus = ComponentStatus.READING,
+    val errorReason: String? = null,
 )
 
 enum class ComponentCompatibility {
@@ -71,11 +77,42 @@ enum class ComponentCompatibility {
     UNKNOWN,
 }
 
+enum class ComponentStatus {
+    READING,
+    AVAILABLE,
+    INSTALLED_LATEST,
+    UPDATE_AVAILABLE,
+    DIRECTORY_MISSING,
+    ZIP_VALIDATION_FAILED,
+    APK_SIGNATURE_MISMATCH,
+    CLIENT_CAPABILITY_INSUFFICIENT,
+    TEMPORARILY_UNAVAILABLE,
+    UNLISTED,
+    NEW,
+}
+
 data class SessionProgress(
     val completedCount: Int = 0,
     val totalCount: Int = 0,
     val fraction: Float? = null,
     val indeterminate: Boolean = false,
+)
+
+enum class ComponentProgressStatus {
+    PENDING,
+    RUNNING,
+    COMPLETED,
+    FAILED,
+}
+
+data class ComponentProgress(
+    val componentId: String,
+    val phase: InstallPhase = InstallPhase.FETCH,
+    val status: ComponentProgressStatus = ComponentProgressStatus.PENDING,
+    val bytesWritten: Long = 0L,
+    val totalBytes: Long = 0L,
+    val fraction: Float? = null,
+    val indeterminate: Boolean = true,
 )
 
 data class SessionFailure(
@@ -112,6 +149,7 @@ data class MaintenanceSnapshot(
     val managedApplications: List<ManagedApplicationStatus> = emptyList(),
     val availableManifests: List<ArtifactManifest> = emptyList(),
     val availableCatalogVersion: String? = null,
+    val availableCatalogRevision: Long = 0L,
     val availableCatalogKeyId: String? = null,
     val availableCatalogSignatureAlgorithm: String? = null,
 )
@@ -138,6 +176,7 @@ data class SessionCheckpoint(
     val selectedOptionalComponentIds: Set<String>,
     val currentComponentName: String?,
     val progress: SessionProgress?,
+    val componentProgress: Map<String, ComponentProgress> = emptyMap(),
     val evidence: SessionEvidence,
     val selectedSources: Map<String, ArtifactSourceKind> = emptyMap(),
     val archiveDownloads: Map<String, ArchiveDownloadEvidence> = emptyMap(),

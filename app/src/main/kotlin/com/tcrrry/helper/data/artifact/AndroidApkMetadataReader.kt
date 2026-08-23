@@ -57,6 +57,7 @@ class AndroidApkMetadataReader(
                     )
                 }.toSet(),
             ),
+            minAndroidSdk = packageInfo.applicationInfo?.minSdkVersion?.takeIf { it > 0 },
         )
     }
 

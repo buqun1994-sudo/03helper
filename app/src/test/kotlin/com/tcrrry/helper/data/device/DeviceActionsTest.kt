@@ -81,7 +81,7 @@ class DeviceActionsTest {
     }
 
     @Test
-    fun `combined command is one fixed shell invocation with validated selection arguments`() {
+    fun `versioned authorization executor is one shell invocation with validated selection arguments`() {
         val command = CombinedAuthorizationCommand.build(setOf("desktop", "lyrics"))
 
         assertEquals(1, Regex("sh -c").findAll(command).count())
@@ -207,7 +207,7 @@ class DeviceActionsTest {
     }
 
     @Test
-    fun `combined command result is keyed by exit code and structured markers rather than stderr`() {
+    fun `authorization plan result is keyed by exit code and structured markers rather than stderr`() {
         val gatewaySource = java.io.File(
             "src/main/kotlin/com/tcrrry/helper/data/device/DadbCommandGateway.kt",
         ).readText()
@@ -226,7 +226,7 @@ class DeviceActionsTest {
     }
 
     @Test
-    fun `coordinator installs the batch then invokes the combined command once and launches only desktop`() {
+    fun `coordinator installs the batch then invokes the versioned authorization plan once and launches only desktop`() {
         val lyricsFile = Files.createTempFile("lyrics", ".apk").toFile().apply { writeBytes(byteArrayOf(1)) }
         val desktopFile = Files.createTempFile("desktop", ".apk").toFile().apply { writeBytes(byteArrayOf(2)) }
         val artifacts = listOf(
@@ -280,9 +280,13 @@ class DeviceActionsTest {
                 InstallationSessionEvent.AuthorizationCompleted::class,
                 InstallationSessionEvent.DeviceVerified::class,
             ),
-            events.map { it::class },
+            events.filter {
+                it !is InstallationSessionEvent.ComponentProgressUpdated
+            }.map { it::class },
         )
-        val availability = (events.last() as InstallationSessionEvent.DeviceVerified).evidence.associateBy { it.componentId }
+        assertTrue(events.any { it is InstallationSessionEvent.ComponentProgressUpdated })
+        val availability = (events.filterIsInstance<InstallationSessionEvent.DeviceVerified>().last())
+            .evidence.associateBy { it.componentId }
         assertFalse(availability.getValue("lyrics").launchAttempted)
         assertTrue(availability.getValue("desktop").launchAttempted)
         assertTrue(availability.getValue("desktop").processRunning)
@@ -336,7 +340,7 @@ class DeviceActionsTest {
     }
 
     @Test
-    fun `missing declaration stops before the combined command`() {
+    fun `missing declaration stops before the authorization plan`() {
         val lyricsFile = Files.createTempFile("lyrics-declaration", ".apk").toFile().apply { writeBytes(byteArrayOf(1)) }
         val desktopFile = Files.createTempFile("desktop-declaration", ".apk").toFile().apply { writeBytes(byteArrayOf(2)) }
         val artifacts = listOf(

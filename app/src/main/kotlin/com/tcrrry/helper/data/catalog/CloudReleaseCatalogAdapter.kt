@@ -50,6 +50,15 @@ data class TrustedArtifactCatalog(
     val keyId: String,
     val signatureAlgorithm: String,
     val manifests: List<ArtifactManifest>,
+    val apps: List<InstallerComponentSource> = emptyList(),
+    val appFailures: List<CatalogAppFailure> = emptyList(),
+    val catalogRevision: Long = 0L,
+)
+
+data class CatalogAppFailure(
+    val componentId: String,
+    val reasonCode: String,
+    val retryable: Boolean,
 )
 
 sealed interface CatalogLoadResult {

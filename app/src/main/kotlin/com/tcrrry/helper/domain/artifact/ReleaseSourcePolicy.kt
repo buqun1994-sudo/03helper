@@ -3,8 +3,9 @@ package com.tcrrry.helper.domain.artifact
 import java.net.URI
 
 /**
- * Fixed source order and host boundary. The manifest may describe all three
- * sources, but it cannot reorder them or introduce a fourth protocol.
+ * Fixed source protocol order and host boundary. An application manifest may
+ * describe the configured source kinds, but it cannot reorder them or invent
+ * an unapproved protocol. This source count is independent of APP count.
  */
 class ReleaseSourcePolicy(
     private val hostPolicy: SourceHostPolicy = SourceHostPolicy.default(),

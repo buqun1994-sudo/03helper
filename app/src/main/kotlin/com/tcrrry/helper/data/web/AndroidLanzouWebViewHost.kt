@@ -263,12 +263,21 @@ class AndroidLanzouWebViewHost(
         view.evaluateJavascript(
             """
             (function(){
-              var links=[].slice.call(document.querySelectorAll('#infos .mbx a.mlink')).map(function(a){
+              var links=[].slice.call(document.querySelectorAll('#infos .mbx a.mlink, #infos #ready a')).map(function(a){
                 var href=a.getAttribute('href') || '';
-                var clone=a.cloneNode(true);
-                var meta=clone.querySelector('.mmr');
+                var row=a.closest('#ready') || a.closest('.mbx') || a.parentElement;
+                var nameNode=a.cloneNode(true);
+                var meta=nameNode.querySelector('.mmr');
                 if(meta){ meta.remove(); }
-                return {href:href,name:(clone.textContent || '').trim()};
+                var sizeNode=row ? row.querySelector('#size, .size, .sizeh') : null;
+                var timeNode=row ? row.querySelector('#time, .time, .timeh') : null;
+                return {
+                  href:href,
+                  name:(nameNode.textContent || '').trim(),
+                  size:sizeNode ? (sizeNode.textContent || '').trim() : '',
+                  modified:timeNode ? (timeNode.textContent || '').trim() : '',
+                  rowText:row ? (row.innerText || row.textContent || '').trim() : ''
+                };
               }).filter(function(item){ return item.href && item.name; });
               if(links.length){ return JSON.stringify({kind:'entries',entries:links}); }
               var info=(document.getElementById('infos') || {}).innerText || '';
@@ -323,11 +332,21 @@ class AndroidLanzouWebViewHost(
                         val item = entriesJson.optJSONObject(index) ?: continue
                         val href = item.optString("href").trim()
                         val name = item.optString("name").trim()
+                        val sizeLabel = item.optString("size").trim().takeIf { it.isNotBlank() }
+                            ?: item.optString("rowText").trim().takeIf { it.isNotBlank() }
+                        val modifiedLabel = item.optString("modified").trim().takeIf { it.isNotBlank() }
                         val id = runCatching {
                             URI(href).path.orEmpty().trim('/').substringAfterLast('/')
                         }.getOrDefault("")
                         if (id.matches(FOLDER_ENTRY_ID_PATTERN) && name.isNotBlank()) {
-                            add(LanzouFolderEntry(id = id, name = name))
+                            add(
+                                LanzouFolderEntry(
+                                    id = id,
+                                    name = name,
+                                    sizeLabel = sizeLabel?.let(::normalizeSizeLabel),
+                                    modifiedLabel = modifiedLabel,
+                                ),
+                            )
                         }
                     }
                 }
@@ -437,6 +456,19 @@ class AndroidLanzouWebViewHost(
         const val MAX_TRIGGER_ATTEMPTS = 48
         const val TRIGGER_RETRY_DELAY_MILLIS = 200L
         val FOLDER_ENTRY_ID_PATTERN = Regex("^i[a-zA-Z0-9]+$")
+        val SIZE_LABEL_PATTERN = Regex("([0-9]+(?:\\.[0-9]+)?)\\s*(B|K|KB|M|MB|G|GB|T|TB)", RegexOption.IGNORE_CASE)
+
+        fun normalizeSizeLabel(value: String): String? {
+            val match = SIZE_LABEL_PATTERN.find(value.trim()) ?: return null
+            val unit = when (match.groupValues[2].uppercase()) {
+                "K" -> "KB"
+                "M" -> "MB"
+                "G" -> "GB"
+                "T" -> "TB"
+                else -> match.groupValues[2].uppercase()
+            }
+            return "${match.groupValues[1]} $unit"
+        }
     }
 
     private enum class Operation {

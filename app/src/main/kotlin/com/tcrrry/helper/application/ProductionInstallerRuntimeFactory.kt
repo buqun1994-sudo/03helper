@@ -15,6 +15,7 @@ import com.tcrrry.helper.data.artifact.ArchiveIdentityVerifier
 import com.tcrrry.helper.data.artifact.ArtifactArchiveExtractor
 import com.tcrrry.helper.data.artifact.ArtifactIdentityVerifier
 import com.tcrrry.helper.data.catalog.FolderArtifactCatalogAdapter
+import com.tcrrry.helper.data.catalog.FileCatalogRevisionStore
 import com.tcrrry.helper.data.device.DadbDeviceTransport
 import com.tcrrry.helper.data.device.DadbDeviceConnectionFactory
 import com.tcrrry.helper.data.device.JdkLocalIpv4SubnetProvider
@@ -49,17 +50,24 @@ object ProductionInstallerRuntimeFactory {
         )
         val persistedMaintenanceSnapshot = maintenanceSessionStore.load()
         val apkMetadataReader = AndroidApkMetadataReader(applicationContext)
+        // Debug may receive a locally provisioned ADB credential for the
+        // explicitly authorized lab target; Release always returns null.
+        val adbKeyPair = catalogRuntime.createDeviceAdbKeyPair(applicationContext)
         // Discovery probes must fail quickly, while a retained installation lease
         // needs enough read time for ADB sync and the car's package manager.
         val discoveryDeviceConnectionFactory = DadbDeviceConnectionFactory(
             readTimeoutMillis = DISCOVERY_READ_TIMEOUT_MILLIS,
+            adbKeyPair = adbKeyPair,
         )
         val installationDeviceConnectionFactory = DadbDeviceConnectionFactory(
             readTimeoutMillis = INSTALLATION_READ_TIMEOUT_MILLIS,
             installedApkCacheDirectory = File(applicationContext.cacheDir, INSTALLED_APK_VERIFICATION_DIRECTORY),
             installedApkMetadataReader = apkMetadataReader,
+            adbKeyPair = adbKeyPair,
         )
-        val distributionConfigAdapter = catalogRuntime.createDistributionConfigAdapter(applicationContext)
+        val distributionConfigAdapter = catalogRuntime.createDistributionConfigAdapter(applicationContext).withRevisionStore(
+            FileCatalogRevisionStore(File(applicationContext.filesDir, CATALOG_REVISION_FILE)),
+        )
         val folderCatalogAdapter = FolderArtifactCatalogAdapter(
             configAdapter = distributionConfigAdapter,
             folderSourceAdapter = LanzouFolderSourceAdapter(
@@ -104,7 +112,20 @@ object ProductionInstallerRuntimeFactory {
                 DeviceConnectionSessionAdapter(installationDeviceConnectionFactory, eventPort)
             },
             loadCatalog = { eventPort ->
-                ArtifactCatalogSessionAdapter(catalogLoader, eventPort).load()
+                ArtifactCatalogSessionAdapter(
+                    catalogLoader = catalogLoader,
+                    eventPort = eventPort,
+                    selectionLoader = { folderCatalogAdapter.loadSelection() },
+                ).loadSelection()
+            },
+            prepareSelectedCatalog = { selectedIds, eventPort ->
+                ArtifactCatalogSessionAdapter(
+                    catalogLoader = catalogLoader,
+                    eventPort = eventPort,
+                    selectedCatalogLoader = { ids, onProgress ->
+                        folderCatalogAdapter.prepareSelected(ids, onProgress)
+                    },
+                ).prepareSelected(selectedIds)
             },
             prepareArtifactsWithResult = { manifests, eventPort ->
                 ArtifactPreparationCoordinator(
@@ -152,6 +173,7 @@ object ProductionInstallerRuntimeFactory {
     private const val DISTRIBUTION_CATALOG_DIRECTORY = "distribution-catalog"
     private const val DIAGNOSTIC_CACHE_DIRECTORY = "maintenance-diagnostics"
     private const val MAINTENANCE_SESSION_FILE = "maintenance-session.json"
+    private const val CATALOG_REVISION_FILE = "android-catalog-revisions.properties"
     private const val DISCOVERY_READ_TIMEOUT_MILLIS = 900
     private const val INSTALLATION_READ_TIMEOUT_MILLIS = 60_000
 

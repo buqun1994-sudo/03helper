@@ -132,7 +132,7 @@ class MaintenanceControllerTest {
     }
 
     @Test
-    fun `managed application inspection emits all fixed component statuses`() = runBlocking {
+    fun `managed application inspection emits all managed component statuses`() = runBlocking {
         val events = mutableListOf<InstallationSessionEvent>()
         val gateway = FakeGateway().apply {
             managedApplications = ManagedApplicationsResult.Completed(

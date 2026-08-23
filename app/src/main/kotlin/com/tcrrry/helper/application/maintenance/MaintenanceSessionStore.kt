@@ -21,6 +21,9 @@ import com.tcrrry.helper.domain.session.MaintenanceActionRecord
 import com.tcrrry.helper.domain.session.MaintenanceActionStatus
 import com.tcrrry.helper.domain.session.MaintenanceSnapshot
 import com.tcrrry.helper.domain.session.ManagedApplicationStatus
+import com.tcrrry.helper.domain.session.ComponentStatus
+import com.tcrrry.helper.data.catalog.DeviceSetupWireDocument
+import com.tcrrry.helper.data.catalog.SecureComponentWireDocument
 import com.tcrrry.helper.domain.session.SessionEvidence
 import java.io.File
 import java.nio.file.AtomicMoveNotSupportedException
@@ -116,9 +119,11 @@ private data class StoredMaintenanceState(
     val artifactManifests: List<StoredManifest>,
     val availableManifests: List<StoredManifest>,
     val catalogVersion: String?,
+    val catalogRevision: Long = 0L,
     val catalogKeyId: String?,
     val catalogSignatureAlgorithm: String?,
     val availableCatalogVersion: String?,
+    val availableCatalogRevision: Long = 0L,
     val availableCatalogKeyId: String?,
     val availableCatalogSignatureAlgorithm: String?,
     val installed: Set<String>,
@@ -144,15 +149,20 @@ private data class StoredMaintenanceState(
                     versionLabel = component.versionLabel,
                     sizeLabel = component.sizeLabel,
                     compatibilityLabel = component.compatibilityLabel,
+                    description = component.description,
+                    status = component.status.name,
+                    errorReason = component.errorReason,
                 )
             },
             selectedOptionalComponentIds = snapshot.selectedOptionalComponentIds,
             artifactManifests = snapshot.artifactManifests.map(StoredManifest::from),
             availableManifests = snapshot.maintenance.availableManifests.map(StoredManifest::from),
             catalogVersion = snapshot.catalogVersion,
+            catalogRevision = snapshot.catalogRevision,
             catalogKeyId = snapshot.catalogKeyId,
             catalogSignatureAlgorithm = snapshot.catalogSignatureAlgorithm,
             availableCatalogVersion = snapshot.maintenance.availableCatalogVersion,
+            availableCatalogRevision = snapshot.maintenance.availableCatalogRevision,
             availableCatalogKeyId = snapshot.maintenance.availableCatalogKeyId,
             availableCatalogSignatureAlgorithm = snapshot.maintenance.availableCatalogSignatureAlgorithm,
             installed = snapshot.evidence.installed,
@@ -180,6 +190,8 @@ private data class StoredMaintenanceState(
         } catch (_: Exception) {
             return null
         }
+        val parsedComponents = components.mapNotNull { it.toDomainOrNull() }
+        if (parsedComponents.size != components.size) return null
         val manifests = artifactManifests.mapNotNull { it.toDomainOrNull() }
         if (manifests.size != artifactManifests.size) return null
         if (manifests.isNotEmpty() && !validateManifests(manifests, sourcePolicy)) {
@@ -190,16 +202,16 @@ private data class StoredMaintenanceState(
         if (parsedAvailableManifests.isNotEmpty() && !validateManifests(parsedAvailableManifests, sourcePolicy)) {
             return null
         }
-        val componentIds = components.map { it.id }.toSet()
+        val componentIds = parsedComponents.map { it.id }.toSet()
         if (
-            componentIds.size != components.size ||
-            components.any { it.id.isBlank() || it.displayName.isBlank() } ||
-            componentIds.any { it !in MANAGED_COMPONENT_IDS } ||
-            components.none { it.id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID && it.required } ||
-            components.any {
-                it.id != AuthorizationPlanFactory.DESKTOP_COMPONENT_ID && it.required
+            componentIds.size != parsedComponents.size ||
+            parsedComponents.any { it.id.isBlank() || it.displayName.isBlank() } ||
+            parsedComponents.none {
+                it.id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID && it.required
             } ||
-            selectedOptionalComponentIds.any { it !in componentIds || components.first { component -> component.id == it }.required }
+            selectedOptionalComponentIds.any {
+                it !in componentIds || it == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
+            }
         ) {
             return null
         }
@@ -212,17 +224,23 @@ private data class StoredMaintenanceState(
         }
         if (
             manifests.isNotEmpty() &&
-            manifests.map { it.componentId }.toSet() != componentIds
+            !manifests.map { it.componentId }.toSet().all { it in componentIds }
         ) {
             return null
         }
         if (
             parsedAvailableManifests.isNotEmpty() &&
-            parsedAvailableManifests.any { it.componentId !in MANAGED_COMPONENT_IDS }
+            (parsedAvailableManifests.any { it.componentId.isBlank() } ||
+                !parsedAvailableManifests.map { it.componentId }.toSet().all { it in componentIds })
         ) {
             return null
         }
-        if (!validCatalogMetadata(catalogVersion, catalogKeyId, catalogSignatureAlgorithm) ||
+        if (catalogRevision < 0L || availableCatalogRevision < 0L ||
+            (catalogRevision > 0L && catalogVersion == null) ||
+            (availableCatalogRevision > 0L && availableCatalogVersion == null) ||
+            (catalogRevision > 0L && availableCatalogRevision > 0L &&
+                availableCatalogRevision < catalogRevision) ||
+            !validCatalogMetadata(catalogVersion, catalogKeyId, catalogSignatureAlgorithm) ||
             !validCatalogMetadata(
                 availableCatalogVersion,
                 availableCatalogKeyId,
@@ -235,7 +253,7 @@ private data class StoredMaintenanceState(
         if (
             applications.size != managedApplications.size ||
             applications.map { it.componentId }.toSet().size != applications.size ||
-            (applications.isNotEmpty() && applications.map { it.componentId }.toSet() != MANAGED_COMPONENT_IDS)
+            applications.any { it.componentId.isBlank() }
         ) {
             return null
         }
@@ -252,6 +270,19 @@ private data class StoredMaintenanceState(
         ) {
             return null
         }
+        val unlistedComponents = applications
+            .filter { it.installed && it.componentId !in componentIds }
+            .map { it.componentId }
+            .distinct()
+            .map { id ->
+                ComponentDescriptor(
+                    id = id,
+                    displayName = id,
+                    required = false,
+                    status = ComponentStatus.UNLISTED,
+                    errorReason = "unlisted",
+                )
+            }
         return InstallationSessionSnapshot(
             state = InstallationSessionState.MAINTENANCE,
             device = DeviceSummary(
@@ -261,10 +292,13 @@ private data class StoredMaintenanceState(
                 androidSdk = device.androidSdk,
                 capabilities = parsedCapabilities,
             ),
-            components = components.map(StoredComponent::toDomain),
+            components = parsedComponents + unlistedComponents.filter { unlisted ->
+                parsedComponents.none { component -> component.id == unlisted.id }
+            },
             selectedOptionalComponentIds = selectedOptionalComponentIds,
             artifactManifests = manifests,
             catalogVersion = catalogVersion,
+            catalogRevision = catalogRevision,
             catalogKeyId = catalogKeyId,
             catalogSignatureAlgorithm = catalogSignatureAlgorithm,
             evidence = SessionEvidence(
@@ -277,6 +311,7 @@ private data class StoredMaintenanceState(
                 managedApplications = applications,
                 availableManifests = parsedAvailableManifests,
                 availableCatalogVersion = availableCatalogVersion,
+                availableCatalogRevision = availableCatalogRevision,
                 availableCatalogKeyId = availableCatalogKeyId,
                 availableCatalogSignatureAlgorithm = availableCatalogSignatureAlgorithm,
             ),
@@ -290,10 +325,9 @@ private data class StoredMaintenanceState(
         if (ArtifactManifestValidator.validateCatalog(manifests) !is ManifestValidation.Valid) {
             return false
         }
-        if (manifests.any {
-                it.componentId !in MANAGED_COMPONENT_IDS ||
-                    it.required != (it.componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID)
-            }) {
+        if (manifests.any { it.componentId.isBlank() } ||
+            manifests.none { it.componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID }
+        ) {
             return false
         }
         return manifests.all { manifest ->
@@ -312,9 +346,6 @@ private data class StoredMaintenanceState(
             signatureAlgorithm in SUPPORTED_SIGNATURE_ALGORITHMS
     }
 }
-
-private val MANAGED_COMPONENT_IDS: Set<String> =
-    AuthorizationPlanFactory.allManagedComponents().map { it.componentId }.toSet()
 
 private val SUPPORTED_SIGNATURE_ALGORITHMS = setOf("SHA256withECDSA", "Ed25519")
 
@@ -391,15 +422,23 @@ private data class StoredComponent(
     val versionLabel: String?,
     val sizeLabel: String?,
     val compatibilityLabel: String?,
+    val description: String = "",
+    val status: String = ComponentStatus.READING.name,
+    val errorReason: String? = null,
 ) {
-    fun toDomain(): ComponentDescriptor = ComponentDescriptor(
-        id = id,
-        displayName = displayName,
-        required = required,
-        versionLabel = versionLabel,
-        sizeLabel = sizeLabel,
-        compatibilityLabel = compatibilityLabel,
-    )
+    fun toDomainOrNull(): ComponentDescriptor? = runCatching {
+        ComponentDescriptor(
+            id = id,
+            displayName = displayName,
+            required = required,
+            versionLabel = versionLabel,
+            sizeLabel = sizeLabel,
+            compatibilityLabel = compatibilityLabel,
+            description = description,
+            status = ComponentStatus.valueOf(status),
+            errorReason = errorReason,
+        )
+    }.getOrNull()
 }
 
 @Serializable
@@ -407,6 +446,7 @@ private data class StoredManifest(
     val schemaVersion: Int,
     val componentId: String,
     val displayName: String,
+    val description: String = "",
     val required: Boolean,
     val versionName: String,
     val versionCode: Long,
@@ -427,12 +467,15 @@ private data class StoredManifest(
     val certificateSha256: String,
     val sources: List<StoredSource>,
     val rollbackId: String?,
+    val deviceSetup: DeviceSetupWireDocument? = null,
+    val sortOrder: Int = 0,
 ) {
     companion object {
         fun from(manifest: ArtifactManifest): StoredManifest = StoredManifest(
             schemaVersion = manifest.schemaVersion,
             componentId = manifest.componentId,
             displayName = manifest.displayName,
+            description = manifest.description,
             required = manifest.required,
             versionName = manifest.version.name,
             versionCode = manifest.version.code,
@@ -453,14 +496,36 @@ private data class StoredManifest(
             certificateSha256 = manifest.certificateSha256,
             sources = manifest.sources.map { StoredSource(it.kind.wireName, it.url) },
             rollbackId = manifest.rollbackId,
+            deviceSetup = manifest.deviceSetup?.let { setup ->
+                DeviceSetupWireDocument(
+                    profileId = setup.profileId,
+                    actionIds = setup.actionIds.toList(),
+                    appOps = setup.appOps.map { it.name },
+                    runtimePermissions = setup.runtimePermissions.map { it.name },
+                    secureSettings = setup.secureSettings.map { it.name },
+                    secureComponents = setup.secureComponents.map {
+                        SecureComponentWireDocument(it.setting.name, it.targetComponent)
+                    },
+                    launchComponent = setup.launchComponent,
+                    requiredServices = setup.requiredServices.toList(),
+                )
+            },
+            sortOrder = manifest.sortOrder,
         )
     }
 
-    fun toDomainOrNull(): ArtifactManifest? = try {
-        ArtifactManifest(
+    fun toDomainOrNull(): ArtifactManifest? {
+        return try {
+            val parsedSetup = if (deviceSetup == null) {
+                null
+            } else {
+                deviceSetup.toDomainOrNull() ?: return null
+            }
+            ArtifactManifest(
             schemaVersion = schemaVersion,
             componentId = componentId,
             displayName = displayName,
+            description = description,
             required = required,
             version = ArtifactVersion(versionName, versionCode),
             compatibility = CompatibilityRange(
@@ -486,9 +551,12 @@ private data class StoredManifest(
                 )
             },
             rollbackId = rollbackId,
-        )
-    } catch (_: Exception) {
-        null
+            deviceSetup = parsedSetup,
+                sortOrder = sortOrder,
+            )
+        } catch (_: Exception) {
+            null
+        }
     }
 }
 
@@ -510,12 +578,8 @@ private data class StoredApplication(
     }
 
     fun toDomainOrNull(): ManagedApplicationStatus? {
-        val expectedPackage = mapOf(
-            AuthorizationPlanFactory.DESKTOP_COMPONENT_ID to AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME,
-            AuthorizationPlanFactory.LYRICS_COMPONENT_ID to AuthorizationPlanFactory.LYRICS_PACKAGE_NAME,
-            AuthorizationPlanFactory.FILE_MANAGER_COMPONENT_ID to AuthorizationPlanFactory.FILE_MANAGER_PACKAGE_NAME,
-        )[componentId]
-        return if (expectedPackage == packageName) {
+        val packagePattern = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$")
+        return if (componentId.matches(Regex("^[a-z][a-z0-9-]{0,63}$")) && packageName.matches(packagePattern)) {
             ManagedApplicationStatus(componentId, packageName, installed)
         } else {
             null

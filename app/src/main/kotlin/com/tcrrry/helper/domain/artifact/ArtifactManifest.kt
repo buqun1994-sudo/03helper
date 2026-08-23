@@ -1,5 +1,7 @@
 package com.tcrrry.helper.domain.artifact
 
+import com.tcrrry.helper.domain.device.AuthorizationSetupDeclaration
+
 /**
  * The signed release identity consumed by the installer.
  *
@@ -10,6 +12,7 @@ data class ArtifactManifest(
     val schemaVersion: Int,
     val componentId: String,
     val displayName: String,
+    val description: String = "",
     val required: Boolean,
     val version: ArtifactVersion,
     val compatibility: CompatibilityRange,
@@ -25,6 +28,9 @@ data class ArtifactManifest(
     val certificateSha256: String,
     val sources: List<ArtifactSource>,
     val rollbackId: String? = null,
+    /** Typed setup compiled from the signed app entry; never shell text. */
+    val deviceSetup: AuthorizationSetupDeclaration? = null,
+    val sortOrder: Int = 0,
 )
 
 /**
@@ -41,6 +47,7 @@ data class TrustedInstallerComponent(
     val minAndroidSdk: Int,
     val packageName: String,
     val certificateSha256: String,
+    val trustProfileId: String = "nine-studio",
 )
 
 object InstallerComponentTrustRegistry {
@@ -65,6 +72,7 @@ object InstallerComponentTrustRegistry {
             minAndroidSdk = 28,
             packageName = DESKTOP_PACKAGE_NAME,
             certificateSha256 = DEBUG_CERTIFICATE_SHA256,
+            trustProfileId = "nine-studio",
         ),
         TrustedInstallerComponent(
             componentId = LYRICS_COMPONENT_ID,
@@ -75,6 +83,7 @@ object InstallerComponentTrustRegistry {
             minAndroidSdk = 26,
             packageName = LYRICS_PACKAGE_NAME,
             certificateSha256 = DEBUG_CERTIFICATE_SHA256,
+            trustProfileId = "nine-studio",
         ),
         TrustedInstallerComponent(
             componentId = FILE_MANAGER_COMPONENT_ID,
@@ -85,6 +94,7 @@ object InstallerComponentTrustRegistry {
             minAndroidSdk = 26,
             packageName = FILE_MANAGER_PACKAGE_NAME,
             certificateSha256 = DEBUG_CERTIFICATE_SHA256,
+            trustProfileId = "fossify-approved",
         ),
     )
 
@@ -93,4 +103,69 @@ object InstallerComponentTrustRegistry {
     fun get(componentId: String): TrustedInstallerComponent? = byId[componentId]
 
     fun ids(): Set<String> = byId.keys
+
+    fun expectedTrustProfileId(componentId: String): String? = byId[componentId]?.trustProfileId
+
+    /**
+     * Legacy component metadata remains available to old local fixtures, but
+     * it is no longer used to decide how many apps a Cloud catalog may contain.
+     */
+    val trustedPublisherCertificates: List<TrustedPublisherCertificate>
+        get() = InstallerPublisherTrustRegistry.certificates
+}
+
+data class TrustedPublisherCertificate(
+    val certificateSha256: String,
+    val packagePrefixes: Set<String>,
+)
+
+data class TrustedPublisherProfile(
+    val id: String,
+    val certificates: List<TrustedPublisherCertificate>,
+)
+
+/** Minimal local trust root shared by every dynamically discovered app. */
+object InstallerPublisherTrustRegistry {
+    private const val DEBUG_CERTIFICATE_SHA256 =
+        "2990047fddf6d6ec1eb7f83731fcc1398616e5fb83aec97542a4f132c35a1a27"
+
+    private val nineStudioCertificate = TrustedPublisherCertificate(
+        certificateSha256 = DEBUG_CERTIFICATE_SHA256,
+        packagePrefixes = setOf("com.tcrrry."),
+    )
+    private val fossifyCertificate = TrustedPublisherCertificate(
+        certificateSha256 = DEBUG_CERTIFICATE_SHA256,
+        packagePrefixes = setOf("org.fossify."),
+    )
+
+    val profiles: List<TrustedPublisherProfile> = listOf(
+        TrustedPublisherProfile("nine-studio", listOf(nineStudioCertificate)),
+        TrustedPublisherProfile("fossify-approved", listOf(fossifyCertificate)),
+    )
+
+    val certificates: List<TrustedPublisherCertificate> = listOf(
+        TrustedPublisherCertificate(
+            certificateSha256 = DEBUG_CERTIFICATE_SHA256,
+            packagePrefixes = setOf("com.tcrrry.", "org.fossify."),
+        ),
+    )
+
+    fun isTrusted(packageName: String, certificateDigests: Set<String>): Boolean = certificates.any { trusted ->
+        trusted.packagePrefixes.any(packageName::startsWith) &&
+            certificateDigests.any { it.equals(trusted.certificateSha256, ignoreCase = true) }
+    }
+
+    fun isKnownProfile(profileId: String): Boolean = profiles.any { it.id == profileId }
+
+    fun isTrusted(profileId: String, packageName: String, certificateDigests: Set<String>): Boolean =
+        profiles.firstOrNull { it.id == profileId }?.certificates?.any { trusted ->
+            trusted.packagePrefixes.any(packageName::startsWith) &&
+                certificateDigests.any { it.equals(trusted.certificateSha256, ignoreCase = true) }
+        } == true
+
+    fun trustedCertificateSha256(profileId: String, certificateDigests: Set<String>): String? =
+        profiles.firstOrNull { it.id == profileId }?.certificates
+            ?.asSequence()
+            ?.map { it.certificateSha256 }
+            ?.firstOrNull { expected -> certificateDigests.any { it.equals(expected, ignoreCase = true) } }
 }

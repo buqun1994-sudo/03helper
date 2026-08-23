@@ -2,12 +2,15 @@ package com.tcrrry.helper.ui.state
 
 import com.tcrrry.helper.domain.session.ComponentDescriptor
 import com.tcrrry.helper.domain.session.ComponentCompatibility
+import com.tcrrry.helper.domain.session.ComponentProgress
+import com.tcrrry.helper.domain.session.ComponentProgressStatus
 import com.tcrrry.helper.domain.session.DeviceConnectionStatus
 import com.tcrrry.helper.domain.session.FailureCategory
 import com.tcrrry.helper.domain.session.InstallPhase
 import com.tcrrry.helper.domain.session.InstallationSessionSnapshot
 import com.tcrrry.helper.domain.session.InstallationSessionState
 import com.tcrrry.helper.domain.session.ResultKind
+import com.tcrrry.helper.domain.device.AuthorizationPlanFactory
 
 object InstallUiStateMapper {
     fun map(snapshot: InstallationSessionSnapshot): InstallUiState {
@@ -109,13 +112,13 @@ object InstallUiStateMapper {
 
     private fun selectionState(snapshot: InstallationSessionSnapshot): InstallUiState.Selection {
         val rows = snapshot.components.map { it.toUiRow(snapshot.selectedOptionalComponentIds) }
-        val selected = rows.count { it.required || it.selected }
+        val selected = rows.count { it.isMandatory() || it.selected }
         val sizeLabel = rows.asSequence()
-            .filter { it.required || it.selected }
+            .filter { it.isMandatory() || it.selected }
             .mapNotNull { it.sizeLabel }
             .joinToString(" + ")
             .ifBlank { "待准备" }
-        val selectedRows = rows.filter { it.required || it.selected }
+        val selectedRows = rows.filter { it.isMandatory() || it.selected }
         return InstallUiState.Selection(
             deviceName = snapshot.device?.displayName ?: "车机未连接",
             components = rows,
@@ -123,12 +126,23 @@ object InstallUiStateMapper {
             summarySizeLabel = sizeLabel,
             canStart = snapshot.device?.connectionStatus == DeviceConnectionStatus.CONFIRMED &&
                 selectedRows.isNotEmpty() &&
-            selectedRows.all {
-                !it.versionLabel.isNullOrBlank() &&
-                    !it.sizeLabel.isNullOrBlank() &&
-                    !it.compatibilityLabel.isNullOrBlank() &&
-                    it.compatibilityState == ComponentCompatibility.SUPPORTED
+                selectedRows.all {
+                    it.status in setOf(
+                        com.tcrrry.helper.domain.session.ComponentStatus.READING,
+                        com.tcrrry.helper.domain.session.ComponentStatus.AVAILABLE,
+                        com.tcrrry.helper.domain.session.ComponentStatus.NEW,
+                        com.tcrrry.helper.domain.session.ComponentStatus.UPDATE_AVAILABLE,
+                    ) &&
+                        (snapshot.artifactManifests.isEmpty() &&
+                            it.compatibilityState != ComponentCompatibility.UNSUPPORTED ||
+                            snapshot.artifactManifests.isNotEmpty() && (
+                            !it.versionLabel.isNullOrBlank() &&
+                                !it.sizeLabel.isNullOrBlank() &&
+                                !it.compatibilityLabel.isNullOrBlank() &&
+                                it.compatibilityState == ComponentCompatibility.SUPPORTED
+                            ))
                 },
+            preparing = snapshot.components.isEmpty() && snapshot.failure == null,
         )
     }
 
@@ -165,6 +179,26 @@ object InstallUiStateMapper {
             ),
             completedStages = completedStages,
             canCancel = true,
+            componentProgress = selectedComponents(snapshot).map { component ->
+                val item = snapshot.componentProgress[component.id] ?: ComponentProgress(
+                    componentId = component.id,
+                    phase = currentPhase,
+                    status = ComponentProgressStatus.PENDING,
+                )
+                ComponentInstallProgressRow(
+                    componentId = component.id,
+                    displayName = component.displayName,
+                    iconKey = component.iconKey,
+                    phase = item.phase,
+                    status = item.status,
+                    progress = UiProgress(
+                        completedCount = if (item.status == ComponentProgressStatus.COMPLETED) 1 else 0,
+                        totalCount = 1,
+                        fraction = item.fraction?.takeIf { it.isFinite() }?.coerceIn(0f, 1f),
+                        indeterminate = item.indeterminate && item.status == ComponentProgressStatus.RUNNING,
+                    ),
+                )
+            },
         )
     }
 
@@ -179,6 +213,9 @@ object InstallUiStateMapper {
                 installed = it.installed,
                 configured = it.configured,
                 available = it.available,
+                errorReason = snapshot.components.firstOrNull { component ->
+                    component.id == it.componentId
+                }?.errorReason?.toUserMessage(),
             )
         },
         canContinue = kind != ResultKind.SUCCESS,
@@ -188,13 +225,32 @@ object InstallUiStateMapper {
         id = id,
         displayName = displayName,
         required = required,
-        selected = required || id in selectedOptionalIds,
+        selected = id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID || id in selectedOptionalIds,
         versionLabel = versionLabel,
         sizeLabel = sizeLabel,
         compatibilityLabel = compatibilityLabel,
         compatibilityState = compatibilityState,
         iconKey = iconKey,
+        description = description,
+        status = status,
+        errorReason = errorReason?.toUserMessage(),
     )
+
+    private fun selectedComponents(snapshot: InstallationSessionSnapshot): List<ComponentDescriptor> =
+        snapshot.components.filter {
+            it.id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID ||
+                it.id in snapshot.selectedOptionalComponentIds
+        }
+
+private fun ComponentRow.isMandatory(): Boolean = id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
+
+private fun String.toUserMessage(): String = when {
+    contains("missing") -> "下载目录中暂时没有这个应用"
+    contains("certificate") -> "应用签名与官方发布者不匹配"
+    contains("archive") || contains("zip") -> "压缩包校验失败"
+    contains("schema") || contains("capability") || contains("incompatible") -> "当前客户端或车机能力不足"
+    else -> "暂时无法使用，请稍后重试"
+}
 
     private fun com.tcrrry.helper.domain.session.SessionFailure?.toResultKind(): ResultKind = when (this?.category) {
         FailureCategory.DOWNLOAD,

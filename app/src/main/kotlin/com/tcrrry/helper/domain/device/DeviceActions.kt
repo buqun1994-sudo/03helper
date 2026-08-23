@@ -4,6 +4,7 @@ import com.tcrrry.helper.domain.artifact.ArtifactManifest
 import com.tcrrry.helper.domain.artifact.ArtifactVersion
 import com.tcrrry.helper.domain.artifact.InstallerComponentTrustRegistry
 import java.io.File
+import java.util.LinkedHashSet
 
 /**
  * The only device-action port exposed after a connection lease has completed
@@ -21,13 +22,20 @@ interface AdbCommandGateway {
     suspend fun install(artifacts: List<InstallableArtifact>): DeviceInstallResult
 
     /**
-     * Runs the one fixed post-install command for the selected components.
+     * Runs the one versioned authorization plan for the selected components.
      * The caller supplies validated component ids, never shell text.
      */
     suspend fun runShortcut(
         shortcut: DeviceShortcut,
         selectedComponentIds: Set<String>,
     ): DeviceShortcutResult
+
+    /** Dynamic v3 path; old fakes can continue to implement the narrow method. */
+    suspend fun runShortcut(
+        shortcut: DeviceShortcut,
+        selectedComponentIds: Set<String>,
+        authorizationPlan: AuthorizationPlan,
+    ): DeviceShortcutResult = runShortcut(shortcut, selectedComponentIds)
 }
 
 /** Fixed, non-shell maintenance operations available after a confirmed lease. */
@@ -42,7 +50,15 @@ interface MaintenanceCommandGateway {
 
     suspend fun inspectManagedApplications(): ManagedApplicationsResult
 
+    suspend fun inspectManagedApplications(
+        components: List<ManagedComponent>,
+    ): ManagedApplicationsResult = inspectManagedApplications()
+
     suspend fun launchManagedComponent(componentId: String): MaintenanceDeviceResult
+
+    /** Dynamic maintenance launch uses the verified package identity plus a typed catalog setup. */
+    suspend fun launchManagedComponent(component: ManagedComponent): MaintenanceDeviceResult =
+        launchManagedComponent(component.componentId)
 }
 
 sealed interface MaintenanceDeviceResult {
@@ -79,6 +95,29 @@ data class InstallableArtifact(
     val apkFile: File,
     val declarations: ApkDeclarationMetadata? = null,
 )
+
+/**
+ * Cloud may request only these typed setup primitives. The declaration is
+ * compiled into [AuthorizationAction] values before it can reach ADB; it can
+ * never carry shell text, a package identity, or an arbitrary setting name.
+ */
+data class AuthorizationSetupDeclaration(
+    val appOps: Set<ManagedAppOp> = emptySet(),
+    val runtimePermissions: Set<ManagedRuntimePermission> = emptySet(),
+    val secureSettings: Set<ManagedSecureFlag> = emptySet(),
+    val secureComponents: Set<SecureComponent> = emptySet(),
+    val launchComponent: String? = null,
+    val requiredServices: Set<String> = emptySet(),
+    /** Cloud profile selector compiled against the local authorization registry. */
+    val profileId: String = "",
+    /** Cloud action selectors; values are identifiers, never shell text. */
+    val actionIds: Set<String> = emptySet(),
+) {
+    data class SecureComponent(
+        val setting: ManagedSecureComponentList,
+        val targetComponent: String,
+    )
+}
 
 sealed interface DeviceInstallResult {
     data class Installed(val evidence: List<InstalledArtifactEvidence>) : DeviceInstallResult
@@ -183,7 +222,7 @@ data class DeviceAvailabilityEvidence(
     val requiredServiceBound: Boolean?,
 )
 
-/** Versioned, fixed action schema. Catalog data can select components but cannot add actions. */
+/** Versioned typed action schema. Catalog data can select components but cannot add actions. */
 data class AuthorizationPlan(
     val version: Int,
     val components: List<ManagedComponent>,
@@ -193,6 +232,8 @@ data class AuthorizationPlan(
 data class ManagedComponent(
     val componentId: String,
     val packageName: String,
+    val setup: AuthorizationSetupDeclaration? = null,
+    val order: Int = Int.MAX_VALUE,
 )
 
 sealed interface AuthorizationAction {
@@ -254,6 +295,48 @@ sealed interface AuthorizationPlanBuildResult {
     data class Rejected(val reasonCode: String) : AuthorizationPlanBuildResult
 }
 
+data class AuthorizationCapacityLimits(
+    val maxEntriesPerSecureList: Int = 32,
+    val maxSerializedBytesPerSecureList: Int = 4 * 1024,
+)
+
+/**
+ * Android 9 stores authorization lists as colon-delimited secure strings. The
+ * policy calculates the post-write values before any mutation and can be
+ * supplied with the measured limits of a target head unit.
+ */
+object AuthorizationCapacityPolicy {
+    val ANDROID_9_DEFAULT = AuthorizationCapacityLimits()
+
+    fun validate(
+        plan: AuthorizationPlan,
+        existingValues: Map<ManagedSecureComponentList, String?>,
+        limits: AuthorizationCapacityLimits = ANDROID_9_DEFAULT,
+    ): String? {
+        if (limits.maxEntriesPerSecureList <= 0 || limits.maxSerializedBytesPerSecureList <= 0) {
+            return "authorization_capacity_policy_invalid"
+        }
+        val actionsBySetting = plan.actions.filterIsInstance<AuthorizationAction.AppendSecureComponent>()
+            .groupBy { it.setting }
+        actionsBySetting.forEach { (setting, actions) ->
+            val values = LinkedHashSet<String>()
+            existingValues[setting].orEmpty()
+                .takeUnless { it == "null" }
+                ?.split(':')
+                ?.filter(String::isNotBlank)
+                ?.forEach(values::add)
+            actions.forEach { action ->
+                values += action.targetComponent
+            }
+            if (values.size > limits.maxEntriesPerSecureList) return "authorization_capacity_entries_exceeded"
+            if (values.joinToString(":").toByteArray(Charsets.UTF_8).size > limits.maxSerializedBytesPerSecureList) {
+                return "authorization_capacity_bytes_exceeded"
+            }
+        }
+        return null
+    }
+}
+
 /**
  * The release manifest supplies artifact identity, not system commands. This
  * factory is the sole mapping from a verified component to its approved setup.
@@ -263,22 +346,43 @@ object AuthorizationPlanFactory {
 
     fun create(artifacts: List<InstallableArtifact>): AuthorizationPlanBuildResult =
         createComponents(
-            artifacts.map { ManagedComponent(it.manifest.componentId, it.manifest.packageName) },
+            artifacts.map { artifact ->
+                ManagedComponent(
+                    componentId = artifact.manifest.componentId,
+                    packageName = artifact.manifest.packageName,
+                    setup = artifact.manifest.deviceSetup,
+                    order = artifact.manifest.sortOrder,
+                )
+            },
         )
 
     fun createForManifests(manifests: List<ArtifactManifest>): AuthorizationPlanBuildResult =
         createComponents(
-            manifests.map { ManagedComponent(it.componentId, it.packageName) },
+            manifests.map {
+                ManagedComponent(
+                    componentId = it.componentId,
+                    packageName = it.packageName,
+                    setup = it.deviceSetup,
+                    order = it.sortOrder,
+                )
+            },
         )
 
     fun createForComponents(components: List<ManagedComponent>): AuthorizationPlanBuildResult =
         createComponents(components)
 
-    /** Stable registry order for the fixed command; catalog data cannot add components here. */
+    /**
+     * Validates one catalog component before it is combined with the selected
+     * installation batch. The catalog layer uses this to isolate a malformed
+     * optional setup instead of letting it reject unrelated applications.
+     */
+    fun validateComponent(component: ManagedComponent): Boolean = isAllowedDynamicComponent(component)
+
+    /** Returns the built-in component descriptors used by the legacy overload. */
     fun allManagedComponents(): List<ManagedComponent> = listOf(
-        ManagedComponent(DESKTOP_COMPONENT_ID, DESKTOP_PACKAGE_NAME),
-        ManagedComponent(LYRICS_COMPONENT_ID, LYRICS_PACKAGE_NAME),
-        ManagedComponent(FILE_MANAGER_COMPONENT_ID, FILE_MANAGER_PACKAGE_NAME),
+        ManagedComponent(DESKTOP_COMPONENT_ID, DESKTOP_PACKAGE_NAME, order = 0),
+        ManagedComponent(LYRICS_COMPONENT_ID, LYRICS_PACKAGE_NAME, order = 1),
+        ManagedComponent(FILE_MANAGER_COMPONENT_ID, FILE_MANAGER_PACKAGE_NAME, order = 2),
     )
 
     fun validateEvidence(
@@ -316,13 +420,13 @@ object AuthorizationPlanFactory {
         if (components.map { it.componentId }.toSet().size != components.size) {
             return AuthorizationPlanBuildResult.Rejected("authorization_component_duplicate")
         }
-        if (components.any { component -> managedComponent(component) == null }) {
+        if (components.any { component -> !isAllowedDynamicComponent(component) }) {
             return AuthorizationPlanBuildResult.Rejected("authorization_component_unapproved")
         }
         if (components.none { it.componentId == DESKTOP_COMPONENT_ID }) {
             return AuthorizationPlanBuildResult.Rejected("authorization_desktop_missing")
         }
-        val orderedComponents = components.sortedBy { managedComponent(checkNotNull(it))?.order }
+        val orderedComponents = components.sortedWith(compareBy<ManagedComponent> { componentOrder(it) }.thenBy { it.componentId })
         return AuthorizationPlanBuildResult.Ready(
             AuthorizationPlan(
                 version = CURRENT_VERSION,
@@ -335,8 +439,8 @@ object AuthorizationPlanFactory {
     fun validate(plan: AuthorizationPlan): Boolean {
         if (plan.version != CURRENT_VERSION || plan.components.isEmpty()) return false
         if (plan.components.map { it.componentId }.toSet().size != plan.components.size) return false
-        if (plan.components.any { managedComponent(it) == null }) return false
-        val expectedComponents = plan.components.sortedBy { managedComponent(checkNotNull(it))?.order }
+        if (plan.components.any { !isAllowedDynamicComponent(it) }) return false
+        val expectedComponents = plan.components.sortedWith(compareBy<ManagedComponent> { componentOrder(it) }.thenBy { it.componentId })
         return plan.components == expectedComponents &&
             plan.actions == expectedComponents.flatMap(::actionsFor)
     }
@@ -345,14 +449,17 @@ object AuthorizationPlanFactory {
         requiredRuntimeServices(component).firstOrNull()
 
     fun requiredRuntimeServices(component: ManagedComponent): List<String> =
-        managedComponent(component)?.requiredRuntimeServices.orEmpty()
+        component.setup?.requiredServices?.toList()?.sorted()
+            ?.takeIf { it.isNotEmpty() }
+            ?: managedComponent(component)?.requiredRuntimeServices.orEmpty()
 
     fun fixedLaunchComponent(component: ManagedComponent): String? =
-        managedComponent(component)?.fixedLaunchComponent
+        component.setup?.launchComponent ?: managedComponent(component)?.fixedLaunchComponent
 
     private fun actionsFor(component: ManagedComponent): List<AuthorizationAction> {
-        val contract = managedComponent(component) ?: return emptyList()
-        return when (component.componentId) {
+        val contract = managedComponent(component)
+        if (contract == null) return component.setup?.let { compileSetupActions(component, it) }.orEmpty()
+        val fixed = when (component.componentId) {
         LYRICS_COMPONENT_ID -> listOf(
             AuthorizationAction.EnsureAppOpAllowed(
                 id = "lyrics-overlay-v1",
@@ -434,6 +541,10 @@ object AuthorizationPlanFactory {
         )
         else -> emptyList()
         }
+        val declared = component.setup?.let { compileSetupActions(component, it) }.orEmpty()
+        if (declared.isEmpty()) return fixed
+        val fixedIds = fixed.map { it.id }.toSet()
+        return fixed + declared.filter { it.id !in fixedIds }
     }
 
     private fun managedComponent(component: ManagedComponent): ManagedComponentContract? =
@@ -462,6 +573,106 @@ object AuthorizationPlanFactory {
             else -> null
         }?.takeIf { it.packageName == component.packageName }
 
+    private fun isAllowedDynamicComponent(component: ManagedComponent): Boolean {
+        if (component.componentId.isBlank() || !APP_ID_PATTERN.matches(component.componentId)) return false
+        if (!PACKAGE_NAME_PATTERN.matches(component.packageName)) return false
+        if (component.componentId in BUILT_IN_COMPONENT_IDS && managedComponent(component) == null) return false
+        return validateSetup(component)
+    }
+
+    private fun validateSetup(component: ManagedComponent): Boolean {
+        val setup = component.setup ?: return true
+        if (setup.profileId.isNotBlank() && PROFILE_COMPONENTS[setup.profileId] != component.componentId) {
+            return false
+        }
+        if (setup.actionIds.size != setup.actionIds.distinct().size ||
+            setup.actionIds.any { it !in knownActionIds(component) }
+        ) {
+            return false
+        }
+        fun belongsToPackage(value: String): Boolean {
+            val packageName = value.substringBefore('/', missingDelimiterValue = "")
+            return packageName == component.packageName && value.length <= MAX_COMPONENT_NAME_LENGTH &&
+                COMPONENT_NAME_PATTERN.matches(value)
+        }
+        return setup.launchComponent?.let(::belongsToPackage) != false &&
+            setup.requiredServices.all(::belongsToPackage) &&
+            setup.secureComponents.all { it.targetComponent.let(::belongsToPackage) }
+    }
+
+    /**
+     * Cloud may select only actions already compiled into the local component
+     * contract. The complete fixed plan remains the local default; selectors
+     * cannot add an action that the client does not know.
+     */
+    private fun knownActionIds(component: ManagedComponent): Set<String> = when (component.componentId) {
+        DESKTOP_COMPONENT_ID -> setOf(
+            "desktop-overlay-v1",
+            "desktop-install-packages-v1",
+            "desktop-accessibility-master-v1",
+            "desktop-accessibility-service-v1",
+        )
+
+        LYRICS_COMPONENT_ID -> setOf(
+            "lyrics-overlay-v1",
+            "lyrics-notification-listener-v1",
+            "lyrics-accessibility-service-v1",
+        )
+
+        FILE_MANAGER_COMPONENT_ID -> setOf(
+            "file-manager-read-permission-v1",
+            "file-manager-read-appop-v1",
+            "file-manager-write-permission-v1",
+            "file-manager-write-appop-v1",
+            "file-manager-install-packages-v1",
+        )
+
+        else -> emptySet()
+    }
+
+    /** Dynamic manifests carry the authoritative order; legacy descriptors set it explicitly above. */
+    private fun componentOrder(component: ManagedComponent): Int = component.order
+
+    private fun compileSetupActions(
+        component: ManagedComponent,
+        setup: AuthorizationSetupDeclaration,
+    ): List<AuthorizationAction> {
+        val prefix = component.componentId
+        val actions = mutableListOf<AuthorizationAction>()
+        setup.appOps.sortedBy { it.name }.forEach { operation ->
+            actions += AuthorizationAction.EnsureAppOpAllowed(
+                id = "$prefix-appop-${operation.name.lowercase()}-v1",
+                componentId = component.componentId,
+                packageName = component.packageName,
+                operation = operation,
+            )
+        }
+        setup.runtimePermissions.sortedBy { it.name }.forEach { permission ->
+            actions += AuthorizationAction.EnsureRuntimePermissionGranted(
+                id = "$prefix-permission-${permission.name.lowercase()}-v1",
+                componentId = component.componentId,
+                packageName = component.packageName,
+                permission = permission,
+            )
+        }
+        setup.secureSettings.sortedBy { it.name }.forEach { setting ->
+            actions += AuthorizationAction.EnsureSecureSettingEnabled(
+                id = "$prefix-setting-${setting.name.lowercase()}-v1",
+                componentId = component.componentId,
+                setting = setting,
+            )
+        }
+        setup.secureComponents.sortedWith(compareBy({ it.setting.name }, { it.targetComponent })).forEach { declaration ->
+            actions += AuthorizationAction.AppendSecureComponent(
+                id = "$prefix-component-${declaration.setting.name.lowercase()}-${actions.size}-v1",
+                componentId = component.componentId,
+                setting = declaration.setting,
+                targetComponent = declaration.targetComponent,
+            )
+        }
+        return actions
+    }
+
     private data class ManagedComponentContract(
         val packageName: String,
         val order: Int,
@@ -485,6 +696,23 @@ object AuthorizationPlanFactory {
         "com.tcrrry.desktoplyrics/com.tcrrry.desktoplyrics.IcarDockAccessibilityService"
     const val DESKTOP_ACCESSIBILITY_SERVICE =
         "com.tcrrry.desktop/com.tcrrry.desktop.debug.NavigationDemoAccessibilityService"
+
+    private val BUILT_IN_COMPONENT_IDS = setOf(
+        DESKTOP_COMPONENT_ID,
+        LYRICS_COMPONENT_ID,
+        FILE_MANAGER_COMPONENT_ID,
+    )
+
+    private val PROFILE_COMPONENTS = mapOf(
+        "desktop-default" to DESKTOP_COMPONENT_ID,
+        "lyrics-default" to LYRICS_COMPONENT_ID,
+        "file-manager-default" to FILE_MANAGER_COMPONENT_ID,
+    )
+
+    private val APP_ID_PATTERN = Regex("^[a-z0-9][a-z0-9._-]{0,63}$")
+    private val PACKAGE_NAME_PATTERN = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$")
+    private val COMPONENT_NAME_PATTERN = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)*/[A-Za-z0-9_.$]+$")
+    private const val MAX_COMPONENT_NAME_LENGTH = 256
 }
 
 /** Rejects an authorization plan unless every required APK capability is declared. */

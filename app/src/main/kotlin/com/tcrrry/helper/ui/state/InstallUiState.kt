@@ -2,6 +2,7 @@ package com.tcrrry.helper.ui.state
 
 import com.tcrrry.helper.domain.session.DeviceConnectionStatus
 import com.tcrrry.helper.domain.session.ComponentCompatibility
+import com.tcrrry.helper.domain.session.ComponentProgressStatus
 import com.tcrrry.helper.domain.session.InstallPhase
 import com.tcrrry.helper.domain.session.MaintenanceActionId
 import com.tcrrry.helper.domain.session.MaintenanceActionStatus
@@ -25,6 +26,8 @@ sealed interface InstallUiState {
         val summaryCount: Int,
         val summarySizeLabel: String,
         val canStart: Boolean,
+        /** True while the connected session is still building the remote catalog. */
+        val preparing: Boolean = false,
     ) : InstallUiState {
         override val screen: InstallScreen = InstallScreen.SELECTION
     }
@@ -36,6 +39,7 @@ sealed interface InstallUiState {
         val progress: UiProgress,
         val completedStages: Set<InstallPhase>,
         val canCancel: Boolean,
+        val componentProgress: List<ComponentInstallProgressRow> = emptyList(),
     ) : InstallUiState {
         override val screen: InstallScreen = InstallScreen.INSTALLING
     }
@@ -105,6 +109,10 @@ data class ComponentRow(
     val compatibilityLabel: String?,
     val compatibilityState: ComponentCompatibility,
     val iconKey: String,
+    val description: String = "",
+    val status: com.tcrrry.helper.domain.session.ComponentStatus =
+        com.tcrrry.helper.domain.session.ComponentStatus.READING,
+    val errorReason: String? = null,
 )
 
 data class UiProgress(
@@ -114,11 +122,21 @@ data class UiProgress(
     val indeterminate: Boolean,
 )
 
+data class ComponentInstallProgressRow(
+    val componentId: String,
+    val displayName: String,
+    val iconKey: String,
+    val phase: InstallPhase,
+    val status: ComponentProgressStatus,
+    val progress: UiProgress,
+)
+
 data class ComponentResultRow(
     val componentName: String,
     val installed: Boolean,
     val configured: Boolean,
     val available: Boolean,
+    val errorReason: String? = null,
 )
 
 data class MaintenanceFeedback(

@@ -67,7 +67,7 @@ internal object DebugScenarioFixtures {
             required = true,
             versionLabel = "0.1",
             sizeLabel = "12 MB",
-            compatibilityLabel = "适用于当前车机",
+            compatibilityLabel = null,
         ),
         ComponentDescriptor(
             id = "lyrics",
@@ -75,7 +75,7 @@ internal object DebugScenarioFixtures {
             required = false,
             versionLabel = "1.14",
             sizeLabel = "18 MB",
-            compatibilityLabel = "适用于当前车机",
+            compatibilityLabel = null,
         ),
         ComponentDescriptor(
             id = "file-manager",

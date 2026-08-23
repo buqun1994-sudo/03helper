@@ -73,6 +73,9 @@ sealed interface InstallationSessionEvent {
         val keyId: String,
         val signatureAlgorithm: String,
         val manifests: List<ArtifactManifest>,
+        val catalogRevision: Long = 0L,
+        val apps: List<ComponentDescriptor> = emptyList(),
+        val appFailures: Map<String, String> = emptyMap(),
     ) : InstallationSessionEvent
 
     /** Folder-based distribution exposes component choices before APK metadata is known. */
@@ -81,6 +84,19 @@ sealed interface InstallationSessionEvent {
         val keyId: String,
         val signatureAlgorithm: String,
         val components: List<ComponentDescriptor>,
+        val appFailures: Map<String, String> = emptyMap(),
+        val catalogRevision: Long = 0L,
+    ) : InstallationSessionEvent
+
+    /** The selected applications' manifests are ready after the user confirms the selection. */
+    data class SelectedCatalogResolved(
+        val catalogVersion: String,
+        val keyId: String,
+        val signatureAlgorithm: String,
+        val manifests: List<ArtifactManifest>,
+        val catalogRevision: Long = 0L,
+        val apps: List<ComponentDescriptor> = emptyList(),
+        val appFailures: Map<String, String> = emptyMap(),
     ) : InstallationSessionEvent
 
     data class CatalogFailed(val reasonCode: String) : InstallationSessionEvent
@@ -129,6 +145,23 @@ sealed interface InstallationSessionEvent {
         val archiveDeleted: Boolean = false,
     ) : InstallationSessionEvent
 
+    data class ArtifactUnavailable(
+        val componentId: String,
+        val reasonCode: String,
+        val sourceKind: ArtifactSourceKind? = null,
+    ) : InstallationSessionEvent
+
+    /** A real per-application transfer or install state update. */
+    data class ComponentProgressUpdated(
+        val componentId: String,
+        val phase: InstallPhase,
+        val status: ComponentProgressStatus,
+        val bytesWritten: Long = 0L,
+        val totalBytes: Long = 0L,
+        val fraction: Float? = null,
+        val indeterminate: Boolean = true,
+    ) : InstallationSessionEvent
+
     data class InstallationStarted(val componentIds: List<String> = emptyList()) : InstallationSessionEvent
 
     data class InstallationCompleted(
@@ -173,6 +206,9 @@ sealed interface InstallationSessionEvent {
         val keyId: String,
         val signatureAlgorithm: String,
         val manifests: List<ArtifactManifest>,
+        val apps: List<ComponentDescriptor> = emptyList(),
+        val appFailures: Map<String, String> = emptyMap(),
+        val catalogRevision: Long = 0L,
     ) : InstallationSessionEvent
 
     data class RecoverableError(

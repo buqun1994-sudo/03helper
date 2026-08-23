@@ -127,6 +127,7 @@ fun ArtifactManifest.toComponentDescriptor(
         id = componentId,
         displayName = displayName,
         required = required,
+        description = description,
         versionLabel = version.name,
         sizeLabel = formatBytes(archiveSizeBytes),
         // Keep the compatibility gate in the domain while exposing only plain language.
@@ -144,6 +145,7 @@ fun ArtifactManifest.toComponentDescriptor(
             else -> com.tcrrry.helper.domain.session.ComponentCompatibility.SUPPORTED
         },
         iconKey = componentId,
+        status = com.tcrrry.helper.domain.session.ComponentStatus.AVAILABLE,
     )
 
 private fun formatBytes(bytes: Long): String {

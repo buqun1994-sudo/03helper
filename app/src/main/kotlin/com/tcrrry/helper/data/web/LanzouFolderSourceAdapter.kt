@@ -8,6 +8,7 @@ import com.tcrrry.helper.domain.artifact.ArtifactSource
 import com.tcrrry.helper.domain.artifact.ArtifactSourceKind
 import com.tcrrry.helper.domain.artifact.ReleaseSourcePolicy
 import java.net.URI
+import java.util.Locale
 import kotlin.coroutines.resume
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
@@ -27,6 +28,12 @@ data class LanzouFolderArtifact(
     val source: ArtifactSource,
 )
 
+data class LanzouFolderAppFailure(
+    val componentId: String,
+    val reasonCode: String,
+    val retryable: Boolean,
+)
+
 fun interface LanzouFolderWebViewHostFactory {
     fun create(): LanzouFolderWebViewHost
 }
@@ -43,12 +50,15 @@ interface LanzouFolderWebViewHost {
 }
 
 sealed interface LanzouFolderResolutionResult {
-    data class Success(val artifacts: List<LanzouFolderArtifact>) : LanzouFolderResolutionResult
+    data class Success(
+        val artifacts: List<LanzouFolderArtifact>,
+        val appFailures: List<LanzouFolderAppFailure> = emptyList(),
+    ) : LanzouFolderResolutionResult
 
     data class Failure(val failure: ArtifactFailure) : LanzouFolderResolutionResult
 }
 
-/** Resolves one configured Lanzou folder into the fixed component set. */
+/** Resolves the enabled dynamic app entries in one configured Lanzou folder. */
 class LanzouFolderSourceAdapter(
     private val hostFactory: LanzouFolderWebViewHostFactory,
     private val sourcePolicy: ReleaseSourcePolicy = ReleaseSourcePolicy(),
@@ -110,41 +120,47 @@ class LanzouFolderSourceAdapter(
         folderUri: URI,
         entries: List<LanzouFolderEntry>,
     ): LanzouFolderResolutionResult {
+        // Lanzou can contain readme files, old releases, or other operator
+        // artifacts. They are outside the signed app set and are ignored.
         val zipEntries = entries.filter { it.name.endsWith(".zip", ignoreCase = true) }
-        if (zipEntries.size != entries.size) {
-            return failure("lanzou_folder_unknown_file", retryable = false)
-        }
-        val allowedNames = config.components.associateBy { it.archiveFileName.lowercase() }
-        if (zipEntries.any { it.name.lowercase() !in allowedNames }) {
-            return failure("lanzou_folder_unknown_file", retryable = false)
-        }
-        if (zipEntries.map { it.id }.toSet().size != zipEntries.size) {
-            return failure("lanzou_folder_duplicate_file", retryable = false)
-        }
-        val byName = zipEntries.groupBy { it.name.lowercase() }
-        if (byName.values.any { it.size != 1 }) {
-            return failure("lanzou_folder_duplicate_file", retryable = false)
-        }
+        val configuredApps = config.declaredApps().filter { it.enabled && it.clientSupported }
+        val byName = zipEntries.groupBy { it.name.lowercase(Locale.ROOT) }
         val origin = "${folderUri.scheme}://${folderUri.authority}"
         val artifacts = mutableListOf<LanzouFolderArtifact>()
-        for (component in config.components) {
-            val entry = byName[component.archiveFileName.lowercase()]?.singleOrNull()
+        val appFailures = mutableListOf<LanzouFolderAppFailure>()
+        val matchedIds = mutableMapOf<String, String>()
+        config.declaredApps().filter { it.enabled && !it.clientSupported }.forEach { component ->
+            if (component.componentId == DESKTOP_APP_ID) {
+                return failure("lanzou_folder_client_schema_unsupported", retryable = false, componentId = component.componentId)
+            }
+            appFailures += LanzouFolderAppFailure(
+                componentId = component.componentId,
+                reasonCode = "lanzou_folder_client_schema_unsupported",
+                retryable = false,
+            )
+        }
+        for (component in configuredApps) {
+            val entry = byName[component.archiveFileName.lowercase(Locale.ROOT)]?.singleOrNull()
             if (entry == null) {
-                if (component.required) {
-                    return failure(
-                        reasonCode = "lanzou_folder_missing_${component.componentId}",
-                        retryable = false,
-                        componentId = component.componentId,
-                    )
+                val duplicate = byName[component.archiveFileName.lowercase(Locale.ROOT)].orEmpty().size > 1
+                val reason = if (duplicate) "lanzou_folder_duplicate_file" else "lanzou_folder_missing_${component.componentId}"
+                if (component.componentId == DESKTOP_APP_ID) {
+                    return failure(reasonCode = reason, retryable = false, componentId = component.componentId)
                 }
+                appFailures += LanzouFolderAppFailure(component.componentId, reason, retryable = false)
                 continue
             }
             if (!entry.id.matches(SHARE_ID_PATTERN)) {
-                return failure(
-                    "lanzou_folder_entry_id_invalid",
-                    retryable = false,
-                    componentId = component.componentId,
-                )
+                appFailures += LanzouFolderAppFailure(component.componentId, "lanzou_folder_entry_id_invalid", false)
+                continue
+            }
+            val previousApp = matchedIds.putIfAbsent(entry.id, component.componentId)
+            if (previousApp != null) {
+                if (component.componentId == DESKTOP_APP_ID || previousApp == DESKTOP_APP_ID) {
+                    return failure("lanzou_folder_duplicate_entry", retryable = false, componentId = component.componentId)
+                }
+                appFailures += LanzouFolderAppFailure(component.componentId, "lanzou_folder_duplicate_entry", false)
+                continue
             }
             val source = ArtifactSource(
                 kind = ArtifactSourceKind.LANZOU_SHARE,
@@ -152,16 +168,26 @@ class LanzouFolderSourceAdapter(
             )
             when (val validation = sourcePolicy.validateManifestSource(source)) {
                 com.tcrrry.helper.domain.artifact.SourcePolicyValidation.Accepted -> Unit
-                is com.tcrrry.helper.domain.artifact.SourcePolicyValidation.Rejected ->
-                    return failure(
-                        validation.reasonCode,
-                        retryable = false,
-                        componentId = component.componentId,
-                    )
+                is com.tcrrry.helper.domain.artifact.SourcePolicyValidation.Rejected -> {
+                    appFailures += LanzouFolderAppFailure(component.componentId, validation.reasonCode, false)
+                    continue
+                }
             }
-            artifacts += LanzouFolderArtifact(component, entry, source)
+            // The folder listing is the only metadata available before the user
+            // confirms a download. Keep its bounded size estimate for the
+            // selection page; APK-derived values still replace it later.
+            artifacts += LanzouFolderArtifact(
+                component = component.copy(
+                    sizeLabel = entry.sizeLabel?.let(::normalizeSizeLabel) ?: component.sizeLabel,
+                ),
+                entry = entry,
+                source = source,
+            )
         }
-        return LanzouFolderResolutionResult.Success(artifacts)
+        if (artifacts.isEmpty()) {
+            return failure("lanzou_folder_no_available_apps", retryable = false)
+        }
+        return LanzouFolderResolutionResult.Success(artifacts, appFailures)
     }
 
     private fun failure(
@@ -193,6 +219,25 @@ class LanzouFolderSourceAdapter(
 
     private companion object {
         const val DEFAULT_TIMEOUT_MILLIS = 30_000L
+        const val DESKTOP_APP_ID = "desktop"
         val SHARE_ID_PATTERN = Regex("^i[a-zA-Z0-9]+$")
+        val SIZE_LABEL_PATTERN = Regex(
+            "([0-9]+(?:\\.[0-9]+)?)\\s*(B|K|KB|M|MB|G|GB|T|TB)",
+            RegexOption.IGNORE_CASE,
+        )
+
+        fun normalizeSizeLabel(value: String): String? {
+            val trimmed = value.trim()
+            if (trimmed.length > 32) return null
+            val match = SIZE_LABEL_PATTERN.find(trimmed) ?: return null
+            val unit = when (match.groupValues[2].uppercase()) {
+                "K" -> "KB"
+                "M" -> "MB"
+                "G" -> "GB"
+                "T" -> "TB"
+                else -> match.groupValues[2].uppercase()
+            }
+            return "${match.groupValues[1]} $unit"
+        }
     }
 }

@@ -15,7 +15,9 @@ import com.tcrrry.helper.domain.device.DeviceShortcutResult
 import com.tcrrry.helper.domain.device.DeviceAvailabilityEvidence
 import com.tcrrry.helper.domain.device.InstallableArtifact
 import com.tcrrry.helper.domain.session.ComponentCheck
+import com.tcrrry.helper.domain.session.ComponentProgressStatus
 import com.tcrrry.helper.domain.session.FailureCategory
+import com.tcrrry.helper.domain.session.InstallPhase
 import com.tcrrry.helper.domain.session.InstallationSessionEvent
 
 sealed interface DeviceInstallationExecutionResult {
@@ -40,7 +42,8 @@ class DeviceInstallationCoordinator(
                 category = FailureCategory.INSTALLATION,
                 failure = DeviceActionFailure("device_action_gateway_unavailable", retryable = false),
             )
-        val installable = artifacts.map { artifact ->
+        val orderedArtifacts = artifacts.sortedWith(compareBy<PreparedArtifact> { it.manifest.sortOrder }.thenBy { it.manifest.componentId })
+        val installable = orderedArtifacts.map { artifact ->
             InstallableArtifact(
                 manifest = artifact.manifest,
                 apkFile = artifact.finalApk,
@@ -61,6 +64,9 @@ class DeviceInstallationCoordinator(
                 failure = DeviceActionFailure(result.reasonCode, retryable = false),
             )
         }
+        installable.forEach { artifact ->
+            emitProgress(artifact.manifest.componentId, InstallPhase.SEND, ComponentProgressStatus.RUNNING)
+        }
         val gateway = actionConnection.commandGateway
         eventPort.emit(InstallationSessionEvent.InstallationStarted(componentIds.toList()))
 
@@ -79,6 +85,9 @@ class DeviceInstallationCoordinator(
                         evidence = result.evidence,
                     ),
                 )
+                installable.forEach { artifact ->
+                    emitProgress(artifact.manifest.componentId, InstallPhase.SEND, ComponentProgressStatus.COMPLETED)
+                }
                 result.evidence
             }
         }
@@ -90,6 +99,7 @@ class DeviceInstallationCoordinator(
         when (val result = gateway.runShortcut(
             shortcut = DeviceShortcut.CONFIGURE_ALL_INSTALLED_APPS_AND_START_DESKTOP,
             selectedComponentIds = componentIds,
+            authorizationPlan = authorizationPlan,
         )) {
             is DeviceShortcutResult.Failed -> return failed(
                 category = if (result.stage == DeviceShortcutFailureStage.AUTHORIZATION) {
@@ -121,6 +131,9 @@ class DeviceInstallationCoordinator(
                         evidence = selectedAuthorizationEvidence,
                     ),
                 )
+                installable.forEach { artifact ->
+                    emitProgress(artifact.manifest.componentId, InstallPhase.CONFIGURE, ComponentProgressStatus.COMPLETED)
+                }
                 val desktopRuntime = result.availabilityEvidence.firstOrNull {
                     it.componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
                 } ?: return failed(
@@ -157,6 +170,9 @@ class DeviceInstallationCoordinator(
                         evidence = selectedAvailabilityEvidence,
                     ),
                 )
+                installable.forEach { artifact ->
+                    emitProgress(artifact.manifest.componentId, InstallPhase.VERIFY, ComponentProgressStatus.COMPLETED)
+                }
                 artifacts.forEach { artifact ->
                     runCatching { artifact.finalApk.delete() }
                 }
@@ -217,6 +233,18 @@ class DeviceInstallationCoordinator(
         category: FailureCategory,
         failure: DeviceActionFailure,
     ): DeviceInstallationExecutionResult {
+        failure.componentId?.let { componentId ->
+            emitProgress(
+                componentId = componentId,
+                phase = when (category) {
+                    FailureCategory.INSTALLATION -> InstallPhase.SEND
+                    FailureCategory.CONFIGURATION -> InstallPhase.CONFIGURE
+                    else -> InstallPhase.VERIFY
+                },
+                status = ComponentProgressStatus.FAILED,
+                indeterminate = false,
+            )
+        }
         if (failure.retryable) {
             eventPort.emit(
                 InstallationSessionEvent.RecoverableError(
@@ -235,6 +263,23 @@ class DeviceInstallationCoordinator(
             )
         }
         return DeviceInstallationExecutionResult.Failed
+    }
+
+    private fun emitProgress(
+        componentId: String,
+        phase: InstallPhase,
+        status: ComponentProgressStatus,
+        indeterminate: Boolean = status == ComponentProgressStatus.RUNNING,
+    ) {
+        eventPort.emit(
+            InstallationSessionEvent.ComponentProgressUpdated(
+                componentId = componentId,
+                phase = phase,
+                status = status,
+                fraction = if (status == ComponentProgressStatus.COMPLETED) 1f else null,
+                indeterminate = indeterminate,
+            ),
+        )
     }
 
     private fun Set<String>.toChecks(): List<ComponentCheck> =

@@ -31,6 +31,64 @@ import org.junit.Test
 
 class ArtifactPreparationCoordinatorTest {
     @Test
+    fun `complete cached archive is verified without resolving or downloading again`() = runBlocking {
+        val apkBytes = byteArrayOf(5, 6, 7, 8)
+        val zipBytes = zipBytes("lyrics.apk", apkBytes)
+        val manifest = manifest(zipBytes, apkBytes)
+        val root = Files.createTempDirectory("artifact-coordinator-cache").toFile()
+        val cache = ArtifactCache(root)
+        val paths = cache.paths(manifest)
+        paths.archivePart.writeBytes(zipBytes)
+        cache.writeResumeMetadata(manifest, ArtifactSourceKind.LANZOU_SHARE.wireName)
+        var resolveCalls = 0
+        var downloadCalls = 0
+        val host = object : LanzouWebViewHost {
+            override fun start(
+                shareUrl: String,
+                onDownload: (com.tcrrry.helper.domain.artifact.ResolvedDownloadRequest) -> Unit,
+                onFailure: (com.tcrrry.helper.domain.artifact.ArtifactFailure) -> Unit,
+            ) {
+                resolveCalls += 1
+                error("cached_source_should_not_resolve")
+            }
+
+            override fun stopAndDestroy() = Unit
+        }
+        val coordinator = ArtifactPreparationCoordinator(
+            sourcePolicy = com.tcrrry.helper.domain.artifact.ReleaseSourcePolicy(),
+            lanzouSourceAdapter = LanzouWebSourceAdapter(LanzouWebViewHostFactory { host }),
+            downloader = ArtifactDownloader(
+                transport = ArtifactTransport { _, _ ->
+                    downloadCalls += 1
+                    error("cached_archive_should_not_download")
+                },
+                cache = cache,
+            ),
+            archiveVerifier = ArchiveIdentityVerifier(),
+            archiveExtractor = ArtifactArchiveExtractor { Long.MAX_VALUE },
+            identityVerifier = ArtifactIdentityVerifier {
+                ApkMetadata(
+                    packageName = manifest.packageName,
+                    version = manifest.apkVersion,
+                    certificateSha256s = setOf(manifest.certificateSha256),
+                )
+            },
+            cache = cache,
+            eventPort = ArtifactSessionEventPort { },
+        )
+
+        val result = coordinator.prepare(listOf(manifest))
+
+        assertTrue(result is ArtifactPreparationResult.Prepared)
+        assertEquals(0, resolveCalls)
+        assertEquals(0, downloadCalls)
+        assertFalse(paths.archivePart.exists())
+        assertTrue(paths.apk.exists())
+        root.deleteRecursively()
+        Unit
+    }
+
+    @Test
     fun `fixed fallback produces one session evidence batch and cleans zip`() = runBlocking {
         val apkBytes = byteArrayOf(1, 2, 3, 4)
         val zipBytes = zipBytes("lyrics.apk", apkBytes)

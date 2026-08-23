@@ -8,11 +8,15 @@ import com.tcrrry.helper.data.catalog.UnavailableReleaseCatalogTransport
 import com.tcrrry.helper.data.catalog.UrlConnectionReleaseCatalogTransport
 import com.tcrrry.helper.domain.artifact.ReleaseSourcePolicy
 import com.tcrrry.helper.domain.artifact.ReleaseSourceMode
+import dadb.AdbKeyPair
 import java.net.URL
 
-/** Release composition keeps production trust data unavailable until Cloud supplies it. */
+/** Release composition keeps production trust data unavailable until Cloud supplies v3 trust data. */
 internal object ReleaseCatalogRuntimeConfig {
     val sourcePolicy: ReleaseSourcePolicy = ReleaseSourcePolicy(mode = ReleaseSourceMode.FOLDER_CONFIG)
+
+    @Suppress("UNUSED_PARAMETER")
+    fun createDeviceAdbKeyPair(context: Context): AdbKeyPair? = null
 
     @Suppress("UNUSED_PARAMETER")
     fun createDistributionConfigAdapter(context: Context): CloudInstallerDistributionConfigAdapter =
@@ -24,8 +28,10 @@ internal object ReleaseCatalogRuntimeConfig {
                 TrustedCatalogKeyResolver { null },
             ),
             expectedChannel = RELEASE_CHANNEL,
+            expectedEnvironment = RELEASE_ENVIRONMENT,
         )
 
     private const val RELEASE_CHANNEL = "release"
+    private const val RELEASE_ENVIRONMENT = "production"
     private const val DISTRIBUTION_CONFIG_URL = "https://api.9.9studio.fun/api/03helper/android-config"
 }

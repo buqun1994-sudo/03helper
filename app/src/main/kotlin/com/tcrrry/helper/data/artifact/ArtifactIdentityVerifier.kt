@@ -17,6 +17,7 @@ data class ApkMetadata(
     val version: ArtifactVersion,
     val certificateSha256s: Set<String>,
     val declarations: ApkDeclarationMetadata = ApkDeclarationMetadata(),
+    val minAndroidSdk: Int? = null,
 )
 
 fun interface ApkMetadataReader {

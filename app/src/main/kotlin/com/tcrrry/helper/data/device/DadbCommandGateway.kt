@@ -9,6 +9,8 @@ import com.tcrrry.helper.domain.device.AuthorizationActionEvidence
 import com.tcrrry.helper.domain.device.AuthorizationDeclarationValidator
 import com.tcrrry.helper.domain.device.AuthorizationPlanBuildResult
 import com.tcrrry.helper.domain.device.AuthorizationPlanFactory
+import com.tcrrry.helper.domain.device.AuthorizationCapacityPolicy
+import com.tcrrry.helper.domain.device.ManagedSecureComponentList
 import com.tcrrry.helper.domain.device.AuthorizationValueState
 import com.tcrrry.helper.domain.device.DeviceActionFailure
 import com.tcrrry.helper.domain.device.DeviceShortcut
@@ -78,7 +80,7 @@ internal class DadbCommandGateway(
         }
 
         // Installation never launches an application. The only launch occurs
-        // in the single fixed command after every package has been installed.
+        // during the versioned authorization plan after every package has been installed.
         artifacts.forEach { artifact ->
             val remotePath = remoteApkPath(artifact)
                 ?: return@withLease DeviceInstallResult.Failed(
@@ -128,6 +130,29 @@ internal class DadbCommandGateway(
     override suspend fun runShortcut(
         shortcut: DeviceShortcut,
         selectedComponentIds: Set<String>,
+    ): DeviceShortcutResult {
+        val components = AuthorizationPlanFactory.allManagedComponents()
+            .filter { it.componentId in selectedComponentIds }
+        val plan = when (val result = AuthorizationPlanFactory.createForComponents(components)) {
+            is AuthorizationPlanBuildResult.Ready -> result.plan
+            is AuthorizationPlanBuildResult.Rejected -> return DeviceShortcutResult.Failed(
+                stage = DeviceShortcutFailureStage.AUTHORIZATION,
+                failure = DeviceActionFailure(result.reasonCode, retryable = false),
+            )
+        }
+        return runShortcutWithPlan(shortcut, selectedComponentIds, plan)
+    }
+
+    override suspend fun runShortcut(
+        shortcut: DeviceShortcut,
+        selectedComponentIds: Set<String>,
+        authorizationPlan: com.tcrrry.helper.domain.device.AuthorizationPlan,
+    ): DeviceShortcutResult = runShortcutWithPlan(shortcut, selectedComponentIds, authorizationPlan)
+
+    private suspend fun runShortcutWithPlan(
+        shortcut: DeviceShortcut,
+        selectedComponentIds: Set<String>,
+        authorizationPlan: com.tcrrry.helper.domain.device.AuthorizationPlan,
     ): DeviceShortcutResult = withLease(
         whenClosed = DeviceShortcutResult.Failed(
             stage = DeviceShortcutFailureStage.AUTHORIZATION,
@@ -140,29 +165,29 @@ internal class DadbCommandGateway(
                 failure = DeviceActionFailure("device_shortcut_unavailable", retryable = false),
             )
         }
-        val components = AuthorizationPlanFactory.allManagedComponents()
-            .filter { it.componentId in selectedComponentIds }
-        if (components.map { it.componentId }.toSet() != selectedComponentIds) {
+        if (authorizationPlan.components.map { it.componentId }.toSet() != selectedComponentIds ||
+            !AuthorizationPlanFactory.validate(authorizationPlan)
+        ) {
             return@withLease DeviceShortcutResult.Failed(
                 stage = DeviceShortcutFailureStage.AUTHORIZATION,
                 failure = DeviceActionFailure("shortcut_component_selection_invalid", retryable = false),
             )
         }
-        val plan = when (val result = AuthorizationPlanFactory.createForComponents(components)) {
-            is AuthorizationPlanBuildResult.Ready -> result.plan
-            is AuthorizationPlanBuildResult.Rejected -> return@withLease DeviceShortcutResult.Failed(
+        val capacityFailure = probeAuthorizationCapacity(authorizationPlan)
+        if (capacityFailure != null) {
+            return@withLease DeviceShortcutResult.Failed(
                 stage = DeviceShortcutFailureStage.AUTHORIZATION,
-                failure = DeviceActionFailure(result.reasonCode, retryable = false),
+                failure = capacityFailure,
             )
         }
         val response = try {
-            adb.shell(CombinedAuthorizationCommand.build(selectedComponentIds))
+            adb.shell(CombinedAuthorizationCommand.build(authorizationPlan))
         } catch (_: IOException) {
             null
         } catch (_: Exception) {
             null
         }
-        val result = CombinedAuthorizationResponseParser.parse(response, plan)
+        val result = CombinedAuthorizationResponseParser.parse(response, authorizationPlan)
         Log.d(
             TAG,
             when (result) {
@@ -172,6 +197,29 @@ internal class DadbCommandGateway(
             },
         )
         result
+    }
+
+    private suspend fun probeAuthorizationCapacity(
+        plan: com.tcrrry.helper.domain.device.AuthorizationPlan,
+    ): DeviceActionFailure? {
+        val settings = plan.actions.filterIsInstance<com.tcrrry.helper.domain.device.AuthorizationAction.AppendSecureComponent>()
+            .map { it.setting }
+            .toSet()
+        if (settings.isEmpty()) return null
+        val existing = mutableMapOf<ManagedSecureComponentList, String?>()
+        settings.forEach { setting ->
+            val response = try {
+                adb.shell("settings get secure ${setting.wireName}")
+            } catch (_: Exception) {
+                return DeviceActionFailure("authorization_capacity_probe_failed", retryable = true)
+            }
+            if (!isSuccessful(response)) {
+                return DeviceActionFailure("authorization_capacity_probe_failed", retryable = true)
+            }
+            existing[setting] = response.output.trim().takeUnless { it.isBlank() }
+        }
+        val reason = AuthorizationCapacityPolicy.validate(plan, existing)
+        return reason?.let { DeviceActionFailure(it, retryable = false) }
     }
 
     override suspend fun repairAuthorization(
@@ -192,7 +240,12 @@ internal class DadbCommandGateway(
             )
         }
         val components = manifests.map {
-            com.tcrrry.helper.domain.device.ManagedComponent(it.componentId, it.packageName)
+            com.tcrrry.helper.domain.device.ManagedComponent(
+                componentId = it.componentId,
+                packageName = it.packageName,
+                setup = it.deviceSetup,
+                order = it.sortOrder,
+            )
         }
         val plan = when (val result = AuthorizationPlanFactory.createForComponents(components)) {
             is AuthorizationPlanBuildResult.Ready -> result.plan
@@ -235,8 +288,11 @@ internal class DadbCommandGateway(
         AuthorizationDeclarationValidator.validateDeclarations(plan, declarations)?.let { failure ->
             return@withLease MaintenanceDeviceResult.Failed(failure)
         }
+        probeAuthorizationCapacity(plan)?.let { failure ->
+            return@withLease MaintenanceDeviceResult.Failed(failure)
+        }
         val response = try {
-            adb.shell(CombinedAuthorizationCommand.build(manifests.map { it.componentId }.toSet(), repairOnly = true))
+            adb.shell(CombinedAuthorizationCommand.build(plan, repairOnly = true))
         } catch (_: IOException) {
             null
         } catch (_: Exception) {
@@ -245,13 +301,27 @@ internal class DadbCommandGateway(
         CombinedAuthorizationResponseParser.parseRepair(response, plan)
     }
 
-    override suspend fun inspectManagedApplications(): ManagedApplicationsResult = withLease(
+    override suspend fun inspectManagedApplications(): ManagedApplicationsResult =
+        inspectManagedApplications(AuthorizationPlanFactory.allManagedComponents())
+
+    override suspend fun inspectManagedApplications(
+        components: List<com.tcrrry.helper.domain.device.ManagedComponent>,
+    ): ManagedApplicationsResult = withLease(
         whenClosed = ManagedApplicationsResult.Failed(
             DeviceActionFailure("adb_connection_closed", retryable = true),
         ),
     ) {
+        if (components.isEmpty() || components.map { it.componentId }.toSet().size != components.size ||
+            components.any {
+                !COMPONENT_ID_PATTERN.matches(it.componentId) || !PACKAGE_NAME_PATTERN.matches(it.packageName)
+            }
+        ) {
+            return@withLease ManagedApplicationsResult.Failed(
+                DeviceActionFailure("maintenance_components_invalid", retryable = false),
+            )
+        }
         val applications = mutableListOf<ManagedApplicationProbe>()
-        AuthorizationPlanFactory.allManagedComponents().forEach { component ->
+        components.forEach { component ->
             when (val result = inspectInstalledPackage(component.componentId, component.packageName)) {
                 is PackageInspection.Completed -> applications += ManagedApplicationProbe(
                     componentId = component.componentId,
@@ -297,6 +367,53 @@ internal class DadbCommandGateway(
         if (!isSuccessful(process) || process?.output?.trim().isNullOrBlank()) {
             return@withLease MaintenanceDeviceResult.Failed(
                 DeviceActionFailure("maintenance_process_not_running", componentId, retryable = true),
+            )
+        }
+        MaintenanceDeviceResult.Completed("component_launched")
+    }
+
+    override suspend fun launchManagedComponent(
+        component: com.tcrrry.helper.domain.device.ManagedComponent,
+    ): MaintenanceDeviceResult = withLease(
+        whenClosed = MaintenanceDeviceResult.Failed(
+            DeviceActionFailure("adb_connection_closed", retryable = true),
+        ),
+    ) {
+        if (!COMPONENT_ID_PATTERN.matches(component.componentId) ||
+            !PACKAGE_NAME_PATTERN.matches(component.packageName)
+        ) {
+            return@withLease MaintenanceDeviceResult.Failed(
+                DeviceActionFailure("maintenance_component_identity_invalid", component.componentId, retryable = false),
+            )
+        }
+        val launchComponent = AuthorizationPlanFactory.fixedLaunchComponent(component)
+            ?: return@withLease MaintenanceDeviceResult.Failed(
+                DeviceActionFailure("maintenance_launch_unavailable", component.componentId, retryable = false),
+            )
+        val launchPackage = launchComponent.substringBefore('/', missingDelimiterValue = "")
+        if (launchPackage != component.packageName || !COMPONENT_NAME_PATTERN.matches(launchComponent)) {
+            return@withLease MaintenanceDeviceResult.Failed(
+                DeviceActionFailure("maintenance_launch_identity_invalid", component.componentId, retryable = false),
+            )
+        }
+        when (val installed = inspectInstalledPackage(component.componentId, component.packageName)) {
+            is PackageInspection.Failed -> return@withLease MaintenanceDeviceResult.Failed(installed.failure)
+            is PackageInspection.Completed -> if (!installed.installed) {
+                return@withLease MaintenanceDeviceResult.Failed(
+                    DeviceActionFailure("maintenance_component_not_installed", component.componentId, retryable = false),
+                )
+            }
+        }
+        val launch = shell("am start -n ${shellArgument(launchComponent)}")
+        if (!isSuccessful(launch)) {
+            return@withLease MaintenanceDeviceResult.Failed(
+                DeviceActionFailure("maintenance_launch_failed", component.componentId, retryable = true),
+            )
+        }
+        val process = shell("pidof ${shellArgument(component.packageName)}")
+        if (!isSuccessful(process) || process?.output?.trim().isNullOrBlank()) {
+            return@withLease MaintenanceDeviceResult.Failed(
+                DeviceActionFailure("maintenance_process_not_running", component.componentId, retryable = true),
             )
         }
         MaintenanceDeviceResult.Completed("component_launched")
@@ -554,9 +671,12 @@ internal class DadbCommandGateway(
     private fun isSuccessful(response: AdbShellResponse?): Boolean =
         response != null && response.exitCode == 0 && response.errorOutput.isBlank()
 
+    private fun shellArgument(value: String): String =
+        "'" + value.replace("'", "'\\\"'\\\"'") + "'"
+
     private suspend fun <T> withLease(
         whenClosed: T,
-        block: () -> T,
+        block: suspend () -> T,
     ): T = withContext(Dispatchers.IO) {
         if (closed.get()) return@withContext whenClosed
         ioMutex.withLock {
@@ -587,7 +707,9 @@ internal class DadbCommandGateway(
     private companion object {
         const val TAG = "03helper-device"
         const val REMOTE_FILE_MODE = 420
-        val COMPONENT_ID_PATTERN = Regex("^[a-z][a-z0-9-]{1,63}$")
+        val COMPONENT_ID_PATTERN = Regex("^[a-z][a-z0-9-]{0,63}$")
+        val PACKAGE_NAME_PATTERN = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$")
+        val COMPONENT_NAME_PATTERN = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)*/[A-Za-z0-9_.$]+$")
         val DIGEST_PREFIX_PATTERN = Regex("^[0-9a-f]{16}$")
         val INSTALLED_APK_PATH_PATTERN = Regex("^/data/app/[A-Za-z0-9_./=+\\-]+\\.apk$")
     }
@@ -644,7 +766,12 @@ internal object CombinedAuthorizationResponseParser {
         }
         val launch = lines.firstOrNull { it.startsWith("${CombinedAuthorizationCommand.MARKER}|LAUNCH|") }
             ?.split('|')
-        if (launch?.getOrNull(2) != AuthorizationPlanFactory.DESKTOP_COMPONENT_ID ||
+        val desktop = plan.components.firstOrNull { it.componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID }
+            ?: return DeviceShortcutResult.Failed(
+                stage = DeviceShortcutFailureStage.VERIFICATION,
+                failure = DeviceActionFailure("desktop_missing", retryable = false),
+            )
+        if (launch?.getOrNull(2) != desktop.componentId ||
             launch.getOrNull(3) != "OK"
         ) {
             return DeviceShortcutResult.Failed(
@@ -663,7 +790,7 @@ internal object CombinedAuthorizationResponseParser {
             availabilityEvidence = listOf(
                 com.tcrrry.helper.domain.device.ManagedApplicationAvailabilityEvidence(
                     componentId = AuthorizationPlanFactory.DESKTOP_COMPONENT_ID,
-                    packageName = AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME,
+                    packageName = desktop.packageName,
                     launchAttempted = true,
                     launcherResolved = true,
                     processRunning = launch.getOrNull(4) == "RUNNING",
@@ -742,11 +869,33 @@ internal object CombinedAuthorizationResponseParser {
 }
 
 /**
- * The only post-install shell owned by the helper. It is fixed source code,
- * parameterized only by validated component ids, and invoked exactly once.
+ * The only post-install authorization executor owned by the helper. Its
+ * versioned source code is parameterized only by validated typed actions and
+ * invoked exactly once.
  */
 internal object CombinedAuthorizationCommand {
     const val MARKER = "03HELPER"
+
+    fun build(
+        plan: com.tcrrry.helper.domain.device.AuthorizationPlan,
+        repairOnly: Boolean = false,
+    ): String {
+        require(AuthorizationPlanFactory.validate(plan)) { "invalid_authorization_plan" }
+        val dynamic = plan.components.any { component ->
+            component.setup != null || component.componentId !in setOf(
+                AuthorizationPlanFactory.DESKTOP_COMPONENT_ID,
+                AuthorizationPlanFactory.LYRICS_COMPONENT_ID,
+                AuthorizationPlanFactory.FILE_MANAGER_COMPONENT_ID,
+            )
+        }
+        val arguments = buildList {
+            if (repairOnly) add("--repair")
+            if (dynamic) add("--dynamic")
+            addAll(plan.components.map { it.componentId })
+            if (dynamic) plan.actions.forEach { action -> add("--action=${action.toWireToken()}") }
+        }.joinToString(" ") { shellQuote(it) }
+        return "sh -c ${shellQuote(SCRIPT)} 03helper $arguments"
+    }
 
     fun build(
         selectedComponentIds: Set<String>,
@@ -763,6 +912,20 @@ internal object CombinedAuthorizationCommand {
         return "sh -c ${shellQuote(SCRIPT)} 03helper $arguments"
     }
 
+    private fun com.tcrrry.helper.domain.device.AuthorizationAction.toWireToken(): String = when (this) {
+        is com.tcrrry.helper.domain.device.AuthorizationAction.EnsureAppOpAllowed ->
+            listOf("APP_OP", componentId, id, packageName, operation.wireName).joinToString("|")
+
+        is com.tcrrry.helper.domain.device.AuthorizationAction.EnsureRuntimePermissionGranted ->
+            listOf("RUNTIME", componentId, id, packageName, permission.wireName).joinToString("|")
+
+        is com.tcrrry.helper.domain.device.AuthorizationAction.EnsureSecureSettingEnabled ->
+            listOf("SECURE_FLAG", componentId, id, setting.wireName).joinToString("|")
+
+        is com.tcrrry.helper.domain.device.AuthorizationAction.AppendSecureComponent ->
+            listOf("SECURE_COMPONENT", componentId, id, setting.wireName, targetComponent).joinToString("|")
+    }
+
     private fun shellQuote(value: String): String =
         "'" + value.replace("'", "'\"'\"'") + "'"
 
@@ -771,11 +934,30 @@ internal object CombinedAuthorizationCommand {
         marker='03HELPER'
         repair_only=0
         if [ "${'$'}{1:-}" = --repair ]; then repair_only=1; shift; fi
+        dynamic_mode=0
+        if [ "${'$'}{1:-}" = --dynamic ]; then dynamic_mode=1; shift; fi
         selected() { wanted="${'$'}1"; shift; for value in "${'$'}@"; do [ "${'$'}value" = "${'$'}wanted" ] && return 0; done; return 1; }
         emit() { printf '%s|%s\n' "${'$'}marker" "${'$'}*"; }
         fail() { emit "FAIL|${'$'}1|${'$'}{2:-}"; exit 1; }
         list_contains() { case ":${'$'}1:" in *":${'$'}2:"*) return 0;; *) return 1;; esac; }
-        list_preserved() { [ "${'$'}1" = "null" ] || [ -z "${'$'}1" ] || case "${'$'}2" in "${'$'}1"|"${'$'}1":*) return 0;; *) return 1;; esac; }
+        dedupe_list() {
+          raw="${'$'}1"; result=""; old_ifs="${'$'}IFS"; IFS=':'
+          for item in ${'$'}raw; do
+            [ -n "${'$'}item" ] || continue
+            case ":${'$'}result:" in *":${'$'}item:"*) continue;; esac
+            if [ -n "${'$'}result" ]; then result="${'$'}result:${'$'}item"; else result="${'$'}item"; fi
+          done
+          IFS="${'$'}old_ifs"; printf '%s' "${'$'}result"
+        }
+        list_preserved() {
+          [ "${'$'}1" = "null" ] || [ -z "${'$'}1" ] && return 0
+          old_ifs="${'$'}IFS"; IFS=':'
+          for item in ${'$'}1; do
+            [ -n "${'$'}item" ] || continue
+            list_contains "${'$'}2" "${'$'}item" || { IFS="${'$'}old_ifs"; return 1; }
+          done
+          IFS="${'$'}old_ifs"; return 0
+        }
         list_count() {
           if [ "${'$'}1" = "null" ] || [ -z "${'$'}1" ]; then
             echo 0
@@ -843,18 +1025,19 @@ internal object CombinedAuthorizationCommand {
         append_component() {
           setting="${'$'}1"; target="${'$'}2"; component="${'$'}3"; action="${'$'}4"
           before_raw="${'$'}(secure_list "${'$'}setting")" || fail authorization_component_list_read_failed "${'$'}component"
-          before_state=COMPONENT_ABSENT; list_contains "${'$'}before_raw" "${'$'}target" && before_state=COMPONENT_PRESENT
-          after_raw="${'$'}before_raw"; changed=0
+          before_normalized="${'$'}(dedupe_list "${'$'}before_raw")"
+          before_state=COMPONENT_ABSENT; list_contains "${'$'}before_normalized" "${'$'}target" && before_state=COMPONENT_PRESENT
+          after_raw="${'$'}before_normalized"; changed=0
           if [ "${'$'}before_state" = COMPONENT_ABSENT ]; then
             if [ "${'$'}setting" = enabled_notification_listeners ]; then cmd notification allow_listener "${'$'}target" 0 >/dev/null 2>&1 || fail authorization_component_list_write_failed "${'$'}component"; else
-              if [ "${'$'}before_raw" = null ] || [ -z "${'$'}before_raw" ]; then next="${'$'}target"; else next="${'$'}before_raw:${'$'}target"; fi
+              if [ "${'$'}before_normalized" = null ] || [ -z "${'$'}before_normalized" ]; then next="${'$'}target"; else next="${'$'}before_normalized:${'$'}target"; fi
               settings put secure "${'$'}setting" "${'$'}next" >/dev/null 2>&1 || fail authorization_component_list_write_failed "${'$'}component"
             fi
             changed=1; after_raw="${'$'}(secure_list "${'$'}setting")" || fail authorization_component_list_readback_failed "${'$'}component"
           fi
           list_contains "${'$'}after_raw" "${'$'}target" || fail authorization_component_list_not_present "${'$'}component"
           list_preserved "${'$'}before_raw" "${'$'}after_raw" || fail authorization_component_list_not_preserved "${'$'}component"
-          emit_auth "${'$'}component" "${'$'}action" "${'$'}before_state" "${'$'}changed" COMPONENT_PRESENT "${'$'}(list_count "${'$'}before_raw")"
+          emit_auth "${'$'}component" "${'$'}action" "${'$'}before_state" "${'$'}changed" COMPONENT_PRESENT "${'$'}(list_count "${'$'}before_normalized")"
         }
         # APK declarations are validated locally before this command is sent.
         # The car only needs to report the runtime binding, and Android 9 builds
@@ -911,34 +1094,63 @@ internal object CombinedAuthorizationCommand {
           append_component enabled_accessibility_services "${'$'}target" "${'$'}component" "${'$'}label"
         }
 
+        apply_dynamic_action() {
+          spec="${'$'}1"
+          old_ifs="${'$'}IFS"; IFS='|'; set -- ${'$'}spec; IFS="${'$'}old_ifs"
+          type="${'$'}{1:-}"; component="${'$'}{2:-}"; action="${'$'}{3:-}"
+          case "${'$'}type" in
+            APP_OP)
+              package="${'$'}{4:-}"; operation="${'$'}{5:-}"
+              ensure_appop "${'$'}package" "${'$'}operation" "${'$'}component" "${'$'}action";;
+            RUNTIME)
+              package="${'$'}{4:-}"; permission="${'$'}{5:-}"
+              ensure_runtime_permission "${'$'}package" "${'$'}permission" "${'$'}component" "${'$'}action";;
+            SECURE_FLAG)
+              setting="${'$'}{4:-}"
+              ensure_secure_flag "${'$'}setting" "${'$'}component" "${'$'}action";;
+            SECURE_COMPONENT)
+              setting="${'$'}{4:-}"; target="${'$'}{5:-}"
+              append_component "${'$'}setting" "${'$'}target" "${'$'}component" "${'$'}action";;
+            *) fail authorization_action_invalid "${'$'}component";;
+          esac
+        }
+
         skipped=0
         if ! selected desktop "${'$'}@"; then fail desktop_missing desktop; fi
         if ! package_present com.tcrrry.desktop; then fail desktop_missing desktop; fi
-        ensure_appop com.tcrrry.desktop SYSTEM_ALERT_WINDOW desktop desktop-overlay-v1
-        ensure_appop com.tcrrry.desktop REQUEST_INSTALL_PACKAGES desktop desktop-install-packages-v1
-        ensure_secure_flag accessibility_enabled desktop desktop-accessibility-master-v1
-        ensure_accessibility_service desktop com.tcrrry.desktop/com.tcrrry.desktop.debug.NavigationDemoAccessibilityService com.tcrrry.desktop.debug.NavigationDemoAccessibilityService com.tcrrry.desktop/.debug.NavigationDemoAccessibilityService desktop-accessibility-service-v1
+        if [ "${'$'}dynamic_mode" -eq 0 ]; then
+          ensure_appop com.tcrrry.desktop SYSTEM_ALERT_WINDOW desktop desktop-overlay-v1
+          ensure_appop com.tcrrry.desktop REQUEST_INSTALL_PACKAGES desktop desktop-install-packages-v1
+          ensure_secure_flag accessibility_enabled desktop desktop-accessibility-master-v1
+          ensure_accessibility_service desktop com.tcrrry.desktop/com.tcrrry.desktop.debug.NavigationDemoAccessibilityService com.tcrrry.desktop.debug.NavigationDemoAccessibilityService com.tcrrry.desktop/.debug.NavigationDemoAccessibilityService desktop-accessibility-service-v1
 
-        if selected lyrics "${'$'}@"; then
-          if package_present com.tcrrry.desktoplyrics; then
-            ensure_appop com.tcrrry.desktoplyrics SYSTEM_ALERT_WINDOW lyrics lyrics-overlay-v1
-            ensure_notification_listener
-            ensure_accessibility_service lyrics com.tcrrry.desktoplyrics/com.tcrrry.desktoplyrics.IcarDockAccessibilityService com.tcrrry.desktoplyrics.IcarDockAccessibilityService com.tcrrry.desktoplyrics/.IcarDockAccessibilityService lyrics-accessibility-service-v1
-          else
-            emit SKIP lyrics; skipped=1
+          if selected lyrics "${'$'}@"; then
+            if package_present com.tcrrry.desktoplyrics; then
+              ensure_appop com.tcrrry.desktoplyrics SYSTEM_ALERT_WINDOW lyrics lyrics-overlay-v1
+              ensure_notification_listener
+              ensure_accessibility_service lyrics com.tcrrry.desktoplyrics/com.tcrrry.desktoplyrics.IcarDockAccessibilityService com.tcrrry.desktoplyrics.IcarDockAccessibilityService com.tcrrry.desktoplyrics/.IcarDockAccessibilityService lyrics-accessibility-service-v1
+            else
+              emit SKIP lyrics; skipped=1
+            fi
           fi
-        fi
 
-        if selected file-manager "${'$'}@"; then
-          if package_present org.fossify.filemanager.debug; then
-            ensure_runtime_permission org.fossify.filemanager.debug android.permission.READ_EXTERNAL_STORAGE file-manager file-manager-read-permission-v1
-            ensure_appop org.fossify.filemanager.debug READ_EXTERNAL_STORAGE file-manager file-manager-read-appop-v1
-            ensure_runtime_permission org.fossify.filemanager.debug android.permission.WRITE_EXTERNAL_STORAGE file-manager file-manager-write-permission-v1
-            ensure_appop org.fossify.filemanager.debug WRITE_EXTERNAL_STORAGE file-manager file-manager-write-appop-v1
-            ensure_appop org.fossify.filemanager.debug REQUEST_INSTALL_PACKAGES file-manager file-manager-install-packages-v1
-          else
-            emit SKIP file-manager; skipped=1
+          if selected file-manager "${'$'}@"; then
+            if package_present org.fossify.filemanager.debug; then
+              ensure_runtime_permission org.fossify.filemanager.debug android.permission.READ_EXTERNAL_STORAGE file-manager file-manager-read-permission-v1
+              ensure_appop org.fossify.filemanager.debug READ_EXTERNAL_STORAGE file-manager file-manager-read-appop-v1
+              ensure_runtime_permission org.fossify.filemanager.debug android.permission.WRITE_EXTERNAL_STORAGE file-manager file-manager-write-permission-v1
+              ensure_appop org.fossify.filemanager.debug WRITE_EXTERNAL_STORAGE file-manager file-manager-write-appop-v1
+              ensure_appop org.fossify.filemanager.debug REQUEST_INSTALL_PACKAGES file-manager file-manager-install-packages-v1
+            else
+              emit SKIP file-manager; skipped=1
+            fi
           fi
+        else
+          for argument in "${'$'}@"; do
+            case "${'$'}argument" in
+              --action=*) apply_dynamic_action "${'$'}{argument#--action=}";;
+            esac
+          done
         fi
 
         [ "${'$'}skipped" -eq 0 ] || fail selected_component_missing

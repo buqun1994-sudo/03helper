@@ -4,6 +4,7 @@ import com.tcrrry.helper.application.device.DeviceDiscoverySessionAdapter
 import com.tcrrry.helper.application.device.DeviceConnectionSessionAdapter
 import com.tcrrry.helper.application.session.InstallationSessionEventDispatcher
 import com.tcrrry.helper.application.session.InstallationSessionEventPort
+import com.tcrrry.helper.data.catalog.CatalogLoadResult
 import com.tcrrry.helper.application.maintenance.MaintenanceController
 import com.tcrrry.helper.domain.artifact.ArtifactManifest
 import com.tcrrry.helper.application.artifact.ArtifactPreparationResult
@@ -41,6 +42,7 @@ class InstallerRuntime(
     private val maintenanceController: MaintenanceController? = null,
     private val persistMaintenanceSnapshot: (suspend (InstallationSessionSnapshot) -> Unit)? = null,
     coroutineContext: CoroutineContext,
+    private val prepareSelectedCatalog: (suspend (Set<String>, InstallationSessionEventPort) -> CatalogLoadResult)? = null,
 ) : AutoCloseable {
     private val runtimeJob = SupervisorJob(coroutineContext[Job])
     private val scope = CoroutineScope(coroutineContext + runtimeJob)
@@ -174,7 +176,11 @@ class InstallerRuntime(
                 before.state == InstallationSessionState.CONNECTED &&
                 after.state == InstallationSessionState.SELECTION_CONFIRMED
             ) {
-                beginArtifactPreparation(after)
+                if (after.artifactManifests.isEmpty() && prepareSelectedCatalog != null) {
+                    beginSelectedCatalogPreparation(after)
+                } else {
+                    beginArtifactPreparation(after)
+                }
             }
 
             InstallationSessionCommand.CancelInstallation -> {
@@ -288,7 +294,13 @@ class InstallerRuntime(
                 }
             }
 
-            InstallationSessionState.SELECTION_CONFIRMED -> beginArtifactPreparation(snapshot)
+            InstallationSessionState.SELECTION_CONFIRMED -> if (
+                snapshot.artifactManifests.isEmpty() && prepareSelectedCatalog != null
+            ) {
+                beginSelectedCatalogPreparation(snapshot)
+            } else {
+                beginArtifactPreparation(snapshot)
+            }
             InstallationSessionState.RESOLVING_SOURCE,
             InstallationSessionState.DOWNLOADING_ARCHIVE,
             InstallationSessionState.VERIFYING_ARCHIVE,
@@ -310,11 +322,15 @@ class InstallerRuntime(
             return
         }
         // A write may have completed immediately before the lease disappeared.
-        // Re-running the verified pipeline is idempotent and restores all three
-        // structured proofs before the session can report success.
+        // Re-running the verified pipeline is idempotent and restores every
+        // selected application's structured proofs before success is reported.
         val restored = session.dispatch(InstallationSessionCommand.RestartFromCheckpoint)
         if (restored.state == InstallationSessionState.SELECTION_CONFIRMED) {
-            beginArtifactPreparation(restored)
+            if (restored.artifactManifests.isEmpty() && prepareSelectedCatalog != null) {
+                beginSelectedCatalogPreparation(restored)
+            } else {
+                beginArtifactPreparation(restored)
+            }
         }
     }
 
@@ -327,6 +343,41 @@ class InstallerRuntime(
         val pipeline = session.dispatch(InstallationSessionCommand.BeginPipeline)
         if (pipeline.state == InstallationSessionState.RESOLVING_SOURCE) {
             launchArtifactPreparation(pipeline)
+        }
+    }
+
+    private fun beginSelectedCatalogPreparation(snapshot: InstallationSessionSnapshot) {
+        artifactJob?.cancel()
+        val port = eventPortFor(snapshot)
+        val loader = prepareSelectedCatalog ?: return beginArtifactPreparation(snapshot)
+        val selectedIds = snapshot.components
+            .filter {
+                it.id == com.tcrrry.helper.domain.device.AuthorizationPlanFactory.DESKTOP_COMPONENT_ID ||
+                    it.id in snapshot.selectedOptionalComponentIds
+            }
+            .map { it.id }
+            .toSet()
+        artifactJob = scope.launch {
+            try {
+                val result = loader(selectedIds, port)
+                if (result is CatalogLoadResult.Success) {
+                    val current = session.currentSnapshot()
+                    if (current.state == InstallationSessionState.SELECTION_CONFIRMED &&
+                        current.artifactManifests.isNotEmpty()
+                    ) {
+                        beginArtifactPreparation(current)
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                port.emit(
+                    InstallationSessionEvent.FatalError(
+                        category = FailureCategory.DOWNLOAD,
+                        reasonCode = "selected_catalog_preparation_failed",
+                    ),
+                )
+            }
         }
     }
 
@@ -495,7 +546,8 @@ class InstallerRuntime(
         artifactJob?.cancel()
         val port = eventPortFor(snapshot)
         val selectedIds = snapshot.components
-            .filter { it.required || it.id in snapshot.selectedOptionalComponentIds }
+            .filter { it.id == com.tcrrry.helper.domain.device.AuthorizationPlanFactory.DESKTOP_COMPONENT_ID ||
+                it.id in snapshot.selectedOptionalComponentIds }
             .map { it.id }
             .toSet()
         val manifests = snapshot.artifactManifests.filter { it.componentId in selectedIds }
