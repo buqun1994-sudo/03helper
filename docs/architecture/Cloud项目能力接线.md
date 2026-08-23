@@ -29,13 +29,32 @@
 
 ### 3.2 Android 清单适配边界
 
-V3 已冻结独立的 Android distribution-config 控制面。领域对象和签名 envelope 的本地实现位于 `com.tcrrry.helper.domain.artifact` 与 `data/catalog`；这只代表客户端协议已实现，不代表 Cloud 生产配置已经发布。
+V3 已冻结独立的 Android distribution-config 控制面。领域对象和签名 envelope 的本地实现位于 `com.ninepointnine.helper.domain.artifact` 与 `data/catalog`；这只代表客户端协议已实现，不代表 Cloud 生产配置已经发布。
 
 公共生产入口为 `GET https://api.9.9studio.fun/api/03helper/android-config`，Debug staging 入口为 `GET https://api-staging.9studio.fun/api/03helper/android-config`。envelope 使用 `schemaVersion=3`；payload 包含 `environment`、`channel`、`issuedAtUtc`、`expiresAt`、`catalogVersion`、`catalogRevision`、文件夹字段和动态 `apps[]`。客户端先对 Base64 解码后的原始 UTF-8 字节验签，再严格解析 payload；payload 最大 512 KiB，未知字段、危险文件名、过期快照和修订回滚均拒绝。
 
 当前 staging 信任根已轮换为 `keyId=03helper-staging-config-2026-08-22-v1`，算法为 `SHA256withECDSA`、P-256 (`prime256v1`)，客户端内置公钥 SPKI DER SHA-256 为 `8c2573689e87e6c426add9f2249186ec7b6c0e8f44b196ea669c820adb1283d3`。Cloud 只能注入与该指纹匹配的 PKCS#8 私钥；旧 `03helper-real-debug-2026-08-20-v4` 已废弃且不做兼容。配置加密密钥 `ANDROID_CONFIG_ENCRYPTION_KEY_BASE64` 与签名私钥是两套独立材料。
 
 历史版本字段不属于当前 v3 主链；回滚通过新 `catalogRevision` 指向旧的不可变目录完成。客户端按 `environment + channel` 持久化最高修订号，旧签名快照不能覆盖新状态。
+
+#### 03helper 自身发布身份交接
+
+03helper 本体不是 03 歌词或 03桌面的组件 APK，Cloud 建档和许可证下发必须使用独立产品身份：
+
+```text
+productId = 03helper
+displayName = 03车机助手
+androidPackage = com.ninepointnine.helper
+runtimeIdentifier = icar03
+releaseVersion = 1.0.0 (versionCode 1)
+```
+
+| 环境 | 证书 SHA-256 | 构建方式 |
+|---|---|---|
+| staging | `aca4f178fea11ccc97a1373c8aa5345b274a3a783398929a9340a79ee83663af` | `assembleDebug` + `helperSigningEnvironment=staging` |
+| production | `31ca80dd21a5208eaabd5f3e1440a3db2f7dc79122e03eaa6ba01730fb31f18b` | `assembleRelease` + `helperProductionSigningPropertiesFile` |
+
+交接请求是：Cloud 先登记 `productId`、包名、环境和公开证书摘要，再评估并按现有受控流程建立 / 下发对应许可证或 profile；这项外部发布尚未在本仓库宣称完成。Cloud 不接收 JKS、口令、私钥或本机路径。若许可证要被客户端强制校验，必须另行冻结 Android 许可证协议和客户端门禁；当前 03helper V1 只消费签名 Android distribution-config，不把账号权益或许可证结果写入安装状态机。
 
 包名、证书 SHA-256 和最低 SDK 不由网络 payload 覆盖：包名、版本和最低 SDK 从 APK 读取，证书必须属于客户端内置官方发布者证书集合及其包名命名空间。未知算法、未知 key、字段缺失、过期或桌面条目缺失均 fail closed。
 

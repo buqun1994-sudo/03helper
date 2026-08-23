@@ -1,5 +1,13 @@
 # 03helper 进度
 
+## 2026-08-24 Android 身份、版本与签名规则固化
+
+1. 已将五个 Android source-set 的源码根和所有 Kotlin / 测试包迁移为 `com.ninepointnine.helper`，Gradle `namespace` / `applicationId` 同步更新；历史 `com.tcrrry.helper` 不再作为构建身份。
+2. 已新增根目录 `release-version.properties`，Release 默认版本为 `1.0.0` / `versionCode=1`；`scripts/bump-release-version.mjs` 支持 `--check`、未指定时 patch 自动递增和明确 `--version` 覆盖，Debug / staging 继续固定 `0.1.0` / `versionCode=1`。
+3. 已在仓库外本机受控目录建立 03helper 专用 staging / production RSA 4096 签名材料，并接入 Gradle 显式属性入口；公开证书摘要分别为 `aca4f178fea11ccc97a1373c8aa5345b274a3a783398929a9340a79ee83663af` 与 `31ca80dd21a5208eaabd5f3e1440a3db2f7dc79122e03eaa6ba01730fb31f18b`。仓库只保留示例字段与读取逻辑，未写入 JKS、口令或私钥。Release 缺 production 材料、staging 缺 staging 材料时均设计为 fail closed。
+4. 本轮验证已通过：JDK 17 环境下 `:app:compileDebugKotlin`、`testDebugUnitTest`（138 项）、`lintDebug`、默认 Debug / AndroidTest 构建、staging Debug 签名构建和 production Release 签名构建均成功；版本脚本、项目文档、Skill、本机环境和 `git diff --check` 均通过。两种签名 APK 均核对为单 signer、RSA 4096、APK v2 有效。
+5. 云端接线交接需新增 `productId=03helper`、包名 `com.ninepointnine.helper`、staging / production 公开证书摘要和许可证下发策略；Cloud 不接收或保存私钥，只在临时构建目录注入对应环境签名材料。
+
 ## 2026-08-23 连接后快速清单与逐应用安装进度
 
 1. 已将首次连接后的目录主链拆为两段：`FolderArtifactCatalogAdapter.loadSelection()` 只验签配置、读取一次蓝奏根目录并发布轻量应用列表；连接阶段不下载 ZIP、不解析 APK。

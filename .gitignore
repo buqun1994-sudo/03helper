@@ -4,6 +4,7 @@
 *.iml
 local.properties
 keystore.properties
+signing.properties
 *.jks
 *.keystore
 captures/

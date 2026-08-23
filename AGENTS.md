@@ -70,3 +70,11 @@
 2. 代码或工程行为变更按“语法 / 类型或编译 / 直接相关自动化测试 / 可测试产物 / 最小运行检查 / 人工主测”的顺序闭环；编译通过不等于安装流程可用。Android 工程变更在本机环境和显式测试设备可用时，必须构建并执行保留数据覆盖安装最新 Debug APK，作为用户可测试的交付前置；安装不是运行 smoke，也不需要另行申请高成本测试授权。若运行检查会清理或替换目标包，所有自动化结束后必须再次覆盖安装并核对包身份与启动入口，最终交付状态以最后一次安装为准。
 3. 安装后只在运行检查同时满足以下条件时自动执行：已有脚本或 instrumentation 入口、预计单条检查不超过 5 分钟、无清数据 / 卸载 / 降级 / 重启 / release 或车机写入等破坏性动作、且不依赖未具备的真实发布资料或不稳定外部链路。否则停止自动扩展，交付逐条人工用例、预期结果、停止条件和客观阻断；不得把 fixture 或模拟结果写成真实通过。运行检查结束后仍必须完成最终 Debug 覆盖安装和包身份核对。
 4. 收尾必须说明实际改动、验证结果、Git 状态、未执行项及阻断；未经用户明确要求不提交、不推送、不发布。
+
+## 9. Android 身份、版本与签名长期约束
+
+1. `03helper` 的 `applicationId`、`namespace` 和 Kotlin 包根固定为 `com.ninepointnine.helper`，沿用 03 桌面 / 03 歌词的 `com.ninepointnine` 组织前缀，但不得复用它们的产品后缀、包名或业务源码。
+2. 默认 Debug 继续使用开发机自动证书和当前 Debug 版本；staging 使用仓库外独立 `03helper` staging 证书；Release 使用仓库外独立 `03helper` production 证书。三者不得互相回退或跨产品复用。
+3. staging / production 的 JKS、`signing.properties`、口令和私钥永不进入 Git；Gradle 只接受显式的仓库外属性文件路径，缺少材料必须 fail closed。
+4. Release 版本唯一真值是根目录 `release-version.properties`，默认 `1.0.0` / `versionCode=1`。用户未指定版本时，运行 `node scripts/bump-release-version.mjs` 只递增 patch；用户明确指定时按完整 `major.minor.patch` 写入。Debug / staging 不得读取 Release 文件覆盖版本。
+5. 任何身份、签名或版本规则变更必须同步 `docs/architecture/项目长期总纲.md`、`docs/operations/本地开发环境.md`、`docs/security/安全与密钥边界.md`、`docs/testing/验证矩阵.md` 和对应规则文件，并完成 APK 包名、版本、签名摘要与 v2 校验。

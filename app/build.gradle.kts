@@ -1,3 +1,85 @@
+import java.io.File
+import java.util.Properties
+
+fun Properties.requiredSigningValue(name: String): String =
+    getProperty(name)?.trim()?.takeIf(String::isNotEmpty)
+        ?: error("Signing property '$name' is required")
+
+fun Properties.requiredReleaseValue(name: String): String =
+    getProperty(name)?.trim()?.takeIf(String::isNotEmpty)
+        ?: error("Release version property '$name' is required")
+
+fun Properties.loadUtf8(file: File) {
+    file.reader(Charsets.UTF_8).use(::load)
+}
+
+val releaseVersionPropertiesFile = rootProject.file("release-version.properties")
+val releaseVersionProperties = Properties().apply {
+    require(releaseVersionPropertiesFile.isFile) {
+        "Release version properties file does not exist: $releaseVersionPropertiesFile"
+    }
+    loadUtf8(releaseVersionPropertiesFile)
+}
+val releaseVersionName = releaseVersionProperties.requiredReleaseValue("releaseVersionName")
+val releaseVersionCode = releaseVersionProperties.requiredReleaseValue("releaseVersionCode").toIntOrNull()
+    ?: error("Release version property 'releaseVersionCode' must be a positive integer")
+require(releaseVersionCode > 0) {
+    "Release version property 'releaseVersionCode' must be a positive integer"
+}
+require(Regex("\\d+\\.\\d+\\.\\d+").matches(releaseVersionName)) {
+    "Release version name must match <major>.<minor>.<patch>"
+}
+
+val helperSigningEnvironment = providers.gradleProperty("helperSigningEnvironment")
+    .orElse("debug")
+    .get()
+    .trim()
+    .lowercase()
+require(helperSigningEnvironment in setOf("debug", "staging")) {
+    "helperSigningEnvironment must be debug or staging"
+}
+
+val stagingSigningPropertiesFile = providers.gradleProperty("helperStagingSigningPropertiesFile")
+    .orNull
+    ?.trim()
+    ?.takeIf(String::isNotEmpty)
+    ?.let(rootProject::file)
+val stagingSigningProperties = Properties()
+val stagingSigningStoreFile = if (helperSigningEnvironment == "staging") {
+    val propertiesFile = requireNotNull(stagingSigningPropertiesFile) {
+        "Staging APK signing properties file is required"
+    }
+    require(propertiesFile.isFile) {
+        "Staging APK signing properties file does not exist"
+    }
+    propertiesFile.reader(Charsets.UTF_8).use(stagingSigningProperties::load)
+    val configuredStoreFile = stagingSigningProperties.requiredSigningValue("storeFile")
+    val candidate = File(configuredStoreFile)
+    val resolved = if (candidate.isAbsolute) candidate else propertiesFile.parentFile.resolve(configuredStoreFile)
+    require(resolved.isFile) { "Staging APK keystore does not exist" }
+    resolved
+} else {
+    null
+}
+
+val productionSigningPropertiesFile = providers.gradleProperty("helperProductionSigningPropertiesFile")
+    .orNull
+    ?.trim()
+    ?.takeIf(String::isNotEmpty)
+    ?.let(rootProject::file)
+val productionSigningProperties = Properties()
+val productionSigningStoreFile = productionSigningPropertiesFile?.let { propertiesFile ->
+    require(propertiesFile.isFile) {
+        "Production APK signing properties file does not exist"
+    }
+    propertiesFile.reader(Charsets.UTF_8).use(productionSigningProperties::load)
+    val configuredStoreFile = productionSigningProperties.requiredSigningValue("storeFile")
+    val candidate = File(configuredStoreFile)
+    val resolved = if (candidate.isAbsolute) candidate else propertiesFile.parentFile.resolve(configuredStoreFile)
+    require(resolved.isFile) { "Production APK keystore does not exist" }
+    resolved
+}
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -6,11 +88,11 @@ plugins {
 }
 
 android {
-    namespace = "com.tcrrry.helper"
+    namespace = "com.ninepointnine.helper"
     compileSdk = 36
 
     defaultConfig {
-        applicationId = "com.tcrrry.helper"
+        applicationId = "com.ninepointnine.helper"
         minSdk = 26
         targetSdk = 36
         versionCode = 1
@@ -18,8 +100,31 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        create("release") {
+            if (productionSigningStoreFile != null) {
+                storeFile = productionSigningStoreFile
+                storePassword = productionSigningProperties.requiredSigningValue("storePassword")
+                keyAlias = productionSigningProperties.requiredSigningValue("keyAlias")
+                keyPassword = productionSigningProperties.requiredSigningValue("keyPassword")
+            }
+        }
+        if (stagingSigningStoreFile != null) {
+            create("staging") {
+                storeFile = stagingSigningStoreFile
+                storePassword = stagingSigningProperties.requiredSigningValue("storePassword")
+                keyAlias = stagingSigningProperties.requiredSigningValue("keyAlias")
+                keyPassword = stagingSigningProperties.requiredSigningValue("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
+        getByName("debug") {
+            signingConfigs.findByName("staging")?.let { signingConfig = it }
+        }
         release {
+            signingConfig = signingConfigs.getByName("release")
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
@@ -53,6 +158,26 @@ android {
             "META-INF/AL2.0",
             "META-INF/LGPL2.1",
         )
+    }
+}
+
+androidComponents {
+    onVariants(selector().withBuildType("release")) { variant ->
+        variant.outputs.forEach { output ->
+            output.versionName.set(releaseVersionName)
+            output.versionCode.set(releaseVersionCode)
+        }
+    }
+}
+
+tasks.configureEach {
+    if (name == "preReleaseBuild" || name == "validateSigningRelease") {
+        doFirst {
+            require(productionSigningStoreFile != null) {
+                "Production APK signing properties file is required. " +
+                    "Pass -PhelperProductionSigningPropertiesFile=<path-to-signing.properties>."
+            }
+        }
     }
 }
 

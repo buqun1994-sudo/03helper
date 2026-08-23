@@ -9,3 +9,6 @@ INSTALLER_TEST_ADB_SERIAL=
 INSTALLER_TEST_DEVICE_ROLE=
 SHARED_TOOLCHAIN_DOC=
 ARTIFACT_MANIFEST_URL=
+# Optional repository-external APK signing properties. Never store secrets here.
+HELPER_STAGING_SIGNING_PROPERTIES_FILE=/path/to/03helper-staging-signing/signing.properties
+HELPER_PRODUCTION_SIGNING_PROPERTIES_FILE=/path/to/03helper-release-signing/signing.properties

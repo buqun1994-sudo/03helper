@@ -1,0 +1,115 @@
+package com.ninepointnine.helper.ui.components
+
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.HelpOutline
+import androidx.compose.material3.Icon
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.res.painterResource
+import androidx.compose.foundation.Image
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import com.composables.icons.lucide.R as LucideR
+
+/** Resolves the bundled Lucide Android drawable without exposing its generated package to UI code. */
+@Composable
+fun InstallerIcon(
+    name: String,
+    contentDescription: String?,
+    modifier: Modifier = Modifier,
+    tint: Color = Color.Unspecified,
+    size: Dp = 24.dp,
+) {
+    val drawableId = remember(name) {
+        lucideDrawable(name)
+    }
+    val sizedModifier = modifier.size(size)
+    if (drawableId != 0) {
+        Icon(
+            painter = painterResource(drawableId),
+            contentDescription = contentDescription,
+            tint = tint,
+            modifier = sizedModifier,
+        )
+    } else {
+        Icon(
+            imageVector = Icons.AutoMirrored.Outlined.HelpOutline,
+            contentDescription = contentDescription,
+            tint = tint,
+            modifier = sizedModifier,
+        )
+    }
+}
+
+/** Renders a product-owned component logo with a Lucide fallback for legacy fixtures. */
+@Composable
+fun ComponentLogo(
+    iconKey: String,
+    contentDescription: String?,
+    modifier: Modifier = Modifier,
+    size: Dp = 40.dp,
+) {
+    val drawableId = remember(iconKey) { componentLogoDrawable(iconKey) }
+    if (drawableId != 0) {
+        Image(
+            painter = painterResource(drawableId),
+            contentDescription = contentDescription,
+            contentScale = ContentScale.Fit,
+            modifier = modifier.size(size),
+        )
+    } else {
+        InstallerIcon(
+            name = componentFallbackIcon(iconKey),
+            contentDescription = contentDescription,
+            modifier = modifier,
+            tint = Color.White,
+            size = size,
+        )
+    }
+}
+
+private fun componentLogoDrawable(iconKey: String): Int = when (iconKey) {
+    "desktop" -> com.ninepointnine.helper.R.drawable.desktop_logo
+    "lyrics" -> com.ninepointnine.helper.R.drawable.lyrics_logo
+    "file-manager" -> com.ninepointnine.helper.R.drawable.file_manager_logo
+    else -> 0
+}
+
+private fun componentFallbackIcon(iconKey: String): String = when (iconKey) {
+    "desktop" -> "panels_top_left"
+    "lyrics" -> "music_2"
+    "file-manager" -> "folder_plus"
+    else -> "package_x"
+}
+
+private fun lucideDrawable(name: String): Int = when (name) {
+    "arrow_left" -> LucideR.drawable.lucide_ic_arrow_left
+    "car_front" -> LucideR.drawable.lucide_ic_car_front
+    "chevron_right" -> LucideR.drawable.lucide_ic_chevron_right
+    "circle" -> LucideR.drawable.lucide_ic_circle
+    "circle_alert" -> LucideR.drawable.lucide_ic_circle_alert
+    "circle_check" -> LucideR.drawable.lucide_ic_circle_check
+    "circle_pause" -> LucideR.drawable.lucide_ic_circle_pause
+    "cloud_off" -> LucideR.drawable.lucide_ic_cloud_off
+    "download" -> LucideR.drawable.lucide_ic_download
+    "file_down" -> LucideR.drawable.lucide_ic_file_down
+    "folder_plus" -> LucideR.drawable.lucide_ic_folder_plus
+    "layout_grid" -> LucideR.drawable.lucide_ic_layout_grid
+    "loader_circle" -> LucideR.drawable.lucide_ic_loader_circle
+    "lock_keyhole" -> LucideR.drawable.lucide_ic_lock_keyhole
+    "music_2" -> LucideR.drawable.lucide_ic_music_2
+    "package_x" -> LucideR.drawable.lucide_ic_package_x
+    "panels_top_left" -> LucideR.drawable.lucide_ic_panels_top_left
+    "refresh_cw" -> LucideR.drawable.lucide_ic_refresh_cw
+    "search" -> LucideR.drawable.lucide_ic_search
+    "settings_2" -> LucideR.drawable.lucide_ic_settings_2
+    "trash_2" -> LucideR.drawable.lucide_ic_trash_2
+    "triangle_alert" -> LucideR.drawable.lucide_ic_triangle_alert
+    "wifi_off" -> LucideR.drawable.lucide_ic_wifi_off
+    "wrench" -> LucideR.drawable.lucide_ic_wrench
+    else -> 0
+}

@@ -5,7 +5,7 @@
 > 现行版本字段口径：选择行显示 Cloud 提供的 `versionName`（规范化为 `V1.2.3`）与 `apkSizeBytes`（规范化为 `2.6M`）；`catalogVersion` 不得出现在应用行。
 
 1. 本文是 Android V1 的产品、界面和施工基线；F0 Android 工程、视觉令牌、状态投影和确定性 Debug 场景、F1 唯一安装会话与页面接线、F2 本地下载 / 校验链、F3 LAN ADB 持久在线连接接线已经完成，但 Cloud Android profile、正式签名、车机安装授权和真实网络主测仍未完成。
-2. 当前真实锚点为单 `app` 模块、`applicationId/namespace=com.tcrrry.helper`、`app/src/main/kotlin/com/tcrrry/helper/` 源码根与 `Theme.ThreeHelper`；完整 owner 与文件边界以 `docs/architecture/项目长期总纲.md` 第 2 节为准，不得从本文另建包名、状态机或动效参数。
+2. 当前真实锚点为单 `app` 模块、`applicationId/namespace=com.ninepointnine.helper`、`app/src/main/kotlin/com/ninepointnine/helper/` 源码根与 `Theme.ThreeHelper`；完整 owner 与文件边界以 `docs/architecture/项目长期总纲.md` 第 2 节为准，不得从本文另建包名、状态机或动效参数。
 3. 本文复用 Cloud 最新 iCAR 03 官网的视觉语言，不复制官网页面。Cloud 接线能力与边界见 `docs/architecture/Cloud项目能力接线.md`。
 4. F0 已完成并通过本机与指定手机 smoke；F0 基座首笔提交为 `948f51d`。本条只证明手机工程、视觉壳、状态投影和确定性演示可运行，不代表真实车机安装能力已经开放。
 5. 后续施工必须从 F0/F1 已落地的 `InstallationSessionSnapshot`、`InstallationSession`、`InstallUiStateMapper` 和 `InstallApp` 继续，禁止在页面、Debug 场景或脚本中另建生产状态机。
@@ -158,9 +158,9 @@
 
 物理锚点与边界：
 
-1. 新增 `app/src/main/kotlin/com/tcrrry/helper/domain/session/InstallationSession.kt` 与同目录的 `InstallationSessionCommand.kt`；文件头、包名和编码从现有 `InstallationSessionSnapshot.kt` 直接复制，owner 固定为 `com.tcrrry.helper.domain.session`。
+1. 新增 `app/src/main/kotlin/com/ninepointnine/helper/domain/session/InstallationSession.kt` 与同目录的 `InstallationSessionCommand.kt`；文件头、包名和编码从现有 `InstallationSessionSnapshot.kt` 直接复制，owner 固定为 `com.ninepointnine.helper.domain.session`。
 2. `InstallationSession` 唯一持有 `MutableStateFlow<InstallationSessionSnapshot>`，只接受结构化 command / adapter result；UI 不得直接写快照，适配器不得直接改 Compose 状态。
-3. 修改 `app/src/main/kotlin/com/tcrrry/helper/MainActivity.kt`：创建一个会话实例，用生命周期感知方式收集快照，并将 `InstallUiIntent` 映射为会话 command；删除当前固定 `IDLE` 快照入口，但保留 `InstallApp` 和 `InstallUiStateMapper` 作为唯一呈现主链。
+3. 修改 `app/src/main/kotlin/com/ninepointnine/helper/MainActivity.kt`：创建一个会话实例，用生命周期感知方式收集快照，并将 `InstallUiIntent` 映射为会话 command；删除当前固定 `IDLE` 快照入口，但保留 `InstallApp` 和 `InstallUiStateMapper` 作为唯一呈现主链。
 4. Debug 场景只提供确定性 fake port / 事件序列，改为驱动同一个 `InstallationSession`；禁止在 `DebugScenarioActivity` 内复制一套状态转换逻辑。
 
 微观状态规则：

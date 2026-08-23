@@ -5,3 +5,4 @@
 3. 触发条件：测试失败。动作：定位真实根因，不降低断言或删除反例。验证：修复后相关用例与回归用例均通过。边界：公网不稳定必须与确定性 fixture 分离。
 4. 触发条件：文档、Skill 或脚本变化。动作：执行 `node scripts/check-project-docs.mjs`、`node scripts/check-skills.mjs` 和 `git diff --check`。验证：所有检查退出码为 0。边界：本机私有上下文不得进入 diff。
 5. 触发条件：需要物理设备 instrumentation 或破坏性动作。动作：优先使用可清状态的独立测试设备，并显式传入唯一 serial；日常设备不属于默认测试目标。验证：目标设备、签名、清场和恢复证据。边界：禁止使用会隐式枚举全部设备的入口。
+6. 触发条件：验证 Android 身份或发布版本。动作：先执行 `node scripts/bump-release-version.mjs --check` 与项目文档检查，再分别验证 Debug、staging 和 Release 的包名、版本来源、签名证书和 v2；缺少 staging / production 材料的负向构建必须失败。验证：Gradle 产物元数据、`apksigner verify --print-certs` 和秘密扫描。边界：不能用 Debug 构建结果替代 staging / Release 签名证据，也不能把版本文件递增当成发布完成。

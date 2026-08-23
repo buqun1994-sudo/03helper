@@ -33,6 +33,9 @@ const requiredFiles = [
   "docs/architecture/rules/security.md",
   "docs/architecture/rules/operations.md",
   "docs/architecture/rules/ai-collaboration.md",
+  "release-version.properties",
+  "keystore.properties.example",
+  "scripts/bump-release-version.mjs",
   "scripts/check-skills.mjs",
 ];
 
@@ -58,6 +61,8 @@ const cloudIntegration = contents.get("docs/architecture/Cloud项目能力接线
 const product = contents.get("docs/product/产品需求基线.md") || "";
 const uiPlan = contents.get("docs/plans/V1应用功能与UI施工文案.md") || "";
 const ignore = contents.get(".gitignore") || "";
+const appBuild = readFileSync(join(root, "app", "build.gradle.kts"), "utf8");
+const releaseVersion = contents.get("release-version.properties") || "";
 
 if (!agents.includes("03helper")) failures.push("AGENTS.md 未写入项目名称 03helper");
 if (!docsIndex.includes("docs/architecture/项目长期总纲.md")) {
@@ -77,6 +82,24 @@ for (const route of [
 if (!product.includes("单组件 ZIP")) failures.push("产品基线未固定单组件 ZIP 主链");
 if (!architecture.includes("ArtifactArchiveExtractor")) {
   failures.push("架构总纲缺少 ArtifactArchiveExtractor owner");
+}
+if (!/namespace\s*=\s*"com\.ninepointnine\.helper"/.test(appBuild)) {
+  failures.push("app/build.gradle.kts 的 namespace 不是 com.ninepointnine.helper");
+}
+if (!/applicationId\s*=\s*"com\.ninepointnine\.helper"/.test(appBuild)) {
+  failures.push("app/build.gradle.kts 的 applicationId 不是 com.ninepointnine.helper");
+}
+if (!/^releaseVersionName=\d+\.\d+\.\d+$/m.test(releaseVersion)) {
+  failures.push("release-version.properties 缺少合法的 releaseVersionName");
+}
+if (!/^releaseVersionCode=\d+$/m.test(releaseVersion)) {
+  failures.push("release-version.properties 缺少合法的 releaseVersionCode");
+}
+if (!appBuild.includes("helperStagingSigningPropertiesFile") || !appBuild.includes("helperProductionSigningPropertiesFile")) {
+  failures.push("app/build.gradle.kts 未接入 staging / production 签名属性入口");
+}
+if (!appBuild.includes("release-version.properties")) {
+  failures.push("app/build.gradle.kts 未接入 Release 版本真值文件");
 }
 for (const field of [
   "archiveFormat",
@@ -100,6 +123,7 @@ for (const marker of [
   ".codex/local-context.properties",
   "local.properties",
   "keystore.properties",
+  "signing.properties",
   "*.jks",
   "*.keystore",
   "*.apk",
