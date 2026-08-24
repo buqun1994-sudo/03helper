@@ -743,9 +743,11 @@ class InstallationSession(
                     applicationAction = null,
                     applicationDetails = null,
                     installationSelection = null,
-                    authorization = current.maintenance.authorization.copy(
-                        currentComponentId = null,
-                    ),
+                    // Every visit to the authorization page starts with a
+                    // fresh read-only car probe. The explicit reauthorize
+                    // button can still transition READY -> REPAIRING while
+                    // the route remains open.
+                    authorization = MaintenanceAuthorizationSnapshot(),
                 ),
             ),
         )
@@ -777,24 +779,30 @@ class InstallationSession(
             )
             return
         }
-        if (command.actionId == MaintenanceActionId.INSTALL_FILE_MANAGER) {
-            beginMaintenanceInstallationSelection(command.actionId)
-            return
-        }
         if (command.actionId == MaintenanceActionId.REINSTALL) {
             startMaintenanceInstallation(command.actionId)
             return
         }
         val authorization = if (command.actionId == MaintenanceActionId.REPAIR_CONFIGURATION) {
-            val placeholders = maintenanceAuthorizationPlaceholders(current)
+            val firstCheck = current.maintenance.authorization.state == MaintenanceAuthorizationFlowState.NOT_STARTED &&
+                current.maintenance.authorization.applications.isEmpty()
             MaintenanceAuthorizationSnapshot(
-                state = MaintenanceAuthorizationFlowState.CHECKING,
-                currentComponentId = placeholders.firstOrNull()?.componentId,
-                applications = placeholders,
+                state = if (firstCheck) {
+                    MaintenanceAuthorizationFlowState.CHECKING
+                } else {
+                    MaintenanceAuthorizationFlowState.REPAIRING
+                },
+                currentComponentId = null,
+                applications = emptyList(),
             )
         } else {
             current.maintenance.authorization
         }
+        val refreshInventory = command.actionId in setOf(
+            MaintenanceActionId.MANAGE_APPS,
+            MaintenanceActionId.REPAIR_CONFIGURATION,
+            MaintenanceActionId.INSTALL_FILE_MANAGER,
+        )
         publish(
             current.copy(
                 maintenance = current.maintenance.copy(
@@ -803,44 +811,21 @@ class InstallationSession(
                         actionId = command.actionId,
                         status = MaintenanceActionStatus.RUNNING,
                     ),
+                    updateStatuses = if (command.actionId == MaintenanceActionId.CHECK_UPDATES) {
+                        emptyList()
+                    } else {
+                        current.maintenance.updateStatuses
+                    },
                     authorization = authorization,
+                    managedApplications = if (refreshInventory) emptyList() else current.maintenance.managedApplications,
+                    installationSelection = if (command.actionId == MaintenanceActionId.INSTALL_FILE_MANAGER) {
+                        null
+                    } else {
+                        current.maintenance.installationSelection
+                    },
                 ),
             ),
         )
-    }
-
-    private fun maintenanceAuthorizationPlaceholders(
-        snapshot: InstallationSessionSnapshot,
-        componentIds: List<String>? = null,
-    ): List<ManagedApplicationAuthorizationStatus> {
-        val manifests = (snapshot.artifactManifests + snapshot.maintenance.availableManifests)
-            .filterNot { InstallerSelfIdentity.isSelfComponentId(it.componentId) }
-            .distinctBy { it.componentId }
-            .associateBy { it.componentId }
-        val ids = componentIds
-            ?: (manifests.keys + snapshot.maintenance.managedApplications.map { it.componentId } + snapshot.components.map { it.id })
-                .filterNot(InstallerSelfIdentity::isSelfComponentId)
-                .distinct()
-        return ids.mapNotNull { componentId ->
-            val packageName = manifests[componentId]?.packageName
-                ?: snapshot.maintenance.managedApplications.firstOrNull { it.componentId == componentId }?.packageName
-                ?: when (componentId) {
-                    AuthorizationPlanFactory.DESKTOP_COMPONENT_ID -> AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME
-                    AuthorizationPlanFactory.LYRICS_COMPONENT_ID -> AuthorizationPlanFactory.LYRICS_PACKAGE_NAME
-                    com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry.CAST_COMPONENT_ID ->
-                        com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry.CAST_PACKAGE_NAME
-                    AuthorizationPlanFactory.FILE_MANAGER_COMPONENT_ID -> AuthorizationPlanFactory.FILE_MANAGER_PACKAGE_NAME
-                    else -> null
-                }
-            packageName?.takeIf { it.isNotBlank() }?.let {
-                ManagedApplicationAuthorizationStatus(
-                    componentId = componentId,
-                    packageName = it,
-                    authorized = null,
-                    state = MaintenanceAuthorizationState.CHECKING,
-                )
-            }
-        }
     }
 
     private fun handleMaintenanceApplicationAction(
@@ -928,12 +913,14 @@ class InstallationSession(
             ?: current.artifactManifests).filterNot {
                 InstallerSelfIdentity.isSelfComponentId(it.componentId)
             }
-        val candidateComponents = candidateManifests.map { it.toComponentDescriptor(current.device?.androidSdk) }
+        val controlPlaneOnly = current.maintenance.catalogControlPlaneOnly
+        val effectiveCandidateManifests = if (controlPlaneOnly) emptyList() else candidateManifests
+        val candidateComponents = effectiveCandidateManifests.map { it.toComponentDescriptor(current.device?.androidSdk) }
             .takeIf { it.isNotEmpty() }
             ?: current.components
         val candidate = current.copy(
             components = candidateComponents,
-            artifactManifests = candidateManifests,
+            artifactManifests = effectiveCandidateManifests,
             catalogVersion = current.maintenance.availableCatalogVersion ?: current.catalogVersion,
             catalogKeyId = current.maintenance.availableCatalogKeyId ?: current.catalogKeyId,
             catalogSignatureAlgorithm = current.maintenance.availableCatalogSignatureAlgorithm
@@ -985,11 +972,14 @@ class InstallationSession(
 
     private fun beginMaintenanceInstallationSelection(actionId: MaintenanceActionId) {
         val current = _snapshot.value
-        val manifests = (current.maintenance.availableManifests.takeIf { it.isNotEmpty() }
-            ?: current.artifactManifests).filterNot {
+        val manifests = (if (current.maintenance.catalogControlPlaneOnly) {
+            emptyList()
+        } else {
+            current.maintenance.availableManifests.takeIf { it.isNotEmpty() } ?: current.artifactManifests
+        }).filterNot {
                 InstallerSelfIdentity.isSelfComponentId(it.componentId)
             }
-        val existingInstalled = current.evidence.installed + current.maintenance.managedApplications
+        val existingInstalled = current.maintenance.managedApplications
             .filter { it.installed }
             .map { it.componentId }
         val options = manifests.map { manifest ->
@@ -1487,6 +1477,7 @@ class InstallationSession(
             archiveVerifications = if (preservingSelection) current.archiveVerifications else emptyMap(),
             apkExtractions = if (preservingSelection) current.apkExtractions else emptyMap(),
             failure = null,
+            maintenance = current.maintenance.copy(catalogControlPlaneOnly = false),
         )
         publish(
             if (preservingSelection) {
@@ -2347,6 +2338,16 @@ class InstallationSession(
                         reasonCode = event.reasonCode,
                         retryable = event.retryable,
                     ),
+                    updateStatuses = if (event.actionId == MaintenanceActionId.CHECK_UPDATES) {
+                        emptyList()
+                    } else {
+                        current.maintenance.updateStatuses
+                    },
+                    authorization = if (event.actionId == MaintenanceActionId.REPAIR_CONFIGURATION) {
+                        MaintenanceAuthorizationSnapshot()
+                    } else {
+                        current.maintenance.authorization
+                    },
                 ),
             ),
             acceptedEventSequence,
@@ -2374,6 +2375,11 @@ class InstallationSession(
                         reasonCode = null,
                         retryable = false,
                     ),
+                    managedApplications = if (event.actionId == MaintenanceApplicationActionId.UNINSTALL) {
+                        current.maintenance.managedApplications.filterNot { it.componentId == event.componentId }
+                    } else {
+                        current.maintenance.managedApplications
+                    },
                 ),
             ),
             acceptedEventSequence,
@@ -2449,7 +2455,16 @@ class InstallationSession(
                     authorization = MaintenanceAuthorizationSnapshot(
                         state = MaintenanceAuthorizationFlowState.CHECKING,
                         currentComponentId = event.componentIds.firstOrNull(),
-                        applications = maintenanceAuthorizationPlaceholders(current, event.componentIds),
+                        applications = current.maintenance.managedApplications
+                            .filter { it.componentId in event.componentIds }
+                            .map { application ->
+                                ManagedApplicationAuthorizationStatus(
+                                    componentId = application.componentId,
+                                    packageName = application.packageName,
+                                    authorized = null,
+                                    state = MaintenanceAuthorizationState.CHECKING,
+                                )
+                            },
                     ),
                 ),
             ),
@@ -2509,55 +2524,71 @@ class InstallationSession(
         event: InstallationSessionEvent.MaintenanceApplicationsResolved,
     ) {
         val current = _snapshot.value
-        val expectedPackages = buildMap {
-            current.artifactManifests.filterNot { InstallerSelfIdentity.isSelfComponentId(it.componentId) }
-                .forEach { put(it.componentId, it.packageName) }
-            current.maintenance.availableManifests.filterNot { InstallerSelfIdentity.isSelfComponentId(it.componentId) }
-                .forEach { put(it.componentId, it.packageName) }
-            current.maintenance.managedApplications.filterNot { InstallerSelfIdentity.isSelfComponentId(it.componentId) }
-                .forEach { put(it.componentId, it.packageName) }
-            if (isEmpty()) {
-                current.components.forEach { descriptor ->
-                    when (descriptor.id) {
-                        AuthorizationPlanFactory.DESKTOP_COMPONENT_ID ->
-                            put(descriptor.id, AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME)
-                        AuthorizationPlanFactory.LYRICS_COMPONENT_ID ->
-                            put(descriptor.id, AuthorizationPlanFactory.LYRICS_PACKAGE_NAME)
-                        AuthorizationPlanFactory.FILE_MANAGER_COMPONENT_ID ->
-                            put(descriptor.id, AuthorizationPlanFactory.FILE_MANAGER_PACKAGE_NAME)
-                    }
-                }
-            }
+        val activeAction = current.maintenance.activeAction
+        val acceptedActions = setOf(
+            MaintenanceActionId.MANAGE_APPS,
+            MaintenanceActionId.REPAIR_CONFIGURATION,
+            MaintenanceActionId.INSTALL_FILE_MANAGER,
+        )
+        val knownIds = buildSet {
+            addAll(current.components.map { it.id })
+            addAll(current.artifactManifests.map { it.componentId })
+            addAll(current.maintenance.availableManifests.map { it.componentId })
+            addAll(current.maintenance.managedApplications.map { it.componentId })
+            addAll(com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry.ids())
+        }
+        val packagePattern = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$")
+        val normalizedApplications = event.applications
+            .filter { it.installed }
+            .distinctBy { it.componentId }
+        val invalid = normalizedApplications.any { application ->
+            application.componentId !in knownIds ||
+                !packagePattern.matches(application.packageName) ||
+                !isKnownManagedPackage(current, application.componentId, application.packageName)
         }
         if (current.state != InstallationSessionState.MAINTENANCE ||
-            current.maintenance.activeAction != MaintenanceActionId.MANAGE_APPS ||
-            event.applications.any { application ->
-                val expectedPackage = expectedPackages[application.componentId]
-                application.componentId !in expectedPackages ||
-                    (expectedPackage != null && application.packageName != expectedPackage)
-            }
+            activeAction !in acceptedActions ||
+            event.applications.size != normalizedApplications.size ||
+            invalid
         ) {
             if (
                 current.state == InstallationSessionState.MAINTENANCE &&
-                current.maintenance.activeAction == MaintenanceActionId.MANAGE_APPS
+                activeAction in acceptedActions
             ) {
                 failMaintenanceAction("maintenance_applications_invalid", retryable = false)
             }
             return
         }
-        if (
-            event.applications.map { it.componentId }.toSet().size != event.applications.size ||
-            event.applications.map { it.componentId }.toSet() != expectedPackages.keys
-        ) {
-            failMaintenanceAction("maintenance_applications_incomplete", retryable = false)
-            return
-        }
         publish(
             current.copy(
-                maintenance = current.maintenance.copy(managedApplications = event.applications),
+                maintenance = current.maintenance.copy(managedApplications = normalizedApplications),
             ),
             acceptedEventSequence,
         )
+        if (activeAction == MaintenanceActionId.INSTALL_FILE_MANAGER) {
+            beginMaintenanceInstallationSelection(MaintenanceActionId.INSTALL_FILE_MANAGER)
+        }
+    }
+
+    private fun isKnownManagedPackage(
+        snapshot: InstallationSessionSnapshot,
+        componentId: String,
+        packageName: String,
+    ): Boolean {
+        val manifestPackage = (snapshot.artifactManifests + snapshot.maintenance.availableManifests)
+            .firstOrNull { it.componentId == componentId }
+            ?.packageName
+        if (manifestPackage == packageName) return true
+        if (snapshot.evidence.installation.any {
+                it.key == componentId && it.value.packageName == packageName
+            }
+        ) return true
+        if (snapshot.maintenance.managedApplications.any {
+                it.componentId == componentId && it.packageName == packageName
+            }
+        ) return true
+        return com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
+            .isAllowedPackageName(componentId, packageName)
     }
 
     private fun handleMaintenanceCatalogRefreshed(event: InstallationSessionEvent.MaintenanceCatalogRefreshed) {
@@ -2589,16 +2620,18 @@ class InstallationSession(
             failMaintenanceAction("maintenance_catalog_rollback", retryable = false)
             return
         }
-        when (val validation = ArtifactManifestValidator.validateCatalog(event.manifests)) {
-            is ManifestValidation.Invalid -> {
-                failMaintenanceAction(validation.reasonCode, retryable = false)
+        if (!event.controlPlaneOnly) {
+            when (val validation = ArtifactManifestValidator.validateCatalog(event.manifests)) {
+                is ManifestValidation.Invalid -> {
+                    failMaintenanceAction(validation.reasonCode, retryable = false)
+                    return
+                }
+                ManifestValidation.Valid -> Unit
+            }
+            if (event.manifests.any { sourcePolicy.plan(it) is com.ninepointnine.helper.domain.artifact.SourcePlan.Rejected }) {
+                failMaintenanceAction("maintenance_catalog_source_invalid", retryable = false)
                 return
             }
-            ManifestValidation.Valid -> Unit
-        }
-        if (event.manifests.any { sourcePolicy.plan(it) is com.ninepointnine.helper.domain.artifact.SourcePlan.Rejected }) {
-            failMaintenanceAction("maintenance_catalog_source_invalid", retryable = false)
-            return
         }
         val installableManifests = event.manifests.filterNot {
             InstallerSelfIdentity.isSelfComponentId(it.componentId)
@@ -2641,7 +2674,7 @@ class InstallationSession(
         val componentIds = components.map { it.id }.toSet()
         if (componentIds.size != components.size ||
             components.none { it.id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID } ||
-            installableManifests.any { it.componentId !in componentIds }
+            !event.controlPlaneOnly && installableManifests.any { it.componentId !in componentIds }
         ) {
             failMaintenanceAction("maintenance_catalog_components_invalid", retryable = false)
             return
@@ -2650,7 +2683,7 @@ class InstallationSession(
             .filter { isSelectable(it) }
             .map { it.id }.toSet()
         val availableIds = components.map { it.id }.toSet()
-        val installedIds = current.evidence.installed + current.maintenance.managedApplications
+        val installedIds = current.maintenance.managedApplications
             .filter { it.installed }
             .map { it.componentId }
         val retainedCurrentManifests = current.artifactManifests.filterNot {
@@ -2683,22 +2716,35 @@ class InstallationSession(
                 }
         }.distinctBy { it.id }
         val mergedComponents = components + unlisted
+        val retainedAvailableManifests = if (event.controlPlaneOnly && event.manifests.isEmpty()) {
+            current.maintenance.availableManifests.ifEmpty { current.artifactManifests }
+        } else {
+            event.manifests
+        }
+        val nextArtifactManifests = if (event.controlPlaneOnly) {
+            current.artifactManifests
+        } else if (currentIds.isEmpty()) {
+            installableManifests
+        } else {
+            retainedCurrentManifests
+        }
         publish(
             current.copy(
                 maintenance = current.maintenance.copy(
-                    availableManifests = event.manifests,
+                    availableManifests = retainedAvailableManifests,
                     availableCatalogVersion = event.catalogVersion,
                     availableCatalogRevision = event.catalogRevision,
                     availableCatalogKeyId = event.keyId,
                     availableCatalogSignatureAlgorithm = event.signatureAlgorithm,
                     updateStatuses = event.updateStatuses,
+                    catalogControlPlaneOnly = event.controlPlaneOnly,
                 ),
                 components = mergedComponents,
-                artifactManifests = if (currentIds.isEmpty()) installableManifests else retainedCurrentManifests,
-                catalogVersion = if (currentIds.isEmpty()) event.catalogVersion else current.catalogVersion,
-                catalogRevision = if (currentIds.isEmpty()) event.catalogRevision else current.catalogRevision,
-                catalogKeyId = if (currentIds.isEmpty()) event.keyId else current.catalogKeyId,
-                catalogSignatureAlgorithm = if (currentIds.isEmpty()) event.signatureAlgorithm else current.catalogSignatureAlgorithm,
+                artifactManifests = nextArtifactManifests,
+                catalogVersion = if (currentIds.isEmpty() || event.controlPlaneOnly) event.catalogVersion else current.catalogVersion,
+                catalogRevision = if (currentIds.isEmpty() || event.controlPlaneOnly) event.catalogRevision else current.catalogRevision,
+                catalogKeyId = if (currentIds.isEmpty() || event.controlPlaneOnly) event.keyId else current.catalogKeyId,
+                catalogSignatureAlgorithm = if (currentIds.isEmpty() || event.controlPlaneOnly) event.signatureAlgorithm else current.catalogSignatureAlgorithm,
                 selectedOptionalComponentIds = current.selectedOptionalComponentIds.filterTo(mutableSetOf()) {
                     it in selectableIds
                 },

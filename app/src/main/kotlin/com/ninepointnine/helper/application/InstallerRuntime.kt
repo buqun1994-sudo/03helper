@@ -248,7 +248,13 @@ class InstallerRuntime(
 
             is InstallationSessionCommand.MaintenanceAction -> when {
                 before.state == InstallationSessionState.MAINTENANCE &&
-                    after.state == InstallationSessionState.SELECTION_CONFIRMED -> beginArtifactPreparation(after)
+                    after.state == InstallationSessionState.SELECTION_CONFIRMED -> {
+                    if (after.artifactManifests.isEmpty() && prepareSelectedCatalog != null) {
+                        beginSelectedCatalogPreparation(after)
+                    } else {
+                        beginArtifactPreparation(after)
+                    }
+                }
 
                 before.state == InstallationSessionState.MAINTENANCE &&
                     after.maintenance.activeAction == effectiveCommand.actionId &&

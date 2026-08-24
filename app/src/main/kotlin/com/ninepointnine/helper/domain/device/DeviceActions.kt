@@ -55,6 +55,15 @@ interface MaintenanceCommandGateway {
         components: List<ManagedComponent>,
     ): ManagedApplicationsResult = inspectManagedApplications()
 
+    /**
+     * Reads the device package inventory once and returns only recognized,
+     * currently installed components. The default keeps older test gateways
+     * source-compatible while production gateways can use package discovery.
+     */
+    suspend fun inspectInstalledApplicationInventory(
+        components: List<ManagedComponent>,
+    ): ManagedApplicationsResult = inspectManagedApplications(components)
+
     suspend fun launchManagedComponent(componentId: String): MaintenanceDeviceResult
 
     /** Dynamic maintenance launch uses the verified package identity plus a typed catalog setup. */
@@ -65,6 +74,21 @@ interface MaintenanceCommandGateway {
     suspend fun inspectAuthorization(
         manifests: List<ArtifactManifest>,
     ): MaintenanceAuthorizationResult = MaintenanceAuthorizationResult.Completed(emptyList())
+
+    /** Read-only authorization probe for the components found in the live inventory. */
+    suspend fun inspectComponentAuthorization(
+        components: List<ManagedComponent>,
+    ): MaintenanceAuthorizationResult = MaintenanceAuthorizationResult.Completed(emptyList())
+
+    /**
+     * Probes authorization against the inventory read by the same maintenance
+     * action. Production uses this overload to avoid a second package scan and
+     * to keep version and authorization state tied to one car snapshot.
+     */
+    suspend fun inspectComponentAuthorization(
+        components: List<ManagedComponent>,
+        installedApplications: List<ManagedApplicationProbe>,
+    ): MaintenanceAuthorizationResult = inspectComponentAuthorization(components)
 
     /** Fixed application operation selected by the maintenance UI. */
     suspend fun performApplicationAction(
@@ -452,6 +476,13 @@ object AuthorizationPlanFactory {
         createComponents(components)
 
     /**
+     * Builds the same typed action set for a read-only probe without requiring
+     * the desktop component. Repair/install plans continue to require desktop.
+     */
+    fun createForInspection(components: List<ManagedComponent>): AuthorizationPlanBuildResult =
+        createComponents(components, requireDesktop = false)
+
+    /**
      * Validates one catalog component before it is combined with the selected
      * installation batch. The catalog layer uses this to isolate a malformed
      * optional setup instead of letting it reject unrelated applications.
@@ -463,6 +494,11 @@ object AuthorizationPlanFactory {
         ManagedComponent(DESKTOP_COMPONENT_ID, DESKTOP_PACKAGE_NAME, order = 0),
         ManagedComponent(LYRICS_COMPONENT_ID, LYRICS_PACKAGE_NAME, order = 1),
         ManagedComponent(FILE_MANAGER_COMPONENT_ID, FILE_MANAGER_PACKAGE_NAME, order = 2),
+        ManagedComponent(
+            InstallerComponentTrustRegistry.CAST_COMPONENT_ID,
+            InstallerComponentTrustRegistry.CAST_PACKAGE_NAME,
+            order = 3,
+        ),
     )
 
     fun validateEvidence(
@@ -495,7 +531,10 @@ object AuthorizationPlanFactory {
         }
     }
 
-    private fun createComponents(components: List<ManagedComponent>): AuthorizationPlanBuildResult {
+    private fun createComponents(
+        components: List<ManagedComponent>,
+        requireDesktop: Boolean = true,
+    ): AuthorizationPlanBuildResult {
         if (components.isEmpty()) return AuthorizationPlanBuildResult.Rejected("authorization_artifacts_missing")
         if (components.map { it.componentId }.toSet().size != components.size) {
             return AuthorizationPlanBuildResult.Rejected("authorization_component_duplicate")
@@ -503,7 +542,7 @@ object AuthorizationPlanFactory {
         if (components.any { component -> !isAllowedDynamicComponent(component) }) {
             return AuthorizationPlanBuildResult.Rejected("authorization_component_unapproved")
         }
-        if (components.none { it.componentId == DESKTOP_COMPONENT_ID }) {
+        if (requireDesktop && components.none { it.componentId == DESKTOP_COMPONENT_ID }) {
             return AuthorizationPlanBuildResult.Rejected("authorization_desktop_missing")
         }
         val orderedComponents = components.sortedWith(compareBy<ManagedComponent> { componentOrder(it) }.thenBy { it.componentId })

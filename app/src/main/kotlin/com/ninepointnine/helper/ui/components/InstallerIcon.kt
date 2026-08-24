@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.composables.icons.lucide.R as LucideR
+import com.ninepointnine.helper.R
 
 /** Icons decoded from verified APKs by the application composition root. */
 val LocalApkIcons = staticCompositionLocalOf<Map<String, ImageBitmap>> { emptyMap() }
@@ -66,6 +67,13 @@ fun ComponentLogo(
             contentScale = ContentScale.Fit,
             modifier = modifier.size(size),
         )
+    } else if (bundledLogo(iconKey) != 0) {
+        Image(
+            painter = painterResource(bundledLogo(iconKey)),
+            contentDescription = contentDescription,
+            contentScale = ContentScale.Fit,
+            modifier = modifier.size(size),
+        )
     } else {
         InstallerIcon(
             name = componentFallbackIcon(iconKey),
@@ -75,6 +83,16 @@ fun ComponentLogo(
             size = size,
         )
     }
+}
+
+/** Stable product artwork is available synchronously before any cloud request. */
+private fun bundledLogo(iconKey: String): Int = when (iconKey) {
+    "03helper", "helper" -> LucideR.drawable.lucide_ic_package
+    "desktop" -> R.drawable.desktop_logo
+    "lyrics" -> R.drawable.lyrics_logo
+    "cast" -> R.drawable.cast_logo
+    "file-manager" -> R.drawable.file_manager_logo
+    else -> 0
 }
 
 private fun componentFallbackIcon(iconKey: String): String = when (iconKey) {

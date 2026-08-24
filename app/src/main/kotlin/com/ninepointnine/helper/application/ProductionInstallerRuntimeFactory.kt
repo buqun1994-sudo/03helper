@@ -9,6 +9,7 @@ import com.ninepointnine.helper.application.artifact.InstallerCatalogLoader
 import com.ninepointnine.helper.application.device.DeviceConnectionSessionAdapter
 import com.ninepointnine.helper.application.device.DeviceDiscoverySessionAdapter
 import com.ninepointnine.helper.application.device.DeviceInstallationCoordinator
+import com.ninepointnine.helper.application.device.DeviceInstallationExecutionResult
 import com.ninepointnine.helper.application.maintenance.MaintenanceController
 import com.ninepointnine.helper.application.maintenance.MaintenanceDiagnosticStore
 import com.ninepointnine.helper.application.maintenance.MaintenanceSessionStore
@@ -98,6 +99,13 @@ object ProductionInstallerRuntimeFactory {
         )
         val catalogLoader = InstallerCatalogLoader { folderCatalogAdapter.load() }
 
+        val apkIconRepository = ApkIconRepository(
+            context = applicationContext,
+            artifactCache = artifactCache,
+            metadataReader = apkMetadataReader,
+            preferredTrack = catalogRuntime.artifactReleaseTrack,
+        )
+
         return InstallerRuntime(
             session = InstallationSession(
                 initialSnapshot = persistedMaintenanceSnapshot
@@ -157,7 +165,19 @@ object ProductionInstallerRuntimeFactory {
             },
             executeDeviceInstallation = { connection, artifacts, eventPort ->
                 try {
-                    DeviceInstallationCoordinator(eventPort).execute(connection, artifacts)
+                    val result = DeviceInstallationCoordinator(eventPort).execute(connection, artifacts)
+                    // The APK has already passed manifest/package/signature and
+                    // digest verification at this point. Keep its icon in the
+                    // app-private cache before temporary files are removed.
+                    if (result is DeviceInstallationExecutionResult.Completed) {
+                        apkIconRepository.persistIcons(artifacts.map {
+                            com.ninepointnine.helper.domain.device.InstallableArtifact(
+                                manifest = it.manifest,
+                                apkFile = it.finalApk,
+                                declarations = it.declarations,
+                            )
+                        })
+                    }
                 } finally {
                     // Every install attempt, including a partial failure, ends
                     // with disposal of private transfer and extraction files.
@@ -171,18 +191,14 @@ object ProductionInstallerRuntimeFactory {
                     File(applicationContext.cacheDir, DIAGNOSTIC_CACHE_DIRECTORY),
                 ),
                 loadCatalog = { catalogLoader.load() },
+                loadDistributionConfig = { folderCatalogAdapter.loadConfiguration() },
                 selfVersion = ArtifactVersion(BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE.toLong()),
             ),
             persistMaintenanceSnapshot = { snapshot ->
                 withContext(Dispatchers.IO) { maintenanceSessionStore.save(snapshot) }
             },
             coroutineContext = Dispatchers.Main.immediate,
-            apkIconRepository = ApkIconRepository(
-                context = applicationContext,
-                artifactCache = artifactCache,
-                metadataReader = apkMetadataReader,
-                preferredTrack = catalogRuntime.artifactReleaseTrack,
-            ),
+            apkIconRepository = apkIconRepository,
             remoteLogoRepository = RemoteLogoRepository(
                 root = File(applicationContext.filesDir, REMOTE_LOGO_CACHE_DIRECTORY),
                 transport = UrlConnectionLogoAssetTransport(),

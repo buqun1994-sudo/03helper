@@ -3,6 +3,9 @@ package com.ninepointnine.helper.application.maintenance
 import com.ninepointnine.helper.application.session.InstallationSessionEventPort
 import com.ninepointnine.helper.application.artifact.toComponentDescriptors
 import com.ninepointnine.helper.data.catalog.CatalogLoadResult
+import com.ninepointnine.helper.data.catalog.DistributionConfigLoadResult
+import com.ninepointnine.helper.data.catalog.InstallerDistributionConfig
+import com.ninepointnine.helper.data.catalog.TrustedArtifactCatalog
 import com.ninepointnine.helper.data.download.ArtifactCache
 import com.ninepointnine.helper.domain.device.DeviceActionConnectionLease
 import com.ninepointnine.helper.domain.device.ManagedApplicationProbe
@@ -33,6 +36,7 @@ class MaintenanceController(
     private val artifactCache: ArtifactCache,
     private val diagnosticStore: MaintenanceDiagnosticStore,
     private val loadCatalog: (suspend () -> CatalogLoadResult)? = null,
+    private val loadDistributionConfig: (suspend () -> DistributionConfigLoadResult)? = null,
     private val selfVersion: ArtifactVersion = ArtifactVersion("0.1.0", 1L),
 ) {
     suspend fun execute(
@@ -53,6 +57,8 @@ class MaintenanceController(
                 MaintenanceActionId.CHECK_UPDATES -> checkUpdates(actionId, snapshot, connection, eventPort)
                 MaintenanceActionId.REPAIR_CONFIGURATION -> repairConfiguration(actionId, snapshot, connection, eventPort)
                 MaintenanceActionId.MANAGE_APPS -> inspectApplications(actionId, snapshot, connection, eventPort)
+                MaintenanceActionId.INSTALL_FILE_MANAGER ->
+                    inspectApplications(actionId, snapshot, connection, eventPort, completeAction = false)
                 MaintenanceActionId.LAUNCH_LYRICS -> launch(actionId, "lyrics", snapshot, connection, eventPort)
                 MaintenanceActionId.LAUNCH_DESKTOP -> launch(actionId, "desktop", snapshot, connection, eventPort)
                 MaintenanceActionId.CLEANUP -> {
@@ -70,7 +76,6 @@ class MaintenanceController(
 
                 // These two actions are converted to the existing installation pipeline by the session.
                 MaintenanceActionId.REINSTALL,
-                MaintenanceActionId.INSTALL_FILE_MANAGER,
                 -> fail(actionId, "maintenance_install_transition_invalid", retryable = false, eventPort)
             }
         } catch (cancelled: CancellationException) {
@@ -171,14 +176,25 @@ class MaintenanceController(
         connection: com.ninepointnine.helper.domain.device.DeviceConnectionLease?,
         eventPort: InstallationSessionEventPort,
     ) {
-        val loader = loadCatalog ?: run {
+        val loader: (suspend () -> CatalogLoadResult)? = loadDistributionConfig?.let { configLoader ->
+            suspend {
+                when (val result = configLoader()) {
+                    is DistributionConfigLoadResult.Failure ->
+                        CatalogLoadResult.Failure(result.reasonCode, result.retryable)
+
+                    is DistributionConfigLoadResult.Success -> result.config.toControlPlaneCatalog()
+                }
+            }
+        } ?: loadCatalog
+        val effectiveLoader = loader ?: run {
             fail(actionId, "catalog_android_profile_missing", retryable = false, eventPort)
             return
         }
-        when (val result = loader()) {
+        when (val result = effectiveLoader()) {
             is CatalogLoadResult.Failure -> fail(actionId, result.reasonCode, result.retryable, eventPort)
             is CatalogLoadResult.Success -> {
                 val updateStatuses = buildUpdateStatuses(
+                    catalog = result.catalog,
                     manifests = result.catalog.manifests,
                     snapshot = snapshot,
                     device = snapshot.device,
@@ -194,6 +210,7 @@ class MaintenanceController(
                         apps = result.catalog.toComponentDescriptors(snapshot.device?.androidSdk),
                         appFailures = result.catalog.appFailures.associate { it.componentId to it.reasonCode },
                         updateStatuses = updateStatuses,
+                        controlPlaneOnly = loadDistributionConfig != null,
                     ),
                 )
                 val currentById = snapshot.artifactManifests.associateBy { it.componentId }
@@ -226,9 +243,11 @@ class MaintenanceController(
                         current.sizeLabel != next.sizeLabel ||
                         current.compatibilityLabel != next.compatibilityLabel ||
                         current.compatibilityState != next.compatibilityState ||
-                        current.errorReason != next.errorReason
+                        current.errorReason != next.errorReason ||
+                        current.iconAsset != next.iconAsset
                 }
-                val manifestChanged = currentById.keys != nextById.keys || nextById.any { (componentId, manifest) ->
+                val manifestChanged = loadDistributionConfig == null &&
+                    (currentById.keys != nextById.keys || nextById.any { (componentId, manifest) ->
                     currentById[componentId]?.let { current ->
                         current.version != manifest.version ||
                         current.archiveSizeBytes != manifest.archiveSizeBytes ||
@@ -238,7 +257,7 @@ class MaintenanceController(
                             !current.certificateSha256.equals(manifest.certificateSha256, ignoreCase = true) ||
                             current.packageName != manifest.packageName
                     } ?: true
-                }
+                })
                 complete(
                     actionId,
                     if (catalogChanged || descriptorChanged || manifestChanged ||
@@ -260,54 +279,69 @@ class MaintenanceController(
         connection: com.ninepointnine.helper.domain.device.DeviceConnectionLease?,
         eventPort: InstallationSessionEventPort,
     ) {
-        val selected = snapshot.components
-            .filter { it.id == com.ninepointnine.helper.domain.device.AuthorizationPlanFactory.DESKTOP_COMPONENT_ID ||
-                it.id in snapshot.selectedOptionalComponentIds }
-            .map { it.id }
-            .toSet()
-        if (selected.isEmpty() || !snapshot.evidence.installed.containsAll(selected)) {
-            fail(actionId, "maintenance_installed_evidence_missing", retryable = false, eventPort)
-            return
-        }
-        val manifests = snapshot.artifactManifests.filter { it.componentId in selected }
-        if (manifests.map { it.componentId }.toSet() != selected) {
-            fail(actionId, "maintenance_manifest_selection_mismatch", retryable = false, eventPort)
-            return
-        }
         val gateway = maintenanceGateway(connection)
         if (gateway == null) {
             fail(actionId, "device_action_gateway_unavailable", retryable = false, eventPort)
             return
+        }
+        val candidates = managedComponents(snapshot)
+        // Authorization rows need the same live inventory as the management
+        // page, including version label and package metadata. The lightweight
+        // inventory method intentionally omits those details for update checks.
+        val inventory = gateway.inspectManagedApplications(candidates)
+        val installedApplications = when (inventory) {
+            is ManagedApplicationsResult.Completed -> inventory.applications.filter { it.installed }
+            is ManagedApplicationsResult.Failed -> {
+                fail(actionId, inventory.failure.reasonCode, inventory.failure.retryable, eventPort)
+                return
+            }
+        }
+        eventPort.emit(
+            InstallationSessionEvent.MaintenanceApplicationsResolved(
+                applications = installedApplications.map { it.toSnapshotStatus() },
+            ),
+        )
+        val installedById = installedApplications.associateBy { it.componentId }
+        val installedComponents = installedApplications.mapNotNull { application ->
+            candidates.firstOrNull { it.componentId == application.componentId }
+                ?.copy(packageName = application.packageName)
         }
         val declarations = snapshot.evidence.installation.mapNotNull { (componentId, evidence) ->
             evidence.declarations?.let { componentId to it }
         }.toMap()
         eventPort.emit(
             InstallationSessionEvent.MaintenanceAuthorizationCheckStarted(
-                componentIds = manifests.map { it.componentId },
+                componentIds = installedComponents.map { it.componentId },
             ),
         )
-        val inspection = gateway.inspectAuthorization(manifests)
-        val statuses = when (inspection) {
-            is MaintenanceAuthorizationResult.Completed -> inspection.applications
-            is MaintenanceAuthorizationResult.Failed -> emptyList()
-        }
-        val effectiveStatuses = if (statuses.isNotEmpty()) {
-            statuses
-        } else {
-            manifests.map { manifest ->
-                ManagedApplicationAuthorizationStatus(
-                    componentId = manifest.componentId,
-                    packageName = manifest.packageName,
-                    authorized = manifest.componentId in snapshot.evidence.configured,
-                    state = if (manifest.componentId in snapshot.evidence.configured) {
-                        MaintenanceAuthorizationState.AUTHORIZED
-                    } else {
-                        MaintenanceAuthorizationState.NOT_AUTHORIZED
-                    },
-                    reasonCode = "authorization_probe_unavailable",
-                )
+        val statuses = when (val inspection = gateway.inspectComponentAuthorization(
+            installedComponents,
+            installedApplications,
+        )) {
+            is MaintenanceAuthorizationResult.Failed -> {
+                fail(actionId, inspection.failure.reasonCode, inspection.failure.retryable, eventPort)
+                return
             }
+
+            is MaintenanceAuthorizationResult.Completed -> inspection.applications
+        }
+        val statusById = statuses.associateBy { it.componentId }
+        val statusShapeInvalid = statuses.size != statusById.size || statuses.any { status ->
+            val installed = installedById[status.componentId]
+            installed == null || installed.packageName != status.packageName
+        }
+        if (statusShapeInvalid) {
+            fail(actionId, "maintenance_authorization_result_invalid", retryable = false, eventPort)
+            return
+        }
+        val effectiveStatuses = installedComponents.map { component ->
+            statusById[component.componentId] ?: ManagedApplicationAuthorizationStatus(
+                componentId = component.componentId,
+                packageName = component.packageName,
+                authorized = null,
+                state = MaintenanceAuthorizationState.ERROR,
+                reasonCode = "authorization_probe_incomplete",
+            )
         }
         effectiveStatuses.forEach { status ->
             eventPort.emit(
@@ -319,14 +353,19 @@ class MaintenanceController(
         }
         eventPort.emit(InstallationSessionEvent.MaintenanceAuthorizationChecked(effectiveStatuses))
 
-        // A real gateway exposes a read-only authorization probe. The first
-        // visit stops after that probe; legacy test gateways that do not expose
-        // any statuses keep the old one-shot repair behavior.
-        val shouldRepair = snapshot.maintenance.authorization.state !=
-            com.ninepointnine.helper.domain.session.MaintenanceAuthorizationFlowState.NOT_STARTED ||
-            statuses.isEmpty()
+        // The first visit is read-only. A second explicit action is the only
+        // path that can write authorization values back to the vehicle.
+        val shouldRepair = snapshot.maintenance.authorization.state ==
+            com.ninepointnine.helper.domain.session.MaintenanceAuthorizationFlowState.REPAIRING
         if (!shouldRepair) {
             complete(actionId, "authorization_checked", eventPort)
+            return
+        }
+        val verifiedManifests = (snapshot.artifactManifests + snapshot.maintenance.availableManifests)
+            .distinctBy { it.componentId }
+        val manifests = verifiedManifests.filter { it.componentId in installedById }
+        if (manifests.map { it.componentId }.toSet() != installedById.keys) {
+            fail(actionId, "maintenance_manifest_selection_mismatch", retryable = false, eventPort)
             return
         }
         when (val result = gateway.repairAuthorization(manifests, declarations)) {
@@ -340,41 +379,23 @@ class MaintenanceController(
         snapshot: InstallationSessionSnapshot,
         connection: com.ninepointnine.helper.domain.device.DeviceConnectionLease?,
         eventPort: InstallationSessionEventPort,
+        completeAction: Boolean = true,
     ) {
         val gateway = maintenanceGateway(connection)
         if (gateway == null) {
             fail(actionId, "device_action_gateway_unavailable", retryable = false, eventPort)
             return
         }
-        val components = (snapshot.artifactManifests.filterNot { InstallerSelfIdentity.isSelfComponentId(it.componentId) }.map {
-            ManagedComponent(
-                componentId = it.componentId,
-                packageName = it.packageName,
-                setup = it.deviceSetup,
-                order = it.sortOrder,
-            )
-        } + snapshot.maintenance.availableManifests.filterNot { InstallerSelfIdentity.isSelfComponentId(it.componentId) }.map {
-            ManagedComponent(
-                componentId = it.componentId,
-                packageName = it.packageName,
-                setup = it.deviceSetup,
-                order = it.sortOrder,
-            )
-        } + snapshot.maintenance.managedApplications
-            .filterNot { InstallerSelfIdentity.isSelfComponentId(it.componentId) }
-            .filter { application -> snapshot.artifactManifests.none { it.componentId == application.componentId } }
-            .filter { application -> snapshot.maintenance.availableManifests.none { it.componentId == application.componentId } }
-            .map { application -> ManagedComponent(application.componentId, application.packageName) })
-            .distinctBy { it.componentId }
+        val components = managedComponents(snapshot)
         when (val result = gateway.inspectManagedApplications(components)) {
             is ManagedApplicationsResult.Failed -> fail(actionId, result.failure.reasonCode, result.failure.retryable, eventPort)
             is ManagedApplicationsResult.Completed -> {
                 eventPort.emit(
                     InstallationSessionEvent.MaintenanceApplicationsResolved(
-                        applications = result.applications.map { it.toSnapshotStatus() },
+                        applications = result.applications.filter { it.installed }.map { it.toSnapshotStatus() },
                     ),
                 )
-                complete(actionId, "applications_checked", eventPort)
+                if (completeAction) complete(actionId, "applications_checked", eventPort)
             }
         }
     }
@@ -448,80 +469,181 @@ class MaintenanceController(
     )
 
     private fun managedComponents(snapshot: InstallationSessionSnapshot): List<ManagedComponent> {
-        val base = (snapshot.artifactManifests + snapshot.maintenance.availableManifests)
-            .filterNot { InstallerSelfIdentity.isSelfComponentId(it.componentId) }
-            .map {
-                ManagedComponent(
-                    componentId = it.componentId,
-                    packageName = it.packageName,
-                    setup = it.deviceSetup,
-                    order = it.sortOrder,
-                )
+        val byId = linkedMapOf<String, ManagedComponent>()
+        fun add(component: ManagedComponent) {
+            if (!InstallerSelfIdentity.isSelfComponentId(component.componentId)) {
+                byId.putIfAbsent(component.componentId, component)
             }
-        return (base + snapshot.maintenance.managedApplications
-            .filter { application -> base.none { it.componentId == application.componentId } }
-            .map { application -> ManagedComponent(application.componentId, application.packageName) })
-            .distinctBy { it.componentId }
+        }
+        snapshot.artifactManifests.forEach { manifest ->
+            add(ManagedComponent(manifest.componentId, manifest.packageName, manifest.deviceSetup, manifest.sortOrder))
+        }
+        snapshot.maintenance.availableManifests.forEach { manifest ->
+            add(ManagedComponent(manifest.componentId, manifest.packageName, manifest.deviceSetup, manifest.sortOrder))
+        }
+        snapshot.evidence.installation.forEach { (componentId, evidence) ->
+            val current = byId[componentId]
+            if (current == null) {
+                add(ManagedComponent(componentId, evidence.packageName))
+            } else if (evidence.packageName.isNotBlank()) {
+                // A verified installation record is the most recent package
+                // identity available before the next live inventory read.
+                byId[componentId] = current.copy(packageName = evidence.packageName)
+            }
+        }
+        snapshot.maintenance.managedApplications.forEach { application ->
+            val current = byId[application.componentId]
+            if (current == null) {
+                add(ManagedComponent(application.componentId, application.packageName))
+            } else if (application.packageName.isNotBlank()) {
+                // The live package identity outranks a stale manifest or
+                // descriptor identity retained from an earlier session.
+                byId[application.componentId] = current.copy(packageName = application.packageName)
+            }
+        }
+        snapshot.components.forEach { descriptor ->
+            if (byId[descriptor.id] == null) {
+                val packageName = com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
+                    .allowedPackageNames(descriptor.id)
+                    .firstOrNull()
+                packageName?.let { add(ManagedComponent(descriptor.id, it, order = byId.size)) }
+            }
+        }
+        com.ninepointnine.helper.domain.device.AuthorizationPlanFactory.allManagedComponents().forEach(::add)
+        return byId.values.toList()
     }
 
     private suspend fun buildUpdateStatuses(
+        catalog: TrustedArtifactCatalog,
         manifests: List<com.ninepointnine.helper.domain.artifact.ArtifactManifest>,
         snapshot: InstallationSessionSnapshot,
         device: com.ninepointnine.helper.domain.session.DeviceSummary?,
         gateway: com.ninepointnine.helper.domain.device.MaintenanceCommandGateway?,
     ): List<MaintenanceUpdateStatus> {
-        val self = manifests.filter { InstallerSelfIdentity.isSelfComponentId(it.componentId) }
-        val selfStatuses = self.map { manifest ->
+        val knownPackages = buildMap<String, String> {
+            snapshot.maintenance.managedApplications.forEach { application ->
+                putIfAbsent(application.componentId, application.packageName)
+            }
+            snapshot.evidence.installation.forEach { (componentId, evidence) ->
+                putIfAbsent(componentId, evidence.packageName)
+            }
+            (snapshot.artifactManifests + snapshot.maintenance.availableManifests).forEach { manifest ->
+                putIfAbsent(manifest.componentId, manifest.packageName)
+            }
+        }
+        val candidates = if (catalog.apps.isNotEmpty()) {
+            catalog.apps.filter { it.enabled }.map { app ->
+                val packageName = app.packageName.ifBlank {
+                    knownPackages[app.componentId]
+                        ?: com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
+                            .allowedPackageNames(app.componentId).firstOrNull()
+                        ?: InstallerSelfIdentity.PACKAGE_NAME.takeIf {
+                            InstallerSelfIdentity.isSelfComponentId(app.componentId)
+                        }
+                        .orEmpty()
+                }
+                UpdateCandidate(
+                    componentId = app.componentId,
+                    displayName = app.displayName,
+                    packageName = packageName,
+                    version = ArtifactVersion(app.versionName, app.versionCode),
+                    iconKey = app.componentId,
+                )
+            }
+        } else {
+            manifests.map { manifest ->
+                UpdateCandidate(
+                    componentId = manifest.componentId,
+                    displayName = manifest.displayName,
+                    packageName = manifest.packageName,
+                    version = manifest.apkVersion,
+                    iconKey = manifest.componentId,
+                )
+            }
+        }
+        val configuredSelf = candidates.firstOrNull { InstallerSelfIdentity.isSelfComponentId(it.componentId) }
+        val selfStatuses = listOf(
             MaintenanceUpdateStatus(
-                componentId = manifest.componentId,
+                componentId = configuredSelf?.componentId ?: InstallerSelfIdentity.COMPONENT_ID,
                 displayName = "03车机助手",
-                versionLabel = manifest.apkVersion.name,
+                versionLabel = configuredSelf?.version?.name ?: selfVersion.name,
                 installedVersionLabel = selfVersion.name,
-                state = compareVersions(selfVersion, manifest.apkVersion),
+                state = configuredSelf?.let { compareVersions(selfVersion, it.version) }
+                    ?: MaintenanceUpdateState.CURRENT,
                 isSelf = true,
                 iconKey = InstallerSelfIdentity.COMPONENT_ID,
-            )
-        }
+            ),
+        )
+        val appCandidates = candidates.filterNot { InstallerSelfIdentity.isSelfComponentId(it.componentId) }
+        if (appCandidates.isEmpty()) return selfStatuses
         if (device?.connectionStatus != com.ninepointnine.helper.domain.session.DeviceConnectionStatus.CONFIRMED) {
             return selfStatuses
         }
-        val installed = if (gateway != null) {
-            when (val result = gateway.inspectManagedApplications(
-                manifests.filterNot { InstallerSelfIdentity.isSelfComponentId(it.componentId) }.map {
-                    ManagedComponent(it.componentId, it.packageName, it.deviceSetup, it.sortOrder)
+        val probeableCandidates = appCandidates.filter { candidate ->
+            PACKAGE_NAME_PATTERN.matches(candidate.packageName)
+        }
+        val manifestById = manifests.associateBy { it.componentId }
+        var inventoryAvailable = gateway != null && probeableCandidates.isNotEmpty()
+        val installed = if (inventoryAvailable) {
+            when (val result = gateway!!.inspectInstalledApplicationInventory(
+                probeableCandidates.map { candidate ->
+                    val manifest = manifestById[candidate.componentId]
+                    ManagedComponent(
+                        candidate.componentId,
+                        candidate.packageName,
+                        manifest?.deviceSetup,
+                        manifest?.sortOrder ?: Int.MAX_VALUE,
+                    )
                 },
             )) {
                 is ManagedApplicationsResult.Completed -> result.applications
+                    .filter { it.installed }
                     .map { it.toSnapshotStatus() }
                     .associateBy { it.componentId }
-                is ManagedApplicationsResult.Failed -> emptyMap()
+                is ManagedApplicationsResult.Failed -> {
+                    inventoryAvailable = false
+                    emptyMap()
+                }
             }
         } else {
-            snapshot.maintenance.managedApplications.associateBy { it.componentId }
+            emptyMap()
         }
-        return selfStatuses + manifests.filterNot { InstallerSelfIdentity.isSelfComponentId(it.componentId) }
-            .map { manifest ->
-                val current = installed[manifest.componentId]
+        return selfStatuses + appCandidates.map { candidate ->
+                val current = installed[candidate.componentId]
                 val state = when {
-                    current == null -> MaintenanceUpdateState.UNAVAILABLE
+                    !inventoryAvailable || !PACKAGE_NAME_PATTERN.matches(candidate.packageName) ->
+                        MaintenanceUpdateState.UNAVAILABLE
+                    current == null -> MaintenanceUpdateState.NOT_INSTALLED
                     !current.installed -> MaintenanceUpdateState.NOT_INSTALLED
                     current.versionCode == null -> MaintenanceUpdateState.UNAVAILABLE
                     compareVersions(
                         ArtifactVersion(current.versionLabel ?: "", current.versionCode),
-                        manifest.apkVersion,
+                        candidate.version,
                     ) == MaintenanceUpdateState.UPDATE_AVAILABLE -> MaintenanceUpdateState.UPDATE_AVAILABLE
                     else -> MaintenanceUpdateState.CURRENT
                 }
                 MaintenanceUpdateStatus(
-                    componentId = manifest.componentId,
-                    displayName = manifest.displayName,
-                    versionLabel = manifest.apkVersion.name,
+                    componentId = candidate.componentId,
+                    displayName = candidate.displayName,
+                    versionLabel = candidate.version.name,
                     installedVersionLabel = current?.versionLabel,
                     state = state,
                     isSelf = false,
-                    iconKey = manifest.componentId,
+                    iconKey = candidate.iconKey,
                 )
             }
+    }
+
+    private data class UpdateCandidate(
+        val componentId: String,
+        val displayName: String,
+        val packageName: String,
+        val version: ArtifactVersion,
+        val iconKey: String,
+    )
+
+    private companion object {
+        val PACKAGE_NAME_PATTERN = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$")
     }
 
     private fun compareVersions(
@@ -531,8 +653,21 @@ class MaintenanceController(
         installed.code <= 0L -> MaintenanceUpdateState.NOT_INSTALLED
         installed.code < available.code -> MaintenanceUpdateState.UPDATE_AVAILABLE
         installed.code > available.code -> MaintenanceUpdateState.CURRENT
-        installed.name != available.name -> MaintenanceUpdateState.UPDATE_AVAILABLE
+        installed.name.isNotBlank() && available.name.isNotBlank() && installed.name != available.name ->
+            MaintenanceUpdateState.UPDATE_AVAILABLE
         else -> MaintenanceUpdateState.CURRENT
     }
 
 }
+
+private fun InstallerDistributionConfig.toControlPlaneCatalog(): CatalogLoadResult.Success =
+    CatalogLoadResult.Success(
+        TrustedArtifactCatalog(
+            catalogVersion = effectiveCatalogVersion(),
+            keyId = keyId,
+            signatureAlgorithm = signatureAlgorithm,
+            manifests = emptyList(),
+            apps = declaredApps().filter { it.enabled },
+            catalogRevision = catalogRevision,
+        ),
+    )

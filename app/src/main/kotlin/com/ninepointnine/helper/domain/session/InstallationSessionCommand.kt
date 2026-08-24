@@ -262,6 +262,7 @@ sealed interface InstallationSessionEvent {
         val appFailures: Map<String, String> = emptyMap(),
         val catalogRevision: Long = 0L,
         val updateStatuses: List<MaintenanceUpdateStatus> = emptyList(),
+        val controlPlaneOnly: Boolean = false,
     ) : InstallationSessionEvent
 
     data class RecoverableError(

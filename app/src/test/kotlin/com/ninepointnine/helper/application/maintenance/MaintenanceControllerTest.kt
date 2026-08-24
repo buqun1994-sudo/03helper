@@ -30,6 +30,9 @@ import com.ninepointnine.helper.domain.session.InstallationSessionEvent
 import com.ninepointnine.helper.domain.session.InstallationSessionSnapshot
 import com.ninepointnine.helper.domain.session.InstallationSessionState
 import com.ninepointnine.helper.domain.session.MaintenanceActionId
+import com.ninepointnine.helper.domain.session.MaintenanceAuthorizationFlowState
+import com.ninepointnine.helper.domain.session.MaintenanceAuthorizationSnapshot
+import com.ninepointnine.helper.domain.session.MaintenanceSnapshot
 import com.ninepointnine.helper.domain.session.SessionEvidence
 import java.nio.file.Files
 import kotlinx.coroutines.runBlocking
@@ -76,6 +79,71 @@ class MaintenanceControllerTest {
                 resultCode = "updates_available",
             ),
             events[1],
+        )
+    }
+
+    @Test
+    fun `control plane update check uses live version code without resolving artifacts`() = runBlocking {
+        val current = manifest("desktop", versionCode = 1)
+        val gateway = FakeGateway().apply {
+            managedApplications = ManagedApplicationsResult.Completed(
+                listOf(
+                    ManagedApplicationProbe(
+                        componentId = "desktop",
+                        packageName = current.packageName,
+                        installed = true,
+                        versionCode = 1L,
+                    ),
+                ),
+            )
+        }
+        val events = mutableListOf<InstallationSessionEvent>()
+        val controller = MaintenanceController(
+            artifactCache = tempCache(),
+            diagnosticStore = tempDiagnostics(),
+            loadDistributionConfig = {
+                com.ninepointnine.helper.data.catalog.DistributionConfigLoadResult.Success(
+                    com.ninepointnine.helper.data.catalog.InstallerDistributionConfig(
+                        channel = "debug",
+                        environment = "staging",
+                        expiresAt = java.time.Instant.parse("2099-01-01T00:00:00Z"),
+                        catalogVersion = "catalog-2",
+                        catalogRevision = 2L,
+                        keyId = "test-key",
+                        signatureAlgorithm = "Ed25519",
+                        apps = listOf(
+                            com.ninepointnine.helper.data.catalog.InstallerComponentSource(
+                                componentId = "desktop",
+                                archiveFileName = "desktop.zip",
+                                required = true,
+                                displayName = "desktop",
+                                versionCode = 1L,
+                                versionName = "1.1",
+                                apkSizeBytes = 50L,
+                                trustProfileId = "nine-studio",
+                            ),
+                        ),
+                    ),
+                )
+            },
+        )
+
+        controller.execute(
+            actionId = MaintenanceActionId.CHECK_UPDATES,
+            snapshot = maintenanceSnapshot(listOf(current)).copy(
+                catalogVersion = "catalog-2",
+                catalogRevision = 2L,
+            ),
+            connection = lease(gateway),
+            eventPort = InstallationSessionEventPort { events += it },
+        )
+
+        val refreshed = events.filterIsInstance<InstallationSessionEvent.MaintenanceCatalogRefreshed>().single()
+        assertTrue(refreshed.controlPlaneOnly)
+        assertTrue(refreshed.manifests.isEmpty())
+        assertEquals(
+            com.ninepointnine.helper.domain.session.MaintenanceUpdateState.CURRENT,
+            refreshed.updateStatuses.single { it.componentId == "desktop" }.state,
         )
     }
 
@@ -153,8 +221,8 @@ class MaintenanceControllerTest {
         )
 
         val resolved = events[0] as InstallationSessionEvent.MaintenanceApplicationsResolved
-        assertEquals(listOf("desktop", "lyrics", "file-manager"), resolved.applications.map { it.componentId })
-        assertEquals(listOf(true, false, true), resolved.applications.map { it.installed })
+        assertEquals(listOf("desktop", "file-manager"), resolved.applications.map { it.componentId })
+        assertEquals(listOf(true, true), resolved.applications.map { it.installed })
         assertEquals("applications_checked", (events[1] as InstallationSessionEvent.MaintenanceActionCompleted).resultCode)
     }
 
@@ -195,18 +263,154 @@ class MaintenanceControllerTest {
             manifest("lyrics", 1),
         )
         val gateway = FakeGateway().apply {
+            managedApplications = ManagedApplicationsResult.Completed(
+                listOf(
+                    ManagedApplicationProbe("desktop", "com.tcrrry.desktop", true),
+                    ManagedApplicationProbe("lyrics", "com.tcrrry.desktoplyrics", true),
+                ),
+            )
+            authorizationStatuses = com.ninepointnine.helper.domain.device.MaintenanceAuthorizationResult.Completed(
+                listOf(
+                    com.ninepointnine.helper.domain.device.ManagedApplicationAuthorizationStatus(
+                        componentId = "desktop",
+                        packageName = "com.tcrrry.desktop",
+                        authorized = false,
+                    ),
+                    com.ninepointnine.helper.domain.device.ManagedApplicationAuthorizationStatus(
+                        componentId = "lyrics",
+                        packageName = "com.tcrrry.desktoplyrics",
+                        authorized = false,
+                    ),
+                ),
+            )
             repairResult = MaintenanceDeviceResult.Completed("authorization_repaired")
         }
         val controller = MaintenanceController(tempCache(), tempDiagnostics())
 
         controller.execute(
             actionId = MaintenanceActionId.REPAIR_CONFIGURATION,
-            snapshot = maintenanceSnapshot(manifests, selected = setOf("lyrics")),
+            snapshot = maintenanceSnapshot(manifests, selected = setOf("lyrics")).copy(
+                maintenance = MaintenanceSnapshot(
+                    authorization = MaintenanceAuthorizationSnapshot(
+                        state = MaintenanceAuthorizationFlowState.REPAIRING,
+                    ),
+                ),
+            ),
             connection = lease(gateway),
             eventPort = InstallationSessionEventPort { },
         )
 
         assertEquals(listOf("desktop", "lyrics"), gateway.repairManifests.map { it.componentId })
+    }
+
+    @Test
+    fun `first authorization visit reads live installed subset without repairing`() = runBlocking {
+        val events = mutableListOf<InstallationSessionEvent>()
+        val gateway = FakeGateway().apply {
+            managedApplications = ManagedApplicationsResult.Completed(
+                listOf(ManagedApplicationProbe("desktop", "com.tcrrry.desktop", true)),
+            )
+            authorizationStatuses = com.ninepointnine.helper.domain.device.MaintenanceAuthorizationResult.Completed(
+                listOf(
+                    com.ninepointnine.helper.domain.device.ManagedApplicationAuthorizationStatus(
+                        componentId = "desktop",
+                        packageName = "com.tcrrry.desktop",
+                        authorized = true,
+                    ),
+                ),
+            )
+        }
+
+        MaintenanceController(tempCache(), tempDiagnostics()).execute(
+            actionId = MaintenanceActionId.REPAIR_CONFIGURATION,
+            snapshot = maintenanceSnapshot(listOf(manifest("desktop", 1), manifest("lyrics", 1))),
+            connection = lease(gateway),
+            eventPort = InstallationSessionEventPort { events += it },
+        )
+
+        val resolved = events.filterIsInstance<InstallationSessionEvent.MaintenanceApplicationsResolved>().single()
+        assertEquals(listOf("desktop"), resolved.applications.map { it.componentId })
+        assertTrue(events.any { it == InstallationSessionEvent.MaintenanceActionCompleted(MaintenanceActionId.REPAIR_CONFIGURATION, "authorization_checked") })
+        assertTrue(gateway.repairManifests.isEmpty())
+    }
+
+    @Test
+    fun `authorization check forwards the same live inventory used for displayed versions`() = runBlocking {
+        val events = mutableListOf<InstallationSessionEvent>()
+        val live = ManagedApplicationProbe(
+            componentId = "desktop",
+            packageName = "com.tcrrry.desktop",
+            installed = true,
+            versionLabel = "2.4.1",
+            versionCode = 241L,
+        )
+        val gateway = FakeGateway().apply {
+            managedApplications = ManagedApplicationsResult.Completed(listOf(live))
+            authorizationStatuses = com.ninepointnine.helper.domain.device.MaintenanceAuthorizationResult.Completed(
+                listOf(
+                    com.ninepointnine.helper.domain.device.ManagedApplicationAuthorizationStatus(
+                        componentId = "desktop",
+                        packageName = live.packageName,
+                        authorized = true,
+                    ),
+                ),
+            )
+        }
+
+        MaintenanceController(tempCache(), tempDiagnostics()).execute(
+            actionId = MaintenanceActionId.REPAIR_CONFIGURATION,
+            snapshot = maintenanceSnapshot(listOf(manifest("desktop", 1))),
+            connection = lease(gateway),
+            eventPort = InstallationSessionEventPort { events += it },
+        )
+
+        val application = events
+            .filterIsInstance<InstallationSessionEvent.MaintenanceApplicationsResolved>()
+            .single()
+            .applications
+            .single()
+        assertEquals("2.4.1", application.versionLabel)
+        assertEquals(241L, application.versionCode)
+        assertEquals(listOf(live), gateway.authorizationInventory)
+    }
+
+    @Test
+    fun `update inspection does not call missing inventory a not-installed result`() = runBlocking {
+        val events = mutableListOf<InstallationSessionEvent>()
+        val gateway = FakeGateway().apply {
+            managedApplications = ManagedApplicationsResult.Failed(
+                com.ninepointnine.helper.domain.device.DeviceActionFailure(
+                    "maintenance_package_inventory_failed",
+                    retryable = true,
+                ),
+            )
+        }
+        val app = manifest("desktop", 2)
+        MaintenanceController(
+            artifactCache = tempCache(),
+            diagnosticStore = tempDiagnostics(),
+            loadCatalog = {
+                CatalogLoadResult.Success(
+                    TrustedArtifactCatalog(
+                        catalogVersion = "catalog-2",
+                        keyId = "test-key",
+                        signatureAlgorithm = "Ed25519",
+                        manifests = listOf(app),
+                    ),
+                )
+            },
+        ).execute(
+            actionId = MaintenanceActionId.CHECK_UPDATES,
+            snapshot = maintenanceSnapshot(listOf(manifest("desktop", 1))),
+            connection = lease(gateway),
+            eventPort = InstallationSessionEventPort { events += it },
+        )
+
+        val refreshed = events.filterIsInstance<InstallationSessionEvent.MaintenanceCatalogRefreshed>().single()
+        assertEquals(
+            com.ninepointnine.helper.domain.session.MaintenanceUpdateState.UNAVAILABLE,
+            refreshed.updateStatuses.single { !it.isSelf }.state,
+        )
     }
 
     private fun maintenanceSnapshot(
@@ -292,6 +496,9 @@ class MaintenanceControllerTest {
 
     private class FakeGateway : AdbCommandGateway, MaintenanceCommandGateway {
         var managedApplications: ManagedApplicationsResult = ManagedApplicationsResult.Completed(emptyList())
+        var authorizationStatuses: com.ninepointnine.helper.domain.device.MaintenanceAuthorizationResult =
+            com.ninepointnine.helper.domain.device.MaintenanceAuthorizationResult.Completed(emptyList())
+        var authorizationInventory: List<ManagedApplicationProbe> = emptyList()
         var repairResult: MaintenanceDeviceResult = MaintenanceDeviceResult.Completed("authorization_repaired")
         var repairManifests: List<ArtifactManifest> = emptyList()
 
@@ -313,6 +520,18 @@ class MaintenanceControllerTest {
         }
 
         override suspend fun inspectManagedApplications(): ManagedApplicationsResult = managedApplications
+
+        override suspend fun inspectComponentAuthorization(
+            components: List<com.ninepointnine.helper.domain.device.ManagedComponent>,
+        ): com.ninepointnine.helper.domain.device.MaintenanceAuthorizationResult = authorizationStatuses
+
+        override suspend fun inspectComponentAuthorization(
+            components: List<com.ninepointnine.helper.domain.device.ManagedComponent>,
+            installedApplications: List<ManagedApplicationProbe>,
+        ): com.ninepointnine.helper.domain.device.MaintenanceAuthorizationResult {
+            authorizationInventory = installedApplications
+            return authorizationStatuses
+        }
 
         override suspend fun launchManagedComponent(componentId: String): MaintenanceDeviceResult =
             MaintenanceDeviceResult.Completed("component_launched")

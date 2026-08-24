@@ -615,7 +615,12 @@ private fun ManagedApplicationCard(
                 Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
                     Text(app.displayName, color = InstallerColors.White, style = MaterialTheme.typography.bodyLarge)
                     Text(
-                        text = listOfNotNull(app.versionLabel, app.packageName.ifBlank { null }).joinToString(" · ")
+                        text = listOfNotNull(
+                            app.versionLabel ?: app.versionCode?.let {
+                                stringResource(R.string.maintenance_version_code_short, it)
+                            },
+                            app.packageName.ifBlank { null },
+                        ).joinToString(" · ")
                             .ifBlank { stringResource(R.string.maintenance_version_unknown) },
                         color = InstallerColors.AuxiliaryWhite,
                         style = MaterialTheme.typography.bodySmall,

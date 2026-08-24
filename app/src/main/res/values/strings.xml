@@ -116,6 +116,7 @@
     <string name="maintenance_available_version">最新 v%1$s</string>
     <string name="maintenance_installed_version">当前 %1$s</string>
     <string name="maintenance_version_unknown">版本信息暂不可用</string>
+    <string name="maintenance_version_code_short">版本 %1$d</string>
     <string name="maintenance_authorization_disconnected">请先连接车机，再检查应用授权</string>
     <string name="maintenance_confirm">确认</string>
     <string name="maintenance_reauthorize">重新授权</string>

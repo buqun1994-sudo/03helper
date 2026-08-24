@@ -3,6 +3,7 @@ package com.ninepointnine.helper.data.artifact
 import android.content.Context
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import com.ninepointnine.helper.data.download.ArtifactCache
 import com.ninepointnine.helper.domain.artifact.ArtifactManifest
@@ -10,8 +11,14 @@ import com.ninepointnine.helper.domain.artifact.ArtifactReleaseTrack
 import com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
 import com.ninepointnine.helper.domain.artifact.InstallerSelfIdentity
 import com.ninepointnine.helper.domain.artifact.InstallerPublisherTrustRegistry
+import com.ninepointnine.helper.domain.device.InstallableArtifact
 import java.io.File
+import java.io.FileOutputStream
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.security.MessageDigest
+import java.util.Properties
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -21,6 +28,10 @@ data class ApkIconRequest(
     val componentId: String,
     val packageName: String? = null,
     val certificateSha256: String? = null,
+    val apkSha256: String? = null,
+    val versionCode: Long? = null,
+    /** A live car inventory row should prefer the icon captured from its installed APK. */
+    val preferPersisted: Boolean = false,
 )
 
 /**
@@ -37,6 +48,9 @@ class ApkIconRepository(
 ) {
     private val packageManager = context.applicationContext.packageManager
     private val bitmapCache = ConcurrentHashMap<String, Bitmap>()
+    private val persistentRoot = File(context.applicationContext.filesDir, APK_ICON_CACHE_DIRECTORY).apply {
+        require(mkdirs() || isDirectory) { "apk_icon_cache_unavailable" }
+    }
 
     suspend fun loadIcons(
         requests: List<ApkIconRequest>,
@@ -50,7 +64,13 @@ class ApkIconRepository(
             }
         }.distinctBy { runCatching { it.canonicalPath }.getOrDefault(it.absolutePath) }
         requests.mapNotNull { request ->
-            findCandidate(request, files)?.let { candidate ->
+            val persisted = if (request.preferPersisted) {
+                loadPersistedIcon(request)?.let { request.componentId to it }
+            } else {
+                null
+            }
+            persisted
+                ?: findCandidate(request, files)?.let { candidate ->
                 // A file can be replaced in place without changing its length or
                 // timestamp. Include the bytes in the cache key so an APK icon
                 // can never survive a content replacement.
@@ -59,8 +79,31 @@ class ApkIconRepository(
                 val bitmap = key?.let(bitmapCache::get)
                     ?: loadBitmap(candidate.file)?.also { loaded -> key?.let { bitmapCache[it] = loaded } }
                 bitmap?.let { request.componentId to it }
-            } ?: loadInstalledIcon(request)?.let { bitmap -> request.componentId to bitmap }
+            } ?: loadPersistedIcon(request)?.let { bitmap -> request.componentId to bitmap }
+                ?: loadInstalledIcon(request)?.let { bitmap -> request.componentId to bitmap }
         }.toMap()
+    }
+
+    /** Persists icons from APKs whose manifest identity has already been verified. */
+    suspend fun persistIcons(artifacts: List<InstallableArtifact>) = withContext(Dispatchers.IO) {
+        artifacts.forEach { artifact ->
+            val file = artifact.apkFile
+            if (!file.isFile) return@forEach
+            val metadata = runCatching { metadataReader.read(file) }.getOrNull() ?: return@forEach
+            if (metadata.packageName != artifact.manifest.packageName ||
+                metadata.certificateSha256s.none { it.equals(artifact.manifest.certificateSha256, ignoreCase = true) } ||
+                runCatching { sha256(file) }.getOrNull()?.equals(artifact.manifest.apkSha256, ignoreCase = true) != true
+            ) return@forEach
+            val bitmap = loadBitmap(file) ?: return@forEach
+            val identity = CacheIdentity(
+                componentId = artifact.manifest.componentId,
+                packageName = metadata.packageName,
+                certificateSha256 = artifact.manifest.certificateSha256.lowercase(),
+                versionCode = metadata.version.code,
+                apkSha256 = artifact.manifest.apkSha256.lowercase(),
+            )
+            writePersistedIcon(identity, bitmap)
+        }
     }
 
     private fun findCandidate(
@@ -70,16 +113,28 @@ class ApkIconRepository(
         .mapNotNull { file ->
             val metadata = runCatching { metadataReader.read(file) }.getOrNull() ?: return@mapNotNull null
             if (request.packageName != null && metadata.packageName != request.packageName) return@mapNotNull null
+            if (request.versionCode != null && metadata.version.code != request.versionCode) return@mapNotNull null
             if (request.certificateSha256 != null && metadata.certificateSha256s.none { digest ->
                     digest.equals(request.certificateSha256, ignoreCase = true)
                 }
             ) return@mapNotNull null
+            if (request.apkSha256 != null &&
+                runCatching { sha256(file) }.getOrNull()
+                    ?.equals(request.apkSha256, ignoreCase = true) != true
+            ) {
+                return@mapNotNull null
+            }
 
             val identity = if (request.packageName != null && request.certificateSha256 != null) {
                 InstallerPublisherTrustRegistry.identitiesFor(request.componentId).firstOrNull { trusted ->
                     trusted.packageName == metadata.packageName &&
                         trusted.certificateSha256.equals(request.certificateSha256, ignoreCase = true)
-                }
+                } ?: com.ninepointnine.helper.domain.artifact.TrustedArtifactIdentity(
+                    componentId = request.componentId,
+                    packageName = metadata.packageName,
+                    certificateSha256 = request.certificateSha256,
+                    track = preferredTrack ?: ArtifactReleaseTrack.DEBUG,
+                )
             } else {
                 InstallerPublisherTrustRegistry.identitiesFor(request.componentId).firstOrNull { trusted ->
                     trusted.packageName == metadata.packageName && metadata.certificateSha256s.any { digest ->
@@ -87,8 +142,9 @@ class ApkIconRepository(
                     }
                 }
             }
-            // Dynamic components without a local trust identity intentionally
-            // use no icon until their APK manifest supplies an exact identity.
+            // A dynamic component may not have a static publisher entry, but
+            // an exact package/certificate request came from a verified
+            // manifest and is sufficient for this read-only icon operation.
             identity
                 ?.takeIf { isTrackAllowed(request.componentId, it.track) }
                 ?.let { Candidate(file, metadata, it) }
@@ -129,24 +185,42 @@ class ApkIconRepository(
         // maintenance row from turning an arbitrary package name into UI data.
         val trusted = request.componentId == InstallerSelfIdentity.COMPONENT_ID ||
             request.componentId == InstallerSelfIdentity.LEGACY_COMPONENT_ID ||
-            InstallerPublisherTrustRegistry.identitiesFor(request.componentId).any { it.packageName == packageName }
+            InstallerPublisherTrustRegistry.identitiesFor(request.componentId).any { it.packageName == packageName } ||
+            // Dynamic components do not have to be present in the static
+            // registry. An exact package + certificate request is produced
+            // only from a verified manifest or a previously verified install.
+            request.certificateSha256?.let { isDigest(it) } == true
         if (!trusted) return null
         val applicationInfo = runCatching { packageManager.getApplicationInfo(packageName, 0) }.getOrNull()
             ?: return null
-        request.certificateSha256?.let { expected ->
+        val packageInfo = if (request.certificateSha256 != null || request.versionCode != null) {
             val flags = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
                 PackageManager.GET_SIGNING_CERTIFICATES
             } else {
                 @Suppress("DEPRECATION")
                 PackageManager.GET_SIGNATURES
             }
-            val packageInfo = runCatching { packageManager.getPackageInfo(packageName, flags) }.getOrNull()
+            runCatching { packageManager.getPackageInfo(packageName, flags) }.getOrNull()
                 ?: return null
-            val signatures = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
-                packageInfo.signingInfo?.apkContentsSigners?.toList().orEmpty()
+        } else {
+            null
+        }
+        request.versionCode?.let { expectedVersionCode ->
+            val actualVersionCode = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                packageInfo?.longVersionCode
             } else {
                 @Suppress("DEPRECATION")
-                packageInfo.signatures?.toList().orEmpty()
+                packageInfo?.versionCode?.toLong()
+            }
+            if (actualVersionCode != expectedVersionCode) return null
+        }
+        request.certificateSha256?.let { expected ->
+            val info = packageInfo ?: return null
+            val signatures = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+                info.signingInfo?.apkContentsSigners?.toList().orEmpty()
+            } else {
+                @Suppress("DEPRECATION")
+                info.signatures?.toList().orEmpty()
             }
             if (signatures.none { signature ->
                     val digest = MessageDigest.getInstance("SHA-256")
@@ -156,6 +230,12 @@ class ApkIconRepository(
                 }
             ) return null
         }
+        // A live inventory request has already established the installed
+        // package/version. Once its package and certificate match the local
+        // trust root, PackageManager is the authoritative source for the
+        // icon actually shown by Android. Preview-only exact APK requests
+        // still refuse this fallback.
+        if (request.apkSha256 != null && !request.preferPersisted) return null
         val drawable = applicationInfo.loadIcon(packageManager)
         val width = drawable.intrinsicWidth.takeIf { it > 0 }?.coerceAtMost(MAX_ICON_EDGE) ?: DEFAULT_ICON_EDGE
         val height = drawable.intrinsicHeight.takeIf { it > 0 }?.coerceAtMost(MAX_ICON_EDGE) ?: DEFAULT_ICON_EDGE
@@ -163,6 +243,96 @@ class ApkIconRepository(
             val canvas = Canvas(bitmap)
             drawable.setBounds(0, 0, width, height)
             drawable.draw(canvas)
+        }
+    }
+
+    private fun loadPersistedIcon(request: ApkIconRequest): Bitmap? {
+        val entries = persistentRoot.listFiles { file -> file.extension == "meta" }.orEmpty()
+            .mapNotNull { metaFile ->
+                val properties = runCatching { Properties().also { metaFile.inputStream().use(it::load) } }.getOrNull()
+                    ?: return@mapNotNull null
+                val identity = CacheIdentity(
+                    componentId = properties.getProperty("componentId").orEmpty(),
+                    packageName = properties.getProperty("packageName").orEmpty(),
+                    certificateSha256 = properties.getProperty("certificateSha256").orEmpty(),
+                    versionCode = properties.getProperty("versionCode")?.toLongOrNull() ?: return@mapNotNull null,
+                    apkSha256 = properties.getProperty("apkSha256").orEmpty(),
+                )
+                val iconSha256 = properties.getProperty("iconSha256").orEmpty()
+                if (identity.componentId != request.componentId ||
+                    request.packageName != null && identity.packageName != request.packageName ||
+                    request.certificateSha256 != null &&
+                    !identity.certificateSha256.equals(request.certificateSha256, ignoreCase = true) ||
+                    request.versionCode != null && identity.versionCode != request.versionCode ||
+                    request.apkSha256 != null &&
+                    !identity.apkSha256.equals(request.apkSha256, ignoreCase = true) ||
+                    !isDigest(identity.certificateSha256) || !isDigest(identity.apkSha256) ||
+                    !isDigest(iconSha256)
+                ) return@mapNotNull null
+                val image = persistentRoot.resolve(metaFile.nameWithoutExtension)
+                if (!image.isFile) return@mapNotNull null
+                if (runCatching { sha256(image) }.getOrNull()?.equals(iconSha256, ignoreCase = true) != true) {
+                    image.delete()
+                    metaFile.delete()
+                    return@mapNotNull null
+                }
+                identity to image
+            }
+            .sortedWith(compareByDescending<Pair<CacheIdentity, File>> { it.first.versionCode }
+                .thenByDescending { it.second.lastModified() })
+        return entries.firstNotNullOfOrNull { (_, image) ->
+            BitmapFactory.decodeFile(image.absolutePath)?.takeIf { bitmap ->
+                bitmap.width in 1..MAX_ICON_EDGE && bitmap.height in 1..MAX_ICON_EDGE
+            } ?: run {
+                image.delete()
+                null
+            }
+        }
+    }
+
+    private fun writePersistedIcon(identity: CacheIdentity, bitmap: Bitmap) {
+        val baseName = "${hashKey(identity.cacheKey)}.png"
+        val image = persistentRoot.resolve(baseName)
+        val metadata = persistentRoot.resolve("$baseName.meta")
+        val temporary = persistentRoot.resolve(".$baseName.part")
+        val temporaryMetadata = persistentRoot.resolve(".$baseName.meta.part")
+        try {
+            FileOutputStream(temporary).use { output ->
+                check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output))
+            }
+            val iconSha256 = sha256(temporary)
+            Properties().apply {
+                setProperty("componentId", identity.componentId)
+                setProperty("packageName", identity.packageName)
+                setProperty("certificateSha256", identity.certificateSha256)
+                setProperty("versionCode", identity.versionCode.toString())
+                setProperty("apkSha256", identity.apkSha256)
+            }.also { properties ->
+                properties.setProperty("iconSha256", iconSha256)
+                temporaryMetadata.outputStream().use { output -> properties.store(output, null) }
+            }
+            moveReplacing(temporary, image)
+            moveReplacing(temporaryMetadata, metadata)
+        } catch (_: Exception) {
+            temporary.delete()
+            temporaryMetadata.delete()
+        }
+    }
+
+    private fun moveReplacing(source: File, target: File) {
+        try {
+            Files.move(
+                source.toPath(),
+                target.toPath(),
+                StandardCopyOption.ATOMIC_MOVE,
+                StandardCopyOption.REPLACE_EXISTING,
+            )
+        } catch (_: AtomicMoveNotSupportedException) {
+            Files.move(
+                source.toPath(),
+                target.toPath(),
+                StandardCopyOption.REPLACE_EXISTING,
+            )
         }
     }
 
@@ -199,6 +369,12 @@ class ApkIconRepository(
         return digest.digest().joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
     }
 
+    private fun hashKey(value: String): String = MessageDigest.getInstance("SHA-256")
+        .digest(value.toByteArray(Charsets.UTF_8))
+        .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+
+    private fun isDigest(value: String): Boolean = value.matches(SHA256_PATTERN)
+
     private fun trackPriority(track: ArtifactReleaseTrack): Int = when (track) {
         ArtifactReleaseTrack.STAGING -> 3
         ArtifactReleaseTrack.RELEASE -> 2
@@ -211,8 +387,21 @@ class ApkIconRepository(
         val identity: com.ninepointnine.helper.domain.artifact.TrustedArtifactIdentity,
     )
 
+    private data class CacheIdentity(
+        val componentId: String,
+        val packageName: String,
+        val certificateSha256: String,
+        val versionCode: Long,
+        val apkSha256: String,
+    ) {
+        val cacheKey: String
+            get() = listOf(componentId, packageName, certificateSha256, versionCode, apkSha256).joinToString("|")
+    }
+
     private companion object {
+        const val APK_ICON_CACHE_DIRECTORY = "03-app-apk-icon-cache"
         const val MAX_ICON_EDGE = 256
         const val DEFAULT_ICON_EDGE = 128
+        val SHA256_PATTERN = Regex("^[a-fA-F0-9]{64}$")
     }
 }

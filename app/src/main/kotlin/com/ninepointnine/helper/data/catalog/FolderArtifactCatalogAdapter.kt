@@ -92,6 +92,27 @@ class FolderArtifactCatalogAdapter(
         }
     }
 
+    /**
+     * Loads only the signed control-plane snapshot. It deliberately does not
+     * resolve the folder, open WebView, enumerate files, download ZIPs, or read
+     * APK metadata; those steps belong to selected installation preparation.
+     */
+    suspend fun loadConfiguration(): DistributionConfigLoadResult = when (val result = configAdapter.load()) {
+        is DistributionConfigLoadResult.Success -> {
+            if (!result.config.expiresAt.isAfter(now())) {
+                lastConfigFailure = CatalogLoadResult.Failure("distribution_config_expired", retryable = true)
+                DistributionConfigLoadResult.Failure("distribution_config_expired", retryable = true)
+            } else {
+                result
+            }
+        }
+
+        is DistributionConfigLoadResult.Failure -> {
+            lastConfigFailure = CatalogLoadResult.Failure(result.reasonCode, result.retryable)
+            result
+        }
+    }
+
     /** Reads only the signed config and one Lanzou root listing. No ZIP is downloaded here. */
     suspend fun loadSelection(): CatalogLoadResult {
         val config = loadConfig() ?: return lastConfigFailure

@@ -163,6 +163,8 @@ data class MaintenanceSnapshot(
     val availableCatalogRevision: Long = 0L,
     val availableCatalogKeyId: String? = null,
     val availableCatalogSignatureAlgorithm: String? = null,
+    /** True when the last catalog check loaded only signed control metadata. */
+    val catalogControlPlaneOnly: Boolean = false,
     val applicationAction: MaintenanceApplicationActionRecord? = null,
     val applicationDetails: ManagedApplicationDetails? = null,
     val updateStatuses: List<MaintenanceUpdateStatus> = emptyList(),

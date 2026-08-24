@@ -9,12 +9,18 @@ import java.io.FileOutputStream
 import java.net.URI
 import java.net.URL
 import java.security.MessageDigest
+import java.util.concurrent.ConcurrentHashMap
 import javax.net.ssl.HttpsURLConnection
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 
 data class RemoteLogoRequest(
     val componentId: String,
@@ -36,8 +42,8 @@ fun interface LogoAssetTransport {
 
 /** HTTPS adapter for immutable app-icon objects. Redirects are deliberately rejected. */
 class UrlConnectionLogoAssetTransport(
-    private val connectTimeoutMillis: Int = 10_000,
-    private val readTimeoutMillis: Int = 20_000,
+    private val connectTimeoutMillis: Int = 4_000,
+    private val readTimeoutMillis: Int = 8_000,
 ) : LogoAssetTransport {
     override suspend fun fetch(url: String, maxBytes: Long): LogoAssetResponse = withContext(Dispatchers.IO) {
         val uri = URI(url)
@@ -85,37 +91,66 @@ class RemoteLogoRepository(
     private val transport: LogoAssetTransport,
     private val maxBytes: Long = MAX_ICON_BYTES,
 ) {
+    private val memoryCache = ConcurrentHashMap<String, Bitmap>()
+
     init {
         require(root.mkdirs() || root.isDirectory) { "logo_cache_unavailable" }
     }
 
-    suspend fun loadIcons(requests: List<RemoteLogoRequest>): Map<String, Bitmap> = withContext(Dispatchers.IO) {
-        requests.mapNotNull { request ->
-            try {
-                currentCoroutineContext().ensureActive()
-                loadOne(request)?.let { request.componentId to it }
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (error: Exception) {
-                Log.w(TAG, "logo_load_failed component=${request.componentId} reason=${reason(error)}")
-                null
-            }
-        }.toMap()
+    suspend fun loadIcons(requests: List<RemoteLogoRequest>): Map<String, Bitmap> =
+        loadRequests(requests, allowNetwork = true, failureLabel = "logo_load_failed")
+
+    /** Returns only immutable, already verified cache entries without touching the network. */
+    suspend fun loadCachedIcons(requests: List<RemoteLogoRequest>): Map<String, Bitmap> =
+        loadRequests(requests, allowNetwork = false, failureLabel = "logo_cache_read_failed")
+
+    private suspend fun loadRequests(
+        requests: List<RemoteLogoRequest>,
+        allowNetwork: Boolean,
+        failureLabel: String,
+    ): Map<String, Bitmap> = withContext(Dispatchers.IO) {
+        if (requests.isEmpty()) return@withContext emptyMap()
+        coroutineScope {
+            val permits = Semaphore(LOGO_LOAD_CONCURRENCY)
+            requests.map { request ->
+                async {
+                    permits.withPermit {
+                        try {
+                            currentCoroutineContext().ensureActive()
+                            loadOne(request, allowNetwork)?.let { request.componentId to it }
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (error: Exception) {
+                            Log.w(TAG, "$failureLabel component=${request.componentId} reason=${reason(error)}")
+                            null
+                        }
+                    }
+                }
+            }.awaitAll().filterNotNull().toMap()
+        }
     }
 
-    private suspend fun loadOne(request: RemoteLogoRequest): Bitmap? {
+    private suspend fun loadOne(request: RemoteLogoRequest, allowNetwork: Boolean): Bitmap? {
         val asset = request.asset
         validateAsset(asset)
         val cacheFile = root.resolve(cacheName(request, asset))
+        val cacheKey = cacheFile.name
+        memoryCache[cacheKey]?.let { return it }
         if (cacheFile.isFile && cacheFile.length() == asset.sizeBytes &&
             runCatching { sha256(cacheFile) == asset.sha256 }.getOrDefault(false)
         ) {
-            decode(cacheFile, asset)?.let { return it }
+            decode(cacheFile, asset)?.let {
+                memoryCache[cacheKey] = it
+                return it
+            }
             // A digest-valid file can still be a truncated or unsupported image
             // (for example after an interrupted platform-level file replacement).
             // Remove it so the next read can recover from the immutable source.
             cacheFile.delete()
+            memoryCache.remove(cacheKey)
         }
+
+        if (!allowNetwork) return null
 
         val response = transport.fetch(asset.url, maxBytes)
         if (response.statusCode !in 200..299 || response.body.isEmpty()) return null
@@ -131,6 +166,7 @@ class RemoteLogoRepository(
                 cacheFile.delete()
                 null
             } else {
+                memoryCache[cacheKey] = decoded
                 decoded
             }
         } finally {
@@ -184,6 +220,7 @@ class RemoteLogoRepository(
         const val ALLOWED_HOST = "download.9.9studio.fun"
         const val MAX_ICON_BYTES = 256 * 1024L
         const val MAX_ICON_EDGE = 512
+        const val LOGO_LOAD_CONCURRENCY = 3
         val ICON_MIME_TYPES = setOf("image/png", "image/webp")
         val ASSET_ID_PATTERN = Regex("^[a-z0-9][a-z0-9._-]{0,127}$")
         val SHA256_PATTERN = Regex("^[a-f0-9]{64}$")

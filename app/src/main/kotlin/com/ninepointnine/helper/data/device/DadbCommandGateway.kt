@@ -6,6 +6,7 @@ import com.ninepointnine.helper.domain.artifact.ArtifactManifestValidator
 import com.ninepointnine.helper.domain.artifact.ManifestValidation
 import com.ninepointnine.helper.domain.device.AdbCommandGateway
 import com.ninepointnine.helper.domain.device.AuthorizationActionEvidence
+import com.ninepointnine.helper.domain.device.AuthorizationAction
 import com.ninepointnine.helper.domain.device.AuthorizationDeclarationValidator
 import com.ninepointnine.helper.domain.device.AuthorizationPlanBuildResult
 import com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
@@ -22,6 +23,7 @@ import com.ninepointnine.helper.domain.device.InstallableArtifact
 import com.ninepointnine.helper.domain.device.InstalledArtifactEvidence
 import com.ninepointnine.helper.domain.device.ManagedApplicationProbe
 import com.ninepointnine.helper.domain.device.ManagedApplicationsResult
+import com.ninepointnine.helper.domain.device.ManagedComponent
 import com.ninepointnine.helper.domain.device.ManagedApplicationDetailsProbe
 import com.ninepointnine.helper.domain.device.ManagedApplicationDetailsProbeResult
 import com.ninepointnine.helper.domain.device.ManagedApplicationAuthorizationStatus
@@ -29,6 +31,7 @@ import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationResult
 import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationState
 import com.ninepointnine.helper.domain.device.MaintenanceCommandGateway
 import com.ninepointnine.helper.domain.device.MaintenanceDeviceResult
+import com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
 import com.ninepointnine.helper.domain.session.MaintenanceApplicationActionId
 import android.util.Log
 import dadb.AdbShellResponse
@@ -54,6 +57,9 @@ internal class DadbCommandGateway(
     private val installedApkCacheDirectory: File?,
     private val installedApkMetadataReader: ApkMetadataReader?,
 ) : AdbCommandGateway, MaintenanceCommandGateway {
+    /** Cached per lease so older Android package-manager builds are probed once. */
+    private var versionedPackageInventorySupported: Boolean? = null
+
     override suspend fun install(artifacts: List<InstallableArtifact>): DeviceInstallResult = withLease(
         whenClosed = DeviceInstallResult.Failed(
             DeviceActionFailure("adb_connection_closed", retryable = true),
@@ -312,30 +318,40 @@ internal class DadbCommandGateway(
         inspectManagedApplications(AuthorizationPlanFactory.allManagedComponents())
 
     override suspend fun inspectManagedApplications(
-        components: List<com.ninepointnine.helper.domain.device.ManagedComponent>,
+        components: List<ManagedComponent>,
     ): ManagedApplicationsResult = withLease(
         whenClosed = ManagedApplicationsResult.Failed(
             DeviceActionFailure("adb_connection_closed", retryable = true),
         ),
     ) {
-        if (components.isEmpty() || components.map { it.componentId }.toSet().size != components.size ||
-            components.any {
-                !COMPONENT_ID_PATTERN.matches(it.componentId) || !PACKAGE_NAME_PATTERN.matches(it.packageName)
-            }
-        ) {
-            return@withLease ManagedApplicationsResult.Failed(
-                DeviceActionFailure("maintenance_components_invalid", retryable = false),
-            )
-        }
-        val applications = mutableListOf<ManagedApplicationProbe>()
-        components.forEach { component ->
-            when (val result = inspectInstalledPackage(component.componentId, component.packageName)) {
-                is PackageInspection.Completed -> applications += result.toProbe(component)
+        val inventory = inspectInstalledApplicationInventoryLocked(components)
+        if (inventory is ManagedApplicationsResult.Failed) return@withLease inventory
+        val installed = (inventory as ManagedApplicationsResult.Completed).applications
+        val detailed = installed.mapNotNull { application ->
+            when (val result = inspectInstalledPackage(application.componentId, application.packageName)) {
+                is PackageInspection.Completed -> if (result.installed) {
+                    result.toProbe(
+                        ManagedComponent(
+                            componentId = application.componentId,
+                            packageName = application.packageName,
+                        ),
+                    )
+                } else null
 
                 is PackageInspection.Failed -> return@withLease ManagedApplicationsResult.Failed(result.failure)
             }
         }
-        ManagedApplicationsResult.Completed(applications)
+        ManagedApplicationsResult.Completed(detailed)
+    }
+
+    override suspend fun inspectInstalledApplicationInventory(
+        components: List<ManagedComponent>,
+    ): ManagedApplicationsResult = withLease(
+        whenClosed = ManagedApplicationsResult.Failed(
+            DeviceActionFailure("adb_connection_closed", retryable = true),
+        ),
+    ) {
+        inspectInstalledApplicationInventoryLocked(components)
     }
 
     override suspend fun inspectAuthorization(
@@ -350,31 +366,257 @@ internal class DadbCommandGateway(
                 DeviceActionFailure("maintenance_manifest_selection_mismatch", retryable = false),
             )
         }
-        val statuses = manifests.map { manifest ->
-            when (val result = inspectInstalledPackage(manifest.componentId, manifest.packageName)) {
-                is PackageInspection.Completed -> ManagedApplicationAuthorizationStatus(
-                    componentId = manifest.componentId,
-                    packageName = manifest.packageName,
-                    authorized = result.installed,
-                    state = if (result.installed) {
-                        MaintenanceAuthorizationState.AUTHORIZED
-                    } else {
-                        MaintenanceAuthorizationState.NOT_AUTHORIZED
-                    },
-                    reasonCode = if (result.installed) null else "package_not_installed",
-                )
+        inspectComponentAuthorizationLocked(manifests.map {
+            ManagedComponent(
+                componentId = it.componentId,
+                packageName = it.packageName,
+                setup = it.deviceSetup,
+                order = it.sortOrder,
+            )
+        })
+    }
 
-                is PackageInspection.Failed -> ManagedApplicationAuthorizationStatus(
-                    componentId = manifest.componentId,
-                    packageName = manifest.packageName,
+    override suspend fun inspectComponentAuthorization(
+        components: List<ManagedComponent>,
+    ): MaintenanceAuthorizationResult = withLease(
+        whenClosed = MaintenanceAuthorizationResult.Failed(
+            DeviceActionFailure("adb_connection_closed", retryable = true),
+        ),
+    ) {
+        inspectComponentAuthorizationLocked(components)
+    }
+
+    override suspend fun inspectComponentAuthorization(
+        components: List<ManagedComponent>,
+        installedApplications: List<ManagedApplicationProbe>,
+    ): MaintenanceAuthorizationResult = withLease(
+        whenClosed = MaintenanceAuthorizationResult.Failed(
+            DeviceActionFailure("adb_connection_closed", retryable = true),
+        ),
+    ) {
+        inspectComponentAuthorizationLocked(components, installedApplications)
+    }
+
+    private fun inspectInstalledApplicationInventoryLocked(
+        components: List<ManagedComponent>,
+    ): ManagedApplicationsResult {
+        if (components.map { it.componentId }.toSet().size != components.size ||
+            components.any {
+                !COMPONENT_ID_PATTERN.matches(it.componentId) || !PACKAGE_NAME_PATTERN.matches(it.packageName)
+            }
+        ) {
+            return ManagedApplicationsResult.Failed(
+                DeviceActionFailure("maintenance_components_invalid", retryable = false),
+            )
+        }
+        // Read the complete package inventory once. The versioned form also
+        // carries versionCode, avoiding three extra ADB calls per component.
+        val discoveredPackages = readPackageInventory()
+            ?: return ManagedApplicationsResult.Failed(
+                DeviceActionFailure("maintenance_package_inventory_failed", retryable = true),
+            )
+        if (discoveredPackages.isEmpty()) {
+            return ManagedApplicationsResult.Completed(emptyList())
+        }
+        val componentByPackage = buildMap {
+            components.forEach { component ->
+                val aliases = (InstallerComponentTrustRegistry.allowedPackageNames(component.componentId) + component.packageName)
+                    .filter { PACKAGE_NAME_PATTERN.matches(it) }
+                aliases.forEach { packageName ->
+                    putIfAbsent(packageName, component)
+                }
+            }
+        }
+        val applications = mutableListOf<ManagedApplicationProbe>()
+        discoveredPackages.sortedBy { it.packageName }.forEach { entry ->
+            val component = componentByPackage[entry.packageName] ?: return@forEach
+            val resolvedComponent = component.copy(packageName = entry.packageName)
+            if (entry.versionCode != null) {
+                applications += ManagedApplicationProbe(
+                    componentId = resolvedComponent.componentId,
+                    packageName = entry.packageName,
+                    installed = true,
+                    versionCode = entry.versionCode,
+                )
+                return@forEach
+            }
+            // A legacy package-manager response without versionCode is still
+            // usable for presence, but enrich it only on that compatibility
+            // path so normal maintenance checks stay one round trip.
+            when (val result = inspectInstalledPackage(resolvedComponent.componentId, entry.packageName)) {
+                is PackageInspection.Completed -> if (result.installed) {
+                    applications += result.toProbe(resolvedComponent)
+                }
+
+                is PackageInspection.Failed -> return ManagedApplicationsResult.Failed(result.failure)
+            }
+        }
+        return ManagedApplicationsResult.Completed(
+            applications.sortedWith(compareBy<ManagedApplicationProbe> { it.componentId }.thenBy { it.packageName }),
+        )
+    }
+
+    private fun readPackageInventory(): List<PackageInventoryEntry>? {
+        if (versionedPackageInventorySupported != false) {
+            val versioned = shell("pm list packages --show-versioncode")
+            if (versioned != null && versioned.exitCode == 0) {
+                val entries = PackageInventoryParser.parseEntries(versioned.output)
+                if (entries.isNotEmpty()) {
+                    versionedPackageInventorySupported = true
+                    return entries
+                }
+            }
+            versionedPackageInventorySupported = false
+        }
+        val response = shell("pm list packages") ?: return null
+        if (response.exitCode != 0) return null
+        val entries = PackageInventoryParser.parseEntries(response.output)
+        // Empty stdout is a valid empty inventory. Non-empty stdout with no
+        // parseable package row is not a trustworthy device state; treating it
+        // as "nothing installed" would recreate the stale UI bug.
+        if (entries.isEmpty() && response.output.lineSequence().any { it.trim().isNotEmpty() }) {
+            return null
+        }
+        return entries
+    }
+
+    private fun inspectComponentAuthorizationLocked(
+        components: List<ManagedComponent>,
+        installedApplications: List<ManagedApplicationProbe>? = null,
+    ): MaintenanceAuthorizationResult {
+        if (components.map { it.componentId }.toSet().size != components.size ||
+            components.any {
+                !COMPONENT_ID_PATTERN.matches(it.componentId) || !PACKAGE_NAME_PATTERN.matches(it.packageName)
+            }
+        ) {
+            return MaintenanceAuthorizationResult.Failed(
+                DeviceActionFailure("maintenance_components_invalid", retryable = false),
+            )
+        }
+        val inventory = installedApplications?.let(ManagedApplicationsResult::Completed)
+            ?: inspectInstalledApplicationInventoryLocked(components)
+        if (inventory is ManagedApplicationsResult.Failed) {
+            return MaintenanceAuthorizationResult.Failed(inventory.failure)
+        }
+        val installedById = (inventory as ManagedApplicationsResult.Completed).applications
+            .associateBy { it.componentId }
+        val statuses = components.mapNotNull { component ->
+            val installed = installedById[component.componentId] ?: return@mapNotNull null
+            val plan = when (val result = AuthorizationPlanFactory.createForInspection(listOf(component))) {
+                is AuthorizationPlanBuildResult.Ready -> result.plan
+                is AuthorizationPlanBuildResult.Rejected -> {
+                    return@mapNotNull ManagedApplicationAuthorizationStatus(
+                        componentId = component.componentId,
+                        packageName = installed.packageName,
+                        authorized = null,
+                        state = MaintenanceAuthorizationState.ERROR,
+                        reasonCode = result.reasonCode,
+                    )
+                }
+            }
+            if (plan.actions.isEmpty()) {
+                return@mapNotNull ManagedApplicationAuthorizationStatus(
+                    componentId = component.componentId,
+                    packageName = installed.packageName,
+                    authorized = true,
+                    state = MaintenanceAuthorizationState.AUTHORIZED,
+                    reasonCode = "authorization_not_required",
+                )
+            }
+            val probes = plan.actions.map(::readAuthorizationAction)
+            val failedProbe = probes.firstOrNull { it.value == null }
+            val unmet = probes.firstOrNull { it.value == false }
+            when {
+                failedProbe != null -> ManagedApplicationAuthorizationStatus(
+                    componentId = component.componentId,
+                    packageName = installed.packageName,
                     authorized = null,
                     state = MaintenanceAuthorizationState.ERROR,
-                    reasonCode = result.failure.reasonCode,
+                    reasonCode = failedProbe.reasonCode,
+                )
+
+                unmet != null -> ManagedApplicationAuthorizationStatus(
+                    componentId = component.componentId,
+                    packageName = installed.packageName,
+                    authorized = false,
+                    state = MaintenanceAuthorizationState.NOT_AUTHORIZED,
+                    reasonCode = unmet.reasonCode,
+                )
+
+                else -> ManagedApplicationAuthorizationStatus(
+                    componentId = component.componentId,
+                    packageName = installed.packageName,
+                    authorized = true,
+                    state = MaintenanceAuthorizationState.AUTHORIZED,
                 )
             }
         }
-        MaintenanceAuthorizationResult.Completed(statuses)
+        return MaintenanceAuthorizationResult.Completed(statuses)
     }
+
+    private fun readAuthorizationAction(action: AuthorizationAction): AuthorizationProbe = when (action) {
+        is AuthorizationAction.EnsureAppOpAllowed -> {
+            val response = shell("appops get ${shellArgument(action.packageName)} ${shellArgument(action.operation.wireName)}")
+            val state = response
+                ?.takeIf { it.exitCode == 0 }
+                ?.let { AppOpsResponseParser.parse(it.output, action.operation.wireName) }
+            when (state) {
+                AuthorizationValueState.ALLOWED -> AuthorizationProbe(true, null)
+                null -> AuthorizationProbe(null, "authorization_appop_read_failed")
+                else -> AuthorizationProbe(false, "authorization_appop_not_allowed")
+            }
+        }
+
+        is AuthorizationAction.EnsureRuntimePermissionGranted -> {
+            val response = shell("dumpsys package ${shellArgument(action.packageName)}")
+            if (response == null || response.exitCode != 0) {
+                AuthorizationProbe(null, "authorization_runtime_permission_read_failed")
+            } else {
+                val granted = Regex(
+                    "(?m)^\\s*${Regex.escape(action.permission.wireName)}:\\s*granted=(true|false)",
+                ).find(response.output)?.groupValues?.getOrNull(1)?.toBooleanStrictOrNull()
+                when (granted) {
+                    true -> AuthorizationProbe(true, null)
+                    false -> AuthorizationProbe(false, "authorization_runtime_permission_not_granted")
+                    null -> AuthorizationProbe(null, "authorization_runtime_permission_read_failed")
+                }
+            }
+        }
+
+        is AuthorizationAction.EnsureSecureSettingEnabled -> {
+            val response = shell("settings get secure ${shellArgument(action.setting.wireName)}")
+            when {
+                response == null || response.exitCode != 0 ->
+                    AuthorizationProbe(null, "authorization_secure_setting_read_failed")
+                response.output.trim() == "1" -> AuthorizationProbe(true, null)
+                response.output.trim() == "0" -> AuthorizationProbe(false, "authorization_secure_setting_disabled")
+                else -> AuthorizationProbe(null, "authorization_secure_setting_read_failed")
+            }
+        }
+
+        is AuthorizationAction.AppendSecureComponent -> {
+            val response = shell("settings get secure ${shellArgument(action.setting.wireName)}")
+            if (response == null || response.exitCode != 0) {
+                AuthorizationProbe(null, "authorization_component_list_read_failed")
+            } else {
+                val present = response.output.trim()
+                    .takeUnless { it.isBlank() || it == "null" }
+                    ?.split(':')
+                    ?.any { it == action.targetComponent }
+                    ?: false
+                if (present) {
+                    AuthorizationProbe(true, null)
+                } else {
+                    AuthorizationProbe(false, "authorization_component_not_present")
+                }
+            }
+        }
+    }
+
+    private data class AuthorizationProbe(
+        val value: Boolean?,
+        val reasonCode: String?,
+    )
 
     override suspend fun performApplicationAction(
         component: com.ninepointnine.helper.domain.device.ManagedComponent,
@@ -434,12 +676,50 @@ internal class DadbCommandGateway(
 
             MaintenanceApplicationActionId.UNINSTALL -> {
                 val response = shell("pm uninstall ${shellArgument(component.packageName)}")
-                if (!isSuccessful(response) || !response?.output.orEmpty().trim().equals("Success", ignoreCase = true)) {
+                if (response == null || response.exitCode != 0 ||
+                    !response.output.trim().equals("Success", ignoreCase = true)
+                ) {
                     MaintenanceDeviceResult.Failed(
                         DeviceActionFailure("maintenance_uninstall_failed", component.componentId, retryable = true),
                     )
                 } else {
-                    MaintenanceDeviceResult.Completed("component_uninstalled")
+                    var lastFailure: DeviceActionFailure? = null
+                    var absent = false
+                    repeat(3) { attempt ->
+                        if (absent) return@repeat
+                        when (val verification = inspectInstalledPackage(component.componentId, component.packageName)) {
+                            is PackageInspection.Completed -> if (!verification.installed) {
+                                absent = true
+                                return@repeat
+                            } else {
+                                lastFailure = DeviceActionFailure(
+                                    "maintenance_uninstall_postcondition_failed",
+                                    component.componentId,
+                                    retryable = true,
+                                )
+                            }
+
+                            is PackageInspection.Failed -> {
+                                lastFailure = DeviceActionFailure(
+                                    "maintenance_uninstall_postcondition_unknown",
+                                    component.componentId,
+                                    retryable = true,
+                                )
+                            }
+                        }
+                        if (!absent && attempt < 2) delay(250L * (attempt + 1))
+                    }
+                    if (absent) {
+                        MaintenanceDeviceResult.Completed("component_uninstalled")
+                    } else {
+                        MaintenanceDeviceResult.Failed(
+                            lastFailure ?: DeviceActionFailure(
+                                "maintenance_uninstall_postcondition_unknown",
+                                component.componentId,
+                                retryable = true,
+                            ),
+                        )
+                    }
                 }
             }
 
@@ -712,7 +992,8 @@ internal class DadbCommandGateway(
             ?: return PackageInspection.Failed(
                 DeviceActionFailure("maintenance_package_check_failed", componentId, retryable = true),
             )
-        if (response.exitCode != 0 || response.errorOutput.isNotBlank()) {
+        if (response.exitCode != 0) {
+            if (isPackageAbsentResponse(response)) return PackageInspection.Completed(installed = false)
             return PackageInspection.Failed(
                 DeviceActionFailure("maintenance_package_check_failed", componentId, retryable = true),
             )
@@ -732,7 +1013,7 @@ internal class DadbCommandGateway(
             ?: return PackageInspection.Failed(
                 DeviceActionFailure("maintenance_package_details_failed", componentId, retryable = true),
             )
-        if (!isSuccessful(packageInfo)) {
+        if (packageInfo.exitCode != 0) {
             return PackageInspection.Failed(
                 DeviceActionFailure("maintenance_package_details_failed", componentId, retryable = true),
             )
@@ -747,7 +1028,7 @@ internal class DadbCommandGateway(
             ?.let(::parseEpochMillis)
         val filePath = paths.single()
         val fileSize = shell("stat -c %s ${shellArgument(filePath)}")
-            ?.takeIf(::isSuccessful)
+            ?.takeIf { it.exitCode == 0 }
             ?.output
             ?.trim()
             ?.lineSequence()
@@ -763,6 +1044,15 @@ internal class DadbCommandGateway(
             filePath = filePath,
             uid = uid,
         )
+    }
+
+    private fun isPackageAbsentResponse(response: AdbShellResponse): Boolean {
+        val text = (response.output + "\n" + response.errorOutput).lowercase()
+        return text.contains("unknown package") ||
+            text.contains("package not found") ||
+            text.contains("unable to find package") ||
+            text.contains("does not exist") ||
+            text.contains("not installed")
     }
 
     private fun parseEpochMillis(value: String): Long? = runCatching {
@@ -1407,4 +1697,30 @@ internal object AppOpsResponseParser {
             else -> null
         }
     }
+}
+
+internal data class PackageInventoryEntry(
+    val packageName: String,
+    val versionCode: Long?,
+)
+
+/** Parses stable package-manager lines without depending on shell locale text. */
+internal object PackageInventoryParser {
+    private val packageNamePattern = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$")
+    private val versionedLinePattern = Regex(
+        "^package:($PACKAGE_NAME_PATTERN_TEXT)(?:\\s+versionCode:(\\d+)(?:\\s.*)?)?",
+    )
+    private const val PACKAGE_NAME_PATTERN_TEXT = "[A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z][A-Za-z0-9_]*)+"
+
+    fun parseEntries(output: String): List<PackageInventoryEntry> = output.lineSequence()
+        .map(String::trim)
+        .mapNotNull { line ->
+            val match = versionedLinePattern.matchEntire(line) ?: return@mapNotNull null
+            val packageName = match.groupValues[1].takeIf(packageNamePattern::matches) ?: return@mapNotNull null
+            PackageInventoryEntry(packageName, match.groupValues[2].toLongOrNull())
+        }
+        .toList()
+        .distinctBy { it.packageName }
+
+    fun parse(output: String): Set<String> = parseEntries(output).mapTo(linkedSetOf()) { it.packageName }
 }

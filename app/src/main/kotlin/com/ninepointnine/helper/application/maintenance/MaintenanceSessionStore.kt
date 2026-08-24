@@ -24,6 +24,7 @@ import com.ninepointnine.helper.domain.session.MaintenanceSnapshot
 import com.ninepointnine.helper.domain.session.ManagedApplicationStatus
 import com.ninepointnine.helper.domain.session.ComponentStatus
 import com.ninepointnine.helper.data.catalog.DeviceSetupWireDocument
+import com.ninepointnine.helper.data.catalog.InstallerAppIconDocument
 import com.ninepointnine.helper.data.catalog.SecureComponentWireDocument
 import com.ninepointnine.helper.domain.session.SessionEvidence
 import java.io.File
@@ -127,6 +128,7 @@ private data class StoredMaintenanceState(
     val availableCatalogRevision: Long = 0L,
     val availableCatalogKeyId: String?,
     val availableCatalogSignatureAlgorithm: String?,
+    val catalogControlPlaneOnly: Boolean = false,
     val installed: Set<String>,
     val configured: Set<String>,
     val available: Set<String>,
@@ -153,6 +155,18 @@ private data class StoredMaintenanceState(
                     description = component.description,
                     status = component.status.name,
                     errorReason = component.errorReason,
+                    icon = component.iconAsset?.let { asset ->
+                        InstallerAppIconDocument(
+                            assetId = asset.assetId,
+                            assetVersion = asset.assetVersion,
+                            url = asset.url,
+                            mimeType = asset.mimeType,
+                            width = asset.width,
+                            height = asset.height,
+                            sizeBytes = asset.sizeBytes,
+                            sha256 = asset.sha256,
+                        )
+                    },
                 )
             },
             selectedOptionalComponentIds = snapshot.selectedOptionalComponentIds,
@@ -166,6 +180,7 @@ private data class StoredMaintenanceState(
             availableCatalogRevision = snapshot.maintenance.availableCatalogRevision,
             availableCatalogKeyId = snapshot.maintenance.availableCatalogKeyId,
             availableCatalogSignatureAlgorithm = snapshot.maintenance.availableCatalogSignatureAlgorithm,
+            catalogControlPlaneOnly = snapshot.maintenance.catalogControlPlaneOnly,
             installed = snapshot.evidence.installed,
             configured = snapshot.evidence.configured,
             available = snapshot.evidence.available,
@@ -317,6 +332,7 @@ private data class StoredMaintenanceState(
                 availableCatalogRevision = availableCatalogRevision,
                 availableCatalogKeyId = availableCatalogKeyId,
                 availableCatalogSignatureAlgorithm = availableCatalogSignatureAlgorithm,
+                catalogControlPlaneOnly = catalogControlPlaneOnly,
             ),
         )
     }
@@ -428,6 +444,8 @@ private data class StoredComponent(
     val description: String = "",
     val status: String = ComponentStatus.READING.name,
     val errorReason: String? = null,
+    /** Signed preview metadata retained so a cold maintenance page is stable. */
+    val icon: InstallerAppIconDocument? = null,
 ) {
     fun toDomainOrNull(): ComponentDescriptor? = runCatching {
         ComponentDescriptor(
@@ -437,6 +455,7 @@ private data class StoredComponent(
             versionLabel = versionLabel,
             sizeLabel = sizeLabel,
             compatibilityLabel = compatibilityLabel,
+            iconAsset = icon?.toDomain(),
             description = description,
             status = ComponentStatus.valueOf(status),
             errorReason = errorReason,

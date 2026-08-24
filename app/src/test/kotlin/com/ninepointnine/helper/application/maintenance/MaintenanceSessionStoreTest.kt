@@ -4,6 +4,7 @@ import com.ninepointnine.helper.domain.artifact.ArtifactManifest
 import com.ninepointnine.helper.domain.artifact.ArtifactSource
 import com.ninepointnine.helper.domain.artifact.ArtifactSourceKind
 import com.ninepointnine.helper.domain.artifact.ArtifactVersion
+import com.ninepointnine.helper.domain.artifact.AppIconAsset
 import com.ninepointnine.helper.domain.artifact.CompatibilityRange
 import com.ninepointnine.helper.domain.artifact.toComponentDescriptor
 import com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
@@ -37,7 +38,26 @@ class MaintenanceSessionStoreTest {
         val store = MaintenanceSessionStore(file)
         val installed = manifests(versionCode = 1L)
         val available = manifests(versionCode = 2L)
-        val snapshot = maintenanceSnapshot(installed, available)
+        val icon = AppIconAsset(
+            assetId = "03desktop-staging-logo-app-icon",
+            assetVersion = 1,
+            url = "https://download.9.9studio.fun/03-apps/logos/03desktop/sha256-" + "a".repeat(64) + ".png",
+            mimeType = "image/png",
+            width = 216,
+            height = 216,
+            sizeBytes = 44_699L,
+            sha256 = "a".repeat(64),
+        )
+        val base = maintenanceSnapshot(installed, available)
+        val snapshot = base.copy(
+            components = base.components.map { component ->
+                if (component.id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID) {
+                    component.copy(iconAsset = icon)
+                } else {
+                    component
+                }
+            },
+        )
 
         assertTrue(store.save(snapshot))
         val restored = store.load()
@@ -50,6 +70,7 @@ class MaintenanceSessionStoreTest {
         assertEquals(snapshot.evidence, restored?.evidence)
         assertEquals(snapshot.maintenance.managedApplications, restored?.maintenance?.managedApplications)
         assertEquals(snapshot.maintenance.lastAction, restored?.maintenance?.lastAction)
+        assertEquals(icon, restored?.components?.first { it.id == "desktop" }?.iconAsset)
     }
 
     @Test

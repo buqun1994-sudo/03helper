@@ -639,6 +639,73 @@ class InstallationSessionTest {
     }
 
     @Test
+    fun `starting the install applications scan discards the previous selection snapshot`() {
+        val base = maintenanceSession(
+            manifests = listOf(
+                fullManifest("desktop", versionCode = 1),
+                fullManifest("file-manager", versionCode = 1),
+            ),
+        ).currentSnapshot()
+        val session = InstallationSession(
+            initialSnapshot = base.copy(
+                maintenance = base.maintenance.copy(
+                    installationSelection = MaintenanceInstallationSelection(
+                        actionId = MaintenanceActionId.INSTALL_FILE_MANAGER,
+                        options = listOf(
+                            MaintenanceInstallationOption(
+                                componentId = "file-manager",
+                                displayName = "文件管理器",
+                                installed = true,
+                            ),
+                        ),
+                        selectedComponentIds = setOf("file-manager"),
+                    ),
+                ),
+            ),
+        )
+
+        session.dispatch(InstallationSessionCommand.MaintenanceAction(MaintenanceActionId.INSTALL_FILE_MANAGER))
+
+        assertEquals(null, session.currentSnapshot().maintenance.installationSelection)
+        assertEquals(MaintenanceActionId.INSTALL_FILE_MANAGER, session.currentSnapshot().maintenance.activeAction)
+        assertTrue(session.currentSnapshot().maintenance.managedApplications.isEmpty())
+    }
+
+    @Test
+    fun `successful uninstall removes the application from the maintenance inventory`() {
+        val base = maintenanceSession().currentSnapshot()
+        val session = InstallationSession(
+            initialSnapshot = base.copy(
+                maintenance = base.maintenance.copy(
+                    managedApplications = listOf(
+                        ManagedApplicationStatus(
+                            componentId = "desktop",
+                            packageName = AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME,
+                            installed = true,
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        session.dispatch(
+            InstallationSessionCommand.MaintenanceApplicationAction(
+                componentId = "desktop",
+                actionId = MaintenanceApplicationActionId.UNINSTALL,
+            ),
+        )
+        session.dispatchEvent(
+            InstallationSessionEvent.MaintenanceApplicationActionCompleted(
+                componentId = "desktop",
+                actionId = MaintenanceApplicationActionId.UNINSTALL,
+                resultCode = "component_uninstalled",
+            ),
+        )
+
+        assertTrue(session.currentSnapshot().maintenance.managedApplications.isEmpty())
+    }
+
+    @Test
     fun `invalid managed application evidence fails closed instead of completing`() {
         val session = maintenanceSession()
         session.dispatch(InstallationSessionCommand.MaintenanceAction(MaintenanceActionId.MANAGE_APPS))
@@ -684,6 +751,139 @@ class InstallationSessionTest {
         assertEquals(available, session.currentSnapshot().maintenance.availableManifests.single())
         assertEquals("catalog-2", session.currentSnapshot().maintenance.availableCatalogVersion)
         assertFalse(session.currentSnapshot().maintenance.availableManifests.isEmpty())
+    }
+
+    @Test
+    fun `control plane refresh retains usable manifests until a full catalog is prepared`() {
+        val installed = fullManifest("desktop", versionCode = 1)
+        val updated = fullManifest("desktop", versionCode = 2)
+        val session = maintenanceSession(manifests = listOf(installed), catalogRevision = 1L)
+
+        session.dispatch(InstallationSessionCommand.MaintenanceAction(MaintenanceActionId.CHECK_UPDATES))
+        session.dispatchEvent(
+            InstallationSessionEvent.MaintenanceCatalogRefreshed(
+                catalogVersion = "catalog-2",
+                keyId = "key-1",
+                signatureAlgorithm = "Ed25519",
+                catalogRevision = 2L,
+                manifests = emptyList(),
+                apps = listOf(
+                    ComponentDescriptor(
+                        id = "desktop",
+                        displayName = "Desktop",
+                        required = true,
+                        status = ComponentStatus.READING,
+                    ),
+                ),
+                controlPlaneOnly = true,
+            ),
+        )
+
+        val controlPlaneSnapshot = session.currentSnapshot()
+        assertTrue(controlPlaneSnapshot.maintenance.catalogControlPlaneOnly)
+        assertEquals(listOf(installed), controlPlaneSnapshot.artifactManifests)
+        assertEquals(listOf(installed), controlPlaneSnapshot.maintenance.availableManifests)
+
+        session.dispatchEvent(
+            InstallationSessionEvent.MaintenanceActionCompleted(
+                actionId = MaintenanceActionId.CHECK_UPDATES,
+                resultCode = "updates_available",
+            ),
+        )
+        session.dispatch(InstallationSessionCommand.MaintenanceAction(MaintenanceActionId.CHECK_UPDATES))
+        session.dispatchEvent(
+            InstallationSessionEvent.MaintenanceCatalogRefreshed(
+                catalogVersion = "catalog-3",
+                keyId = "key-1",
+                signatureAlgorithm = "Ed25519",
+                catalogRevision = 3L,
+                manifests = listOf(updated),
+                controlPlaneOnly = false,
+            ),
+        )
+
+        assertFalse(session.currentSnapshot().maintenance.catalogControlPlaneOnly)
+        assertEquals(listOf(updated), session.currentSnapshot().maintenance.availableManifests)
+    }
+
+    @Test
+    fun `leaving authorization route resets the next visit to a read-only check`() {
+        val manifest = fullManifest("desktop", versionCode = 1)
+        val session = maintenanceSession(manifests = listOf(manifest))
+
+        session.dispatch(InstallationSessionCommand.MaintenanceAction(MaintenanceActionId.REPAIR_CONFIGURATION))
+        session.dispatchEvent(
+            InstallationSessionEvent.MaintenanceApplicationsResolved(
+                listOf(
+                    ManagedApplicationStatus(
+                        componentId = "desktop",
+                        packageName = manifest.packageName,
+                        installed = true,
+                    ),
+                ),
+            ),
+        )
+        session.dispatchEvent(InstallationSessionEvent.MaintenanceAuthorizationCheckStarted(listOf("desktop")))
+        session.dispatchEvent(
+            InstallationSessionEvent.MaintenanceAuthorizationChecked(
+                listOf(
+                    com.ninepointnine.helper.domain.device.ManagedApplicationAuthorizationStatus(
+                        componentId = "desktop",
+                        packageName = manifest.packageName,
+                        authorized = true,
+                    ),
+                ),
+            ),
+        )
+        session.dispatchEvent(
+            InstallationSessionEvent.MaintenanceActionCompleted(
+                actionId = MaintenanceActionId.REPAIR_CONFIGURATION,
+                resultCode = "authorization_checked",
+            ),
+        )
+        assertEquals(MaintenanceAuthorizationFlowState.READY, session.currentSnapshot().maintenance.authorization.state)
+
+        session.dispatch(InstallationSessionCommand.LeaveMaintenanceAction)
+        assertEquals(
+            MaintenanceAuthorizationFlowState.NOT_STARTED,
+            session.currentSnapshot().maintenance.authorization.state,
+        )
+        session.dispatch(InstallationSessionCommand.MaintenanceAction(MaintenanceActionId.REPAIR_CONFIGURATION))
+        assertEquals(
+            MaintenanceAuthorizationFlowState.CHECKING,
+            session.currentSnapshot().maintenance.authorization.state,
+        )
+    }
+
+    @Test
+    fun `starting or failing an update check removes stale update rows`() {
+        val session = maintenanceSession().let { source ->
+            InstallationSession(
+                initialSnapshot = source.currentSnapshot().copy(
+                    maintenance = source.currentSnapshot().maintenance.copy(
+                        updateStatuses = listOf(
+                            MaintenanceUpdateStatus(
+                                componentId = "desktop",
+                                displayName = "Desktop",
+                                versionLabel = "v2",
+                                state = MaintenanceUpdateState.UPDATE_AVAILABLE,
+                            ),
+                        ),
+                    ),
+                ),
+            )
+        }
+
+        session.dispatch(InstallationSessionCommand.MaintenanceAction(MaintenanceActionId.CHECK_UPDATES))
+        assertTrue(session.currentSnapshot().maintenance.updateStatuses.isEmpty())
+        session.dispatchEvent(
+            InstallationSessionEvent.MaintenanceActionFailed(
+                actionId = MaintenanceActionId.CHECK_UPDATES,
+                reasonCode = "distribution_config_transport_failed",
+                retryable = true,
+            ),
+        )
+        assertTrue(session.currentSnapshot().maintenance.updateStatuses.isEmpty())
     }
 
     @Test

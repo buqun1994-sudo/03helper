@@ -8,8 +8,9 @@ import kotlinx.coroutines.withContext
 
 class UrlConnectionReleaseCatalogTransport(
     private val endpoint: URL,
-    private val connectTimeoutMillis: Int = 10_000,
-    private val readTimeoutMillis: Int = 20_000,
+    /** Control-plane checks must fail quickly; APK transfer has its own transport and budget. */
+    private val connectTimeoutMillis: Int = 4_000,
+    private val readTimeoutMillis: Int = 8_000,
 ) : ReleaseCatalogTransport {
     init {
         require(endpoint.protocol.equals("https", ignoreCase = true))

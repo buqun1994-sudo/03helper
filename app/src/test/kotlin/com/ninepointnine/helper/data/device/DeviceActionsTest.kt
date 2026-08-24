@@ -265,6 +265,29 @@ class DeviceActionsTest {
     }
 
     @Test
+    fun `package inventory parser accepts versioned package rows and ignores malformed rows`() {
+        val output = """
+            package:com.ninepointnine.desktop versionCode:42
+            package:org.fossify.filemanager.debug versionCode:14 minSdk:26
+            package:bad-package versionCode:9
+            package:com.ninepointnine.desktop versionCode:not-a-number
+            unrelated output
+        """.trimIndent()
+
+        assertEquals(
+            listOf(
+                PackageInventoryEntry("com.ninepointnine.desktop", 42L),
+                PackageInventoryEntry("org.fossify.filemanager.debug", 14L),
+            ),
+            PackageInventoryParser.parseEntries(output),
+        )
+        assertEquals(
+            setOf("com.ninepointnine.desktop", "org.fossify.filemanager.debug"),
+            PackageInventoryParser.parse(output),
+        )
+    }
+
+    @Test
     fun `coordinator installs the batch then invokes the versioned authorization plan once and launches only desktop`() {
         val lyricsFile = Files.createTempFile("lyrics", ".apk").toFile().apply { writeBytes(byteArrayOf(1)) }
         val desktopFile = Files.createTempFile("desktop", ".apk").toFile().apply { writeBytes(byteArrayOf(2)) }

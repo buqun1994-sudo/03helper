@@ -36,6 +36,58 @@ import java.util.concurrent.atomic.AtomicInteger
 
 class FolderArtifactCatalogAdapterTest {
     @Test
+    fun `control plane configuration load does not enumerate the folder or touch artifact preparation`() = runBlocking {
+        val config = config()
+        val folderCalls = AtomicInteger(0)
+        val root = java.nio.file.Files.createTempDirectory("03helper-control-plane").toFile()
+        try {
+            val sourcePolicy = ReleaseSourcePolicy(mode = ReleaseSourceMode.FOLDER_CONFIG)
+            val adapter = FolderArtifactCatalogAdapter(
+                configAdapter = configAdapter(config),
+                folderSourceAdapter = LanzouFolderSourceAdapter(
+                    hostFactory = LanzouFolderWebViewHostFactory {
+                        object : LanzouFolderWebViewHost {
+                            override fun startFolder(
+                                folderUrl: String,
+                                password: String,
+                                onEntries: (List<LanzouFolderEntry>) -> Unit,
+                                onFailure: (com.ninepointnine.helper.domain.artifact.ArtifactFailure) -> Unit,
+                            ) {
+                                folderCalls.incrementAndGet()
+                                error("folder_must_not_be_opened")
+                            }
+
+                            override fun stopAndDestroy() = Unit
+                        }
+                    },
+                    sourcePolicy = sourcePolicy,
+                ),
+                lanzouSourceAdapter = LanzouWebSourceAdapter(
+                    hostFactory = LanzouWebViewHostFactory {
+                        DownloadHost { error("share_must_not_be_opened") }
+                    },
+                    sourcePolicy = sourcePolicy,
+                ),
+                downloader = DynamicArtifactDownloader(
+                    transport = ArtifactTransport { _, _ -> error("download_must_not_run") },
+                    sourcePolicy = sourcePolicy,
+                ),
+                metadataReader = ApkMetadataReader { error("apk_must_not_be_read") },
+                sourcePolicy = sourcePolicy,
+                artifactCache = ArtifactCache(root.resolve("artifacts")),
+                workingDirectory = root.resolve("working"),
+            )
+
+            val result = adapter.loadConfiguration()
+
+            assertTrue(result is DistributionConfigLoadResult.Success)
+            assertEquals(0, folderCalls.get())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun `folder source ignores unknown files without blocking declared apps`() = runBlocking {
         val config = config()
         val hostFactory = LanzouFolderWebViewHostFactory {

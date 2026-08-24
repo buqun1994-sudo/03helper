@@ -419,3 +419,12 @@ F2 Debug APK 已按用户授权安装到指定手机。该段记录的是 F2 交
 1. 当前 `app/build/outputs/apk/debug/app-debug.apk` SHA-256 为 `3245d19eb88de26aebe35e74f20563595f9ea9c28285906280e6ea648cc1a372`；与显式测试手机 `adb-RFCX412AN1X-gWfMRD (2)._adb-tls-connect._tcp` 上已安装包逐字节一致，包名 `com.ninepointnine.helper`、版本 `0.1.0 (1)`，正式入口 `.MainActivity` 已置于前台。
 2. 本轮收尾护栏 `check-03app-repository.mjs`、`check-project-docs.mjs`、`check-skills.mjs` 和 `git diff --check` 均通过；此前本轮代码验证的 JVM 单测、Lint、Debug 构建与设备 smoke 结果继续有效。
 3. 车机 `192.168.0.203:5555` 当前仍未在线，因此真实车机安装、授权、启动 / 强停和返回重连链路未宣称通过；未对车机执行写入、清理、卸载或重启。
+
+## 2026-08-25 Logo、维护实时库存与检查更新收口
+
+1. 本轮完成 Logo 与车机实时状态收口：已验证 APK / 持久化 APK Logo 优先于内置产品 Logo，内置 Logo 优先于远程 Logo；已确认安装状态的组件不再请求远程 Logo，维护页发起实时库存读取期间也不继续展示旧远程预览。远程 Logo 增加磁盘 / 内存缓存和有界并发，维护快照保留签名 Logo 元数据。
+2. 检查更新改为只刷新签名控制面配置，并以 `catalogVersion`、`catalogRevision`、展示元数据和车机实时 `versionCode` 交叉比较；不再打开蓝奏 WebView、枚举目录、下载 ZIP 或解压 APK。ADB 优先读取带版本号的包清单，旧系统回退普通包清单；检查开始和失败时清除旧结果。
+3. 授权页、管理已安装应用页和安装应用页均由同一受控组件集合及车机 ADB 实时包库存驱动，文件管理器没有页面特判。卸载动作以 `pm path` 回读确认包已消失，成功后同步移除会话库存；重新进入管理 / 安装流程会重新扫描车机，避免把旧缓存投影为已安装。
+4. 指定 JDK17 下 `:app:compileDebugKotlin`、`:app:compileDebugAndroidTestKotlin`、`:app:testDebugUnitTest`、`:app:lintDebug`、`:app:assembleDebug`、`:app:assembleDebugAndroidTest` 和 `:app:connectedDebugAndroidTest` 均通过；JVM 单测共 `160` 项（0 failures / 0 errors / 0 skipped），instrumentation smoke 为 `2/2`。
+5. 最新 Debug APK 已核对为 `com.ninepointnine.helper` / `versionName=0.1.0` / `versionCode=1` / `MainActivity`，v2 签名验证通过；已在显式测试手机上执行保留数据覆盖安装并启动，系统返回 `Success`，进程保持运行且未发现应用致命异常。车机当前未在线，真实车机授权、管理、安装、卸载和检查更新闭环仍待车机人工主测。
+6. `check-project-docs.mjs`、`check-skills.mjs`、`check-local-environment.mjs` 和 `git diff --check` 通过；`check-03app-repository.mjs --strict` 仅因登记快照 HEAD 与实际 HEAD 不一致而失败，未修改登记库或提交来掩盖该差异。本轮未提交、未推送、未发布。
