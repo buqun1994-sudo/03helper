@@ -1,0 +1,7 @@
+interface:
+  display_name: "03 APP仓库入口"
+  short_description: "将 03helper 任务路由到统一身份规则"
+  default_prompt: "Use $03-app-repository to route this 03helper repository task through the shared 03 APP manager and verify the fixed identity."
+
+policy:
+  allow_implicit_invocation: true
