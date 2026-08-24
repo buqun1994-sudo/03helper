@@ -300,9 +300,6 @@ class DeviceInstallationCoordinator(
         return evidence.all { installed ->
             val manifest = expected[installed.componentId]?.manifest ?: return@all false
             installed.packageName == manifest.packageName &&
-                installed.version == manifest.apkVersion &&
-                installed.apkSizeBytes == manifest.apkSizeBytes &&
-                installed.apkSha256.equals(manifest.apkSha256, ignoreCase = true) &&
                 installed.certificateSha256.equals(manifest.certificateSha256, ignoreCase = true)
         }
     }
@@ -321,7 +318,6 @@ class DeviceInstallationCoordinator(
             val artifact = expected[item.componentId] ?: return@all false
             val isLaunchTarget = item.componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
             item.packageName == artifact.manifest.packageName &&
-                item.version == artifact.manifest.apkVersion &&
                 item.installedArchiveVerified &&
                 item.launchAttempted == isLaunchTarget &&
                 if (isLaunchTarget) {

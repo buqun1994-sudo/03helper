@@ -68,6 +68,8 @@ private fun InstallerRoot(runtime: InstallerRuntime) {
     InstallApp(
         snapshot = snapshot,
         onIntent = { intent -> runtime.dispatch(intent.toInstallationSessionCommand()) },
+        apkIconRepository = runtime.apkIconRepository,
+        remoteLogoRepository = runtime.remoteLogoRepository,
     )
 }
 
@@ -84,8 +86,10 @@ internal fun InstallUiIntent.toInstallationSessionCommand(): InstallationSession
     InstallUiIntent.CancelInstallation -> InstallationSessionCommand.CancelInstallation
     InstallUiIntent.ContinueInstallation -> InstallationSessionCommand.ContinueInstallation
     InstallUiIntent.RetryInstallation -> InstallationSessionCommand.RetryInstallation
+    InstallUiIntent.ReturnToSelection -> InstallationSessionCommand.ReturnToSelection
     InstallUiIntent.Reconfigure -> InstallationSessionCommand.ReconfigureInstallation
     InstallUiIntent.EnterMaintenance -> InstallationSessionCommand.EnterMaintenance
+    InstallUiIntent.LeaveMaintenanceAction -> InstallationSessionCommand.LeaveMaintenanceAction
     is InstallUiIntent.MaintenanceAction -> InstallationSessionCommand.MaintenanceAction(actionId)
     is InstallUiIntent.MaintenanceApplicationAction -> InstallationSessionCommand.MaintenanceApplicationAction(
         componentId = componentId,

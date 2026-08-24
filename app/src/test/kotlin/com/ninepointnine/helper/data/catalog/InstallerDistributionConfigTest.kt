@@ -169,13 +169,13 @@ class InstallerDistributionConfigTest {
             failureReason(
                 keys,
                 payloadDocument(apps = defaultApps().map { app ->
-                    if (app.appId == "desktop") app.copy(minClientSchemaVersion = 4) else app
+                    if (app.appId == "desktop") app.copy(minClientSchemaVersion = 5) else app
                 }),
             ),
         )
 
         val optionalUnsupported = defaultApps().map { app ->
-            if (app.appId == "lyrics") app.copy(minClientSchemaVersion = 4) else app
+            if (app.appId == "lyrics") app.copy(minClientSchemaVersion = 5) else app
         }
         val result = loadDocument(keys, payloadDocument(apps = optionalUnsupported))
         val config = (result as DistributionConfigLoadResult.Success).config
@@ -211,6 +211,32 @@ class InstallerDistributionConfigTest {
     }
 
     @Test
+    fun `v4 accepts a signed app icon and rejects an unbound digest`() = runBlocking {
+        val keys = KeyPairGenerator.getInstance("EC").apply { initialize(256) }.generateKeyPair()
+        val v4 = payloadDocument(
+            schemaVersion = 4,
+            apps = defaultApps().mapIndexed { index, app -> app.copy(icon = icon(index)) },
+        )
+        val config = (loadDocument(keys, v4) as DistributionConfigLoadResult.Success).config
+        assertEquals("03desktop-staging-logo-app-icon", config.apps.first().iconAsset?.assetId)
+        assertEquals(216, config.apps.first().iconAsset?.width)
+
+        val invalid = v4.copy(
+            apps = v4.apps.mapIndexed { index, app ->
+                if (index == 0) app.copy(icon = app.icon?.copy(sha256 = "b".repeat(64))) else app
+            },
+        )
+        assertEquals("distribution_config_icon_digest_mismatch", failureReason(keys, invalid))
+
+        val productMismatch = v4.copy(
+            apps = v4.apps.mapIndexed { index, app ->
+                if (index == 0) app.copy(icon = app.icon?.copy(url = app.icon.url.replace("/03desktop/", "/03lyrics/"))) else app
+            },
+        )
+        assertEquals("distribution_config_icon_product_mismatch", failureReason(keys, productMismatch))
+    }
+
+    @Test
     fun `same revision with a different catalog version is rejected`() = runBlocking {
         val keys = KeyPairGenerator.getInstance("EC").apply { initialize(256) }.generateKeyPair()
         val store = InMemoryCatalogRevisionStore()
@@ -243,7 +269,7 @@ class InstallerDistributionConfigTest {
 
         assertEquals(123L, desktop.versionCode)
         assertEquals("1.2.3", desktop.versionName)
-        assertEquals("V1.2.3", desktop.displayVersionLabel)
+        assertEquals("v1.2.3", desktop.displayVersionLabel)
         assertEquals("2.6M", desktop.displaySizeLabel)
         assertEquals("2.6M", formatArtifactSizeLabel(2_726_400L))
     }
@@ -298,7 +324,7 @@ class InstallerDistributionConfigTest {
     ): DistributionConfigLoadResult = runBlocking {
         val payload = CloudReleaseCatalogAdapter.STRICT_JSON.encodeToString(document).toByteArray(Charsets.UTF_8)
         adapter(
-            signedEnvelopeForDocument(keys, payload, document.catalogVersion, document.catalogRevision),
+            signedEnvelopeForDocument(keys, payload, document.schemaVersion, document.catalogVersion, document.catalogRevision),
             keys,
             revisionStore,
         ).load()
@@ -307,6 +333,7 @@ class InstallerDistributionConfigTest {
     private fun signedEnvelopeForDocument(
         keys: KeyPair,
         payloadBytes: ByteArray,
+        schemaVersion: Int,
         catalogVersion: String,
         catalogRevision: Long,
     ): SignedInstallerConfigEnvelope {
@@ -315,7 +342,7 @@ class InstallerDistributionConfigTest {
             update(payloadBytes)
         }
         return SignedInstallerConfigEnvelope(
-            schemaVersion = 3,
+            schemaVersion = schemaVersion,
             configVersion = catalogVersion,
             keyId = "test-key",
             signatureAlgorithm = "SHA256withECDSA",
@@ -328,13 +355,14 @@ class InstallerDistributionConfigTest {
 
     private fun payloadDocument(
         apps: List<InstallerAppSourceDocument> = defaultApps(),
+        schemaVersion: Int = 3,
         environment: String = "staging",
         issuedAtUtc: String = "2026-08-22T00:00:00Z",
         expiresAt: String = "2099-12-31T00:00:00Z",
         catalogVersion: String = "android-debug-test-007",
         catalogRevision: Long = 7L,
     ): InstallerDistributionConfigPayload = InstallerDistributionConfigPayload(
-        schemaVersion = 3,
+        schemaVersion = schemaVersion,
         environment = environment,
         channel = "debug",
         issuedAtUtc = issuedAtUtc,
@@ -395,6 +423,29 @@ class InstallerDistributionConfigTest {
             deviceSetup = InstallerDeviceSetupDocument(),
         ),
     )
+
+    private fun icon(index: Int): InstallerAppIconDocument {
+        val desktop = index == 0
+        val productId = when (index) {
+            0 -> "03desktop"
+            1 -> "03lyrics"
+            else -> "03notes"
+        }
+        val sha256 = if (desktop) {
+            "956002f63794d3e1e98b6ec9b4608aa8a526e033f6b830fd28c6d43a585aebb7"
+        } else {
+            "cc38255660f381d79957b1fd0b6b26e98e8f0f906af64bd2e2d2dd14200dc119"
+        }
+        return InstallerAppIconDocument(
+            assetId = "$productId-staging-logo-app-icon",
+            url = "https://download.9.9studio.fun/03-apps/logos/$productId/sha256-$sha256.png",
+            mimeType = "image/png",
+            width = 216,
+            height = 216,
+            sizeBytes = if (desktop) 44_699L else 43_778L,
+            sha256 = sha256,
+        )
+    }
 
     private fun signedEnvelope(keys: KeyPair, algorithm: String, payloadBytes: ByteArray): SignedInstallerConfigEnvelope {
         val signer = Signature.getInstance(algorithm).apply {

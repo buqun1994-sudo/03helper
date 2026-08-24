@@ -279,6 +279,51 @@ class InstallationSessionF2Test {
         assertEquals("catalog_desktop_unavailable", missingDesktop.currentSnapshot().failure?.reasonCode)
     }
 
+    @Test
+    fun `return to selection clears the failed attempt but retains optional choices`() {
+        val components = listOf(
+            ComponentDescriptor("desktop", "Desktop", required = true, status = ComponentStatus.AVAILABLE),
+            ComponentDescriptor("lyrics", "Lyrics", required = false, status = ComponentStatus.APK_SIGNATURE_MISMATCH),
+        )
+        val snapshot = InstallationSessionSnapshot(
+            state = InstallationSessionState.COMPLETED_WITH_ERRORS,
+            device = confirmedDevice,
+            components = components,
+            selectedOptionalComponentIds = setOf("lyrics"),
+            failedComponentIds = setOf("lyrics"),
+            failure = SessionFailure(FailureCategory.INSTALLATION, reasonCode = "install_failed"),
+            componentResults = listOf(ComponentResult("Lyrics", installed = false, configured = false, available = false, componentId = "lyrics")),
+            artifactManifests = listOf(manifest(), desktopManifest()),
+        )
+        val session = InstallationSession(snapshot)
+
+        session.dispatch(InstallationSessionCommand.ReturnToSelection)
+
+        val restored = session.currentSnapshot()
+        assertEquals(InstallationSessionState.CONNECTED, restored.state)
+        assertEquals(setOf("lyrics"), restored.selectedOptionalComponentIds)
+        assertTrue(restored.artifactManifests.isEmpty())
+        assertTrue(restored.componentResults.isEmpty())
+        assertEquals(null, restored.failure)
+        assertEquals(ComponentStatus.READING, restored.components.single { it.id == "lyrics" }.status)
+    }
+
+    @Test
+    fun `return to selection also works when catalog failure left no component rows`() {
+        val session = InstallationSession(
+            InstallationSessionSnapshot(
+                state = InstallationSessionState.FAILED,
+                device = confirmedDevice,
+                failure = SessionFailure(FailureCategory.VERIFICATION, reasonCode = "distribution_catalog_failed"),
+            ),
+        )
+
+        session.dispatch(InstallationSessionCommand.ReturnToSelection)
+
+        assertEquals(InstallationSessionState.CONNECTED, session.currentSnapshot().state)
+        assertEquals(null, session.currentSnapshot().failure)
+    }
+
     private fun connectedSession(): InstallationSession {
         val session = InstallationSession(componentCatalog = listOf(
             ComponentDescriptor(

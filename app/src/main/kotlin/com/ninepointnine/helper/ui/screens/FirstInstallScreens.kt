@@ -36,6 +36,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.testTag
@@ -396,7 +397,7 @@ private fun SelectionUnavailable(
 
 @Composable
 private fun ComponentChoiceRow(component: ComponentRow, onToggle: (Boolean) -> Unit) {
-    val mandatory = component.id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
+    val mandatory = component.required
     val selected = mandatory || component.selected
     val supported = component.compatibilityState != com.ninepointnine.helper.domain.session.ComponentCompatibility.UNSUPPORTED &&
         component.status in setOf(
@@ -425,48 +426,50 @@ private fun ComponentChoiceRow(component: ComponentRow, onToggle: (Boolean) -> U
                 size = 40.dp,
             )
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(
-                    text = component.displayName,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = InstallerColors.White,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        text = component.displayName,
+                        style = MaterialTheme.typography.bodyLarge,
+                        color = InstallerColors.White,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Row(
+                        modifier = Modifier.width(68.dp),
+                        horizontalArrangement = Arrangement.End,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        if (mandatory) {
+                            StatusIcon(
+                                name = "lock_keyhole",
+                                contentDescription = stringResource(R.string.required_label),
+                                tint = InstallerColors.AuxiliaryWhite,
+                                size = 16.dp,
+                            )
+                            Spacer(modifier = Modifier.width(4.dp))
+                        }
+                        Text(
+                            text = stringResource(if (mandatory) R.string.required_label else R.string.optional_label),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = InstallerColors.AuxiliaryWhite,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
                 Text(
                     text = listOfNotNull(component.versionLabel, component.sizeLabel)
                         .joinToString(" · ")
                         .ifBlank { stringResource(R.string.unknown_value) },
                     style = MaterialTheme.typography.bodySmall,
                     color = InstallerColors.AuxiliaryWhite,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
-            }
-            Column(
-                modifier = Modifier.width(72.dp),
-                horizontalAlignment = Alignment.End,
-                verticalArrangement = Arrangement.Center,
-            ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.End,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    if (mandatory) {
-                        StatusIcon(
-                            name = "lock_keyhole",
-                            contentDescription = stringResource(R.string.required_label),
-                            tint = InstallerColors.AuxiliaryWhite,
-                            size = 16.dp,
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                    }
-                    Text(
-                        text = stringResource(if (mandatory) R.string.required_label else R.string.optional_label),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = InstallerColors.AuxiliaryWhite,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
             }
             Box(
                 modifier = Modifier.size(48.dp),
@@ -536,6 +539,7 @@ private fun InstallingScreen(
             text = stringResource(R.string.install_keep_screen_on),
             style = MaterialTheme.typography.bodySmall,
             color = InstallerColors.AuxiliaryWhite,
+            textAlign = TextAlign.Center,
             modifier = Modifier.fillMaxWidth(),
         )
         Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
@@ -642,46 +646,79 @@ private fun ResultScreen(
         ResultKind.SUCCESS -> ResultCopy(R.string.result_success_title, R.string.result_success_description, "circle_check", InstallerColors.Success, R.string.result_enter_maintenance) { onIntent(InstallUiIntent.EnterMaintenance) }
         ResultKind.PARTIAL_FAILURE -> if (state.canEnterMaintenance) {
             ResultCopy(
-                R.string.result_partial_failure_title,
-                R.string.result_partial_failure_description,
+                R.string.result_failure_title,
+                null,
                 "triangle_alert",
                 InstallerColors.Warning,
                 R.string.result_enter_maintenance,
             ) { onIntent(InstallUiIntent.EnterMaintenance) }
         } else {
             ResultCopy(
-                R.string.result_partial_failure_title,
-                R.string.result_partial_failure_description,
+                R.string.result_failure_title,
+                null,
                 "triangle_alert",
                 InstallerColors.Warning,
                 R.string.result_retry,
-            ) { onIntent(InstallUiIntent.RetryInstallation) }
+            ) { onIntent(InstallUiIntent.ReturnToSelection) }
         }
         ResultKind.PAUSED -> ResultCopy(R.string.result_paused_title, R.string.result_paused_description, "circle_pause", InstallerColors.Warning, R.string.result_continue) { onIntent(InstallUiIntent.ContinueInstallation) }
-        ResultKind.DOWNLOAD_FAILED -> ResultCopy(R.string.result_download_failed_title, R.string.result_download_failed_description, "cloud_off", InstallerColors.Error, R.string.result_retry) { onIntent(InstallUiIntent.RetryInstallation) }
-        ResultKind.INSTALLATION_FAILED -> ResultCopy(R.string.result_install_failed_title, R.string.result_install_failed_description, "triangle_alert", InstallerColors.Error, R.string.result_continue) { onIntent(InstallUiIntent.ContinueInstallation) }
-        ResultKind.CONFIGURATION_FAILED -> ResultCopy(R.string.result_configuration_failed_title, R.string.result_configuration_failed_description, "settings_2", InstallerColors.Warning, R.string.result_reconfigure) { onIntent(InstallUiIntent.Reconfigure) }
+        ResultKind.DOWNLOAD_FAILED -> ResultCopy(R.string.result_failure_title, null, "cloud_off", InstallerColors.Error, R.string.result_retry) { onIntent(InstallUiIntent.ReturnToSelection) }
+        ResultKind.INSTALLATION_FAILED -> ResultCopy(R.string.result_failure_title, null, "triangle_alert", InstallerColors.Error, R.string.result_retry) { onIntent(InstallUiIntent.ReturnToSelection) }
+        ResultKind.CONFIGURATION_FAILED -> ResultCopy(R.string.result_failure_title, null, "settings_2", InstallerColors.Warning, R.string.result_retry) { onIntent(InstallUiIntent.ReturnToSelection) }
     }
     Column(
         modifier = modifier
             .fillMaxSize()
-            .padding(horizontal = InstallerDimensions.PageHorizontalPadding)
-            .verticalScroll(rememberScrollState()),
-        verticalArrangement = Arrangement.spacedBy(InstallerDimensions.ContentSpacing),
+            .padding(horizontal = InstallerDimensions.PageHorizontalPadding),
     ) {
         TaskTopBar(title = stringResource(R.string.task_install))
         Spacer(modifier = Modifier.height(InstallerDimensions.SectionVerticalSpacing))
-        StatusIcon(name = copy.icon, contentDescription = stringResource(copy.title), tint = copy.tint, modifier = Modifier.align(Alignment.CenterHorizontally))
-        Text(text = stringResource(copy.title), style = MaterialTheme.typography.headlineSmall, color = InstallerColors.White)
-        Text(text = stringResource(copy.description), style = MaterialTheme.typography.bodyLarge, color = InstallerColors.AuxiliaryWhite)
-        if (state.componentResults.isNotEmpty()) {
-            state.componentResults.forEachIndexed { index, result ->
-                AnimatedEntry(visible = true, index = index) {
-                    ResultRow(result.componentName, result.installed, result.configured, result.available, result.errorReason)
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            StatusIcon(
+                name = copy.icon,
+                contentDescription = stringResource(copy.title),
+                tint = copy.tint,
+            )
+            Text(
+                text = stringResource(copy.title),
+                style = MaterialTheme.typography.headlineSmall,
+                color = InstallerColors.White,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            copy.description?.let { description ->
+                Text(
+                    text = stringResource(description),
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = InstallerColors.AuxiliaryWhite,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+        }
+        // Keep the result heading visually separate from the first app card;
+        // the card list owns its own scrolling area and must not touch the
+        // status copy above it.
+        Spacer(modifier = Modifier.height(InstallerDimensions.SectionVerticalSpacing))
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .verticalScroll(rememberScrollState())
+                .padding(top = 8.dp, bottom = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(InstallerDimensions.ContentSpacing),
+        ) {
+            if (state.componentResults.isNotEmpty()) {
+                state.componentResults.forEachIndexed { index, result ->
+                    AnimatedEntry(visible = true, index = index) {
+                        ResultRow(result.componentName, result.installed, result.configured, result.available, result.errorReason)
+                    }
                 }
             }
         }
-        Spacer(modifier = Modifier.height(InstallerDimensions.SectionVerticalSpacing))
         PrimaryActionButton(text = stringResource(copy.actionText), onClick = copy.action, modifier = Modifier.fillMaxWidth())
         Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
     }
@@ -689,7 +726,7 @@ private fun ResultScreen(
 
 private data class ResultCopy(
     val title: Int,
-    val description: Int,
+    val description: Int?,
     val icon: String,
     val tint: Color,
     val actionText: Int,
@@ -708,17 +745,18 @@ private fun ResultRow(
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(text = componentName, style = MaterialTheme.typography.bodyLarge, color = InstallerColors.White)
-                Text(
-                    text = listOf(
-                        stringResource(if (installed) R.string.result_status_installed else R.string.result_status_not_installed),
-                        stringResource(if (configured) R.string.result_status_configured else R.string.result_status_not_configured),
-                        stringResource(if (available) R.string.result_status_available else R.string.result_status_not_available),
-                    ).joinToString(" · "),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = InstallerColors.AuxiliaryWhite,
-                )
-                errorReason?.let { reason ->
-                    Text(text = reason, style = MaterialTheme.typography.bodySmall, color = InstallerColors.Warning)
+                if (errorReason != null) {
+                    Text(text = errorReason, style = MaterialTheme.typography.bodySmall, color = InstallerColors.Warning)
+                } else {
+                    Text(
+                        text = listOf(
+                            stringResource(if (installed) R.string.result_status_installed else R.string.result_status_not_installed),
+                            stringResource(if (configured) R.string.result_status_configured else R.string.result_status_not_configured),
+                            stringResource(if (available) R.string.result_status_available else R.string.result_status_not_available),
+                        ).joinToString(" · "),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = InstallerColors.AuxiliaryWhite,
+                    )
                 }
             }
             StatusIcon(

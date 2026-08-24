@@ -38,6 +38,18 @@ data class ArtifactSource(
     val url: String,
 )
 
+/** Signed metadata for an installation-preview icon. It contains no package identity. */
+data class AppIconAsset(
+    val assetId: String,
+    val assetVersion: Int = 1,
+    val url: String,
+    val mimeType: String,
+    val width: Int,
+    val height: Int,
+    val sizeBytes: Long,
+    val sha256: String,
+)
+
 /** A source choice recorded by the session without retaining transient URLs. */
 data class SourceSelectionEvidence(
     val componentId: String,
@@ -128,6 +140,7 @@ data class ArtifactFailure(
 
 fun ArtifactManifest.toComponentDescriptor(
     androidSdk: Int? = null,
+    iconAsset: AppIconAsset? = null,
 ): com.ninepointnine.helper.domain.session.ComponentDescriptor =
     com.ninepointnine.helper.domain.session.ComponentDescriptor(
         id = componentId,
@@ -153,6 +166,7 @@ fun ArtifactManifest.toComponentDescriptor(
             else -> com.ninepointnine.helper.domain.session.ComponentCompatibility.SUPPORTED
         },
         iconKey = componentId,
+        iconAsset = iconAsset,
         status = com.ninepointnine.helper.domain.session.ComponentStatus.AVAILABLE,
     )
 
@@ -162,7 +176,7 @@ fun formatArtifactVersionLabel(versionName: String): String? {
         .removePrefix("V")
         .removePrefix("v")
         .trim()
-    return normalized.takeIf { it.isNotEmpty() }?.let { "V$it" }
+    return normalized.takeIf { it.isNotEmpty() }?.let { "v$it" }
 }
 
 /** Formats APK bytes compactly, using one decimal place and no padding space. */

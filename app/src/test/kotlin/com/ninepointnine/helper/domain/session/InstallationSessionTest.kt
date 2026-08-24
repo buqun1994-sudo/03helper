@@ -462,6 +462,69 @@ class InstallationSessionTest {
     }
 
     @Test
+    fun `failed optional component history does not invalidate the remaining success proof`() {
+        val desktop = evidenceManifest("desktop", AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME, required = true)
+        val lyrics = evidenceManifest("lyrics", AuthorizationPlanFactory.LYRICS_PACKAGE_NAME, required = false)
+        val manifests = listOf(desktop, lyrics)
+        val selected = manifests.map { it.componentId }.toSet()
+        val plan = (AuthorizationPlanFactory.createForManifests(manifests) as AuthorizationPlanBuildResult.Ready).plan
+        val installation = manifests.associate { manifest ->
+            manifest.componentId to InstalledArtifactEvidence(
+                componentId = manifest.componentId,
+                packageName = manifest.packageName,
+                version = manifest.apkVersion,
+                apkSizeBytes = manifest.apkSizeBytes,
+                apkSha256 = manifest.apkSha256,
+                certificateSha256 = manifest.certificateSha256,
+            )
+        }
+        val desktopAvailability = DeviceAvailabilityEvidence(
+            componentId = desktop.componentId,
+            packageName = desktop.packageName,
+            version = desktop.apkVersion,
+            installedArchiveVerified = true,
+            launchAttempted = true,
+            launcherResolved = true,
+            processRunning = true,
+            requiredServiceBound = true,
+        )
+        val session = InstallationSession(
+            initialSnapshot = InstallationSessionSnapshot(
+                state = InstallationSessionState.VERIFYING_DEVICE,
+                device = confirmedDevice,
+                components = manifests.map { it.toComponentDescriptor() },
+                selectedOptionalComponentIds = setOf("lyrics"),
+                failedComponentIds = setOf("lyrics"),
+                artifactManifests = manifests,
+                evidence = SessionEvidence(
+                    artifactsVerified = selected,
+                    installed = selected,
+                    configured = setOf("desktop"),
+                    available = setOf("desktop"),
+                    installation = installation,
+                    authorizationActions = validAuthorizationEvidence(plan)
+                        .filter { it.componentId == "desktop" },
+                    availability = mapOf("desktop" to desktopAvailability),
+                ),
+            ),
+        )
+
+        session.dispatchEvent(
+            InstallationSessionEvent.DeviceVerified(
+                checks = listOf(ComponentCheck("desktop", passed = true)),
+                evidence = listOf(desktopAvailability),
+            ),
+        )
+
+        val snapshot = session.currentSnapshot()
+        assertEquals(InstallationSessionState.COMPLETED_WITH_ERRORS, snapshot.state)
+        assertEquals(setOf("lyrics"), snapshot.failedComponentIds)
+        assertTrue(snapshot.componentResults.first { it.componentId == "desktop" }.available)
+        assertTrue(snapshot.componentResults.first { it.componentId == "lyrics" }.installed)
+        assertFalse(snapshot.componentResults.first { it.componentId == "lyrics" }.configured)
+    }
+
+    @Test
     fun `duplicate and older sequence events cannot overwrite a newer snapshot`() {
         val session = connectedSession(includeOptional = false)
         session.dispatch(InstallationSessionCommand.StartInstallation)

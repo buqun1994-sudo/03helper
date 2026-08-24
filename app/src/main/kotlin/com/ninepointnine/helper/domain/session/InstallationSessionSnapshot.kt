@@ -4,6 +4,7 @@ import com.ninepointnine.helper.domain.artifact.ArchiveDownloadEvidence
 import com.ninepointnine.helper.domain.artifact.ArchiveVerificationEvidence
 import com.ninepointnine.helper.domain.artifact.ApkExtractionEvidence
 import com.ninepointnine.helper.domain.artifact.ArtifactManifest
+import com.ninepointnine.helper.domain.artifact.AppIconAsset
 import com.ninepointnine.helper.domain.artifact.ArtifactSourceKind
 import com.ninepointnine.helper.domain.artifact.ArtifactVerification
 import com.ninepointnine.helper.domain.artifact.SourceFailureRecord
@@ -70,6 +71,8 @@ data class ComponentDescriptor(
     val compatibilityState: ComponentCompatibility = ComponentCompatibility.SUPPORTED,
     /** Stable local asset key; remote data cannot select an arbitrary drawable. */
     val iconKey: String = id,
+    /** Optional signed remote preview asset; APK-derived icons remain higher priority. */
+    val iconAsset: AppIconAsset? = null,
     val description: String = "",
     val status: ComponentStatus = ComponentStatus.READING,
     val errorReason: String? = null,
@@ -132,6 +135,10 @@ data class ComponentResult(
     val configured: Boolean,
     val available: Boolean,
     val componentId: String? = null,
+    /** The first-class reason for this component's failed attempt, if any. */
+    val failureReason: String? = null,
+    val failurePhase: InstallPhase? = null,
+    val retryable: Boolean = false,
 )
 
 /** Structured proof collected by the session before it can report success. */

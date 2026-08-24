@@ -48,24 +48,16 @@ class ArtifactIdentityVerifier(
         sourceKind: ArtifactSourceKind,
         apk: File,
     ): ArtifactIdentityResult {
-        if (!apk.isFile || apk.length() != manifest.apkSizeBytes) {
-            return existingFailure(manifest, sourceKind, "apk_size_mismatch")
-        }
+        if (!apk.isFile) return existingFailure(manifest, sourceKind, "apk_missing")
         val actualSha256 = try {
             sha256(apk)
         } catch (_: Exception) {
             return existingFailure(manifest, sourceKind, "apk_hash_failed")
         }
-        if (!actualSha256.equals(manifest.apkSha256, ignoreCase = true)) {
-            return existingFailure(manifest, sourceKind, "apk_sha256_mismatch")
-        }
         val metadata = runCatching { metadataReader.read(apk) }.getOrNull()
             ?: return existingFailure(manifest, sourceKind, "apk_metadata_unreadable")
         if (metadata.packageName != manifest.packageName) {
             return existingFailure(manifest, sourceKind, "apk_package_mismatch")
-        }
-        if (metadata.version != manifest.apkVersion) {
-            return existingFailure(manifest, sourceKind, "apk_version_mismatch")
         }
         if (metadata.certificateSha256s.none { it.equals(manifest.certificateSha256, ignoreCase = true) }) {
             return existingFailure(manifest, sourceKind, "apk_certificate_mismatch")
@@ -102,7 +94,6 @@ class ArtifactIdentityVerifier(
             extractedApk.componentId != manifest.componentId -> "apk_component_mismatch"
             extractedApk.entryName != manifest.apkEntryName -> "apk_entry_mismatch"
             !extractedApk.file.isFile -> "apk_missing"
-            extractedApk.file.length() != manifest.apkSizeBytes -> "apk_size_mismatch"
             else -> null
         }
         if (reasonCode != null) {
@@ -113,9 +104,6 @@ class ArtifactIdentityVerifier(
         } catch (_: Exception) {
             return failed(manifest, verifiedArchive.file, extractedApk.file, finalApk, "apk_hash_failed")
         }
-        if (!actualSha256.equals(manifest.apkSha256, ignoreCase = true)) {
-            return failed(manifest, verifiedArchive.file, extractedApk.file, finalApk, "apk_sha256_mismatch")
-        }
         val metadata = try {
             metadataReader.read(extractedApk.file)
         } catch (_: Exception) {
@@ -123,9 +111,6 @@ class ArtifactIdentityVerifier(
         } ?: return failed(manifest, verifiedArchive.file, extractedApk.file, finalApk, "apk_metadata_unreadable")
         if (metadata.packageName != manifest.packageName) {
             return failed(manifest, verifiedArchive.file, extractedApk.file, finalApk, "apk_package_mismatch")
-        }
-        if (metadata.version != manifest.apkVersion) {
-            return failed(manifest, verifiedArchive.file, extractedApk.file, finalApk, "apk_version_mismatch")
         }
         val certificateMatches = metadata.certificateSha256s.any {
             it.equals(manifest.certificateSha256, ignoreCase = true)

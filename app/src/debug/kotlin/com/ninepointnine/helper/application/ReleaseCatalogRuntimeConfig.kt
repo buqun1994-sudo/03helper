@@ -8,11 +8,13 @@ import com.ninepointnine.helper.data.catalog.UnavailableReleaseCatalogTransport
 import com.ninepointnine.helper.data.catalog.UrlConnectionReleaseCatalogTransport
 import com.ninepointnine.helper.domain.artifact.ReleaseSourceMode
 import com.ninepointnine.helper.domain.artifact.ReleaseSourcePolicy
+import com.ninepointnine.helper.domain.artifact.ArtifactReleaseTrack
 import java.net.URL
 import java.util.Base64
 
 /** Debug composition for the signed Cloud schema-v3 configuration. */
 internal object ReleaseCatalogRuntimeConfig {
+    val artifactReleaseTrack: ArtifactReleaseTrack = ArtifactReleaseTrack.STAGING
     val sourcePolicy: ReleaseSourcePolicy = ReleaseSourcePolicy(
         mode = ReleaseSourceMode.FOLDER_CONFIG,
     )

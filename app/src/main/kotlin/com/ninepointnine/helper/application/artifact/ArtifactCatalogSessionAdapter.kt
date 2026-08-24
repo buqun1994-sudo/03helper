@@ -2,6 +2,7 @@ package com.ninepointnine.helper.application.artifact
 
 import com.ninepointnine.helper.data.catalog.CatalogLoadResult
 import com.ninepointnine.helper.data.catalog.CatalogPreparationProgress
+import com.ninepointnine.helper.data.catalog.CloudInstallerDistributionConfigAdapter
 import com.ninepointnine.helper.data.catalog.TrustedArtifactCatalog
 import com.ninepointnine.helper.domain.artifact.toComponentDescriptor
 import com.ninepointnine.helper.domain.session.ComponentCompatibility
@@ -105,7 +106,7 @@ internal fun TrustedArtifactCatalog.toComponentDescriptors(androidSdk: Int? = nu
         val failure = failuresById[app.componentId]
         val base = manifest?.toComponentDescriptor(androidSdk)
         val status = when {
-            app.minClientSchemaVersion > 3 -> ComponentStatus.CLIENT_CAPABILITY_INSUFFICIENT
+            app.minClientSchemaVersion > CloudInstallerDistributionConfigAdapter.SUPPORTED_SCHEMA_VERSION -> ComponentStatus.CLIENT_CAPABILITY_INSUFFICIENT
             failure?.reasonCode?.contains("missing") == true -> ComponentStatus.DIRECTORY_MISSING
             failure?.reasonCode?.contains("certificate") == true -> ComponentStatus.APK_SIGNATURE_MISMATCH
             failure != null -> ComponentStatus.ZIP_VALIDATION_FAILED
@@ -126,6 +127,7 @@ internal fun TrustedArtifactCatalog.toComponentDescriptors(androidSdk: Int? = nu
             compatibilityLabel = base?.compatibilityLabel,
             compatibilityState = base?.compatibilityState ?: ComponentCompatibility.UNKNOWN,
             iconKey = app.componentId,
+            iconAsset = app.iconAsset,
             status = status,
             errorReason = failure?.reasonCode,
         )

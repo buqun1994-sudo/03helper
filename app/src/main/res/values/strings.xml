@@ -41,6 +41,7 @@
     <string name="install_keep_screen_on">安装过程中请勿退出应用，保持亮屏并等待完成，以防造成车机不稳定</string>
     <string name="result_success_title">安装完成</string>
     <string name="result_success_description">安装和授权已完成，请在车机开始使用。</string>
+    <string name="result_failure_title">安装失败</string>
     <string name="result_partial_failure_title">部分应用未完成</string>
     <string name="result_partial_failure_description">失败的应用已记录原因，其余应用已继续处理。请查看下方结果。</string>
     <string name="result_paused_title">等待连接恢复</string>
@@ -108,9 +109,11 @@
     <string name="maintenance_update_apps_section">车机应用</string>
     <string name="maintenance_update_car_disconnected">车机未连接，仅显示助手自身版本</string>
     <string name="maintenance_update_unavailable">暂无可用版本信息</string>
+    <string name="maintenance_update_checking">正在检查更新，请稍候</string>
+    <string name="maintenance_update_node_checking">正在检查%1$s</string>
     <string name="maintenance_update_all">全部更新</string>
     <string name="maintenance_update_current">当前已是最新版本</string>
-    <string name="maintenance_available_version">最新 V%1$s</string>
+    <string name="maintenance_available_version">最新 v%1$s</string>
     <string name="maintenance_installed_version">当前 %1$s</string>
     <string name="maintenance_version_unknown">版本信息暂不可用</string>
     <string name="maintenance_authorization_disconnected">请先连接车机，再检查应用授权</string>
@@ -130,6 +133,7 @@
     <string name="maintenance_uninstall_done">卸载完成</string>
     <string name="maintenance_cancel">取消</string>
     <string name="maintenance_install_start">开始下载并安装</string>
+    <string name="maintenance_install_done">知道了</string>
     <string name="maintenance_detail_name">应用名</string>
     <string name="maintenance_detail_package">包名</string>
     <string name="maintenance_detail_version">版本号</string>

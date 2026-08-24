@@ -3,6 +3,7 @@ package com.ninepointnine.helper.data.catalog
 import com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
 import com.ninepointnine.helper.domain.artifact.InstallerPublisherTrustRegistry
 import com.ninepointnine.helper.domain.artifact.ReleaseSourcePolicy
+import com.ninepointnine.helper.domain.artifact.AppIconAsset
 import com.ninepointnine.helper.domain.artifact.formatArtifactSizeLabel
 import com.ninepointnine.helper.domain.artifact.formatArtifactVersionLabel
 import com.ninepointnine.helper.domain.device.AuthorizationSetupDeclaration
@@ -28,7 +29,7 @@ import kotlinx.serialization.json.Json
 @Serializable
 data class SignedInstallerConfigEnvelope(
     val schemaVersion: Int,
-    /** Kept as an envelope alias for older release tooling; v3 uses payload.catalogVersion. */
+    /** Kept as an envelope alias for older release tooling; v3/v4 use payload.catalogVersion. */
     val configVersion: String = "",
     val keyId: String,
     val signatureAlgorithm: String,
@@ -45,10 +46,10 @@ data class SignedInstallerConfigEnvelope(
 }
 
 /**
- * The v3 payload is a complete signed snapshot.  The legacy fields remain
+ * The v4 payload is a complete signed snapshot.  The legacy fields remain
  * deserializable only so source-compatible test/build tooling can be migrated;
  * [CloudInstallerDistributionConfigAdapter] rejects schema v2 and only reads
- * the dynamic [apps] list.
+ * the dynamic [apps] list. v3 remains readable only for snapshots without [InstallerAppSourceDocument.icon].
  */
 @Serializable
 data class InstallerDistributionConfigPayload(
@@ -92,7 +93,32 @@ data class InstallerAppSourceDocument(
     val minClientSchemaVersion: Int = 3,
     val trustProfileId: String = "",
     val deviceSetup: InstallerDeviceSetupDocument? = null,
+    /** v4 installation-preview asset; never used as APK identity. */
+    val icon: InstallerAppIconDocument? = null,
 )
+
+@Serializable
+data class InstallerAppIconDocument(
+    val assetId: String,
+    val assetVersion: Int = 1,
+    val url: String,
+    val mimeType: String,
+    val width: Int,
+    val height: Int,
+    val sizeBytes: Long,
+    val sha256: String,
+) {
+    fun toDomain(): AppIconAsset = AppIconAsset(
+        assetId = assetId,
+        assetVersion = assetVersion,
+        url = url,
+        mimeType = mimeType,
+        width = width,
+        height = height,
+        sizeBytes = sizeBytes,
+        sha256 = sha256,
+    )
+}
 
 /** Declarative, bounded device setup. It contains no shell text and no package identity. */
 @Serializable
@@ -185,6 +211,7 @@ data class InstallerComponentSource(
     val versionCode: Long = 0L,
     val versionName: String = "",
     val apkSizeBytes: Long = 0L,
+    val iconAsset: AppIconAsset? = null,
 ) {
     val appId: String get() = componentId
 
@@ -325,7 +352,7 @@ class FileCatalogRevisionStore(private val file: File) : CatalogRevisionStore {
     }
 }
 
-/** Reads and validates the signed v3 control plane. */
+/** Reads and validates the signed v4 control plane, with v3 history compatibility. */
 class CloudInstallerDistributionConfigAdapter(
     private val transport: ReleaseCatalogTransport,
     private val signatureVerifier: CatalogSignatureVerifier,
@@ -376,7 +403,7 @@ class CloudInstallerDistributionConfigAdapter(
         } catch (_: Exception) {
             return DistributionConfigLoadResult.Failure("distribution_config_envelope_invalid", retryable = false)
         }
-        if (envelope.schemaVersion != SUPPORTED_SCHEMA_VERSION) {
+        if (envelope.schemaVersion !in SUPPORTED_SCHEMA_VERSIONS) {
             return DistributionConfigLoadResult.Failure("distribution_config_schema_unsupported", retryable = false)
         }
         if (envelope.keyId.isBlank() || envelope.signatureAlgorithm !in SUPPORTED_SIGNATURE_ALGORITHMS) {
@@ -407,7 +434,7 @@ class CloudInstallerDistributionConfigAdapter(
         } catch (_: Exception) {
             return DistributionConfigLoadResult.Failure("distribution_config_payload_invalid", retryable = false)
         }
-        if (document.schemaVersion != SUPPORTED_SCHEMA_VERSION) {
+        if (document.schemaVersion !in SUPPORTED_SCHEMA_VERSIONS) {
             return DistributionConfigLoadResult.Failure("distribution_config_payload_schema_unsupported", retryable = false)
         }
         if (document.channel != expectedChannel || !CHANNEL_PATTERN.matches(document.channel)) {
@@ -457,7 +484,7 @@ class CloudInstallerDistributionConfigAdapter(
         ) {
             return DistributionConfigLoadResult.Failure("distribution_config_folder_invalid", retryable = false)
         }
-        val apps = when (val result = validateApps(document.apps)) {
+        val apps = when (val result = validateApps(document.apps, document.schemaVersion)) {
             is AppsValidation.Failure -> return DistributionConfigLoadResult.Failure(result.reasonCode, retryable = false)
             is AppsValidation.Success -> result.apps
         }
@@ -501,7 +528,10 @@ class CloudInstallerDistributionConfigAdapter(
         )
     }
 
-    private fun validateApps(documents: List<InstallerAppSourceDocument>): AppsValidation {
+    private fun validateApps(
+        documents: List<InstallerAppSourceDocument>,
+        schemaVersion: Int,
+    ): AppsValidation {
         if (documents.isEmpty()) return AppsValidation.Failure("distribution_config_apps_empty")
         val ids = documents.map { it.appId }
         if (ids.size != ids.toSet().size) return AppsValidation.Failure("distribution_config_app_duplicate")
@@ -552,16 +582,22 @@ class CloudInstallerDistributionConfigAdapter(
             val setup = rawSetup.toDomainOrNull()
                 ?: return AppsValidation.Failure("distribution_config_device_setup_invalid")
             val trustedComponent = InstallerComponentTrustRegistry.get(document.appId)
-            if (trustedComponent != null && !AuthorizationPlanFactory.validateComponent(
-                    ManagedComponent(
-                        componentId = document.appId,
-                        packageName = trustedComponent.packageName,
-                        setup = setup,
-                        order = document.sortOrder,
-                    ),
-                )
-            ) {
-                return AppsValidation.Failure("distribution_config_device_setup_invalid")
+            if (trustedComponent != null) {
+                val packageCandidates = InstallerComponentTrustRegistry.allowedPackageNames(document.appId)
+                    .ifEmpty { setOf(trustedComponent.packageName) }
+                if (packageCandidates.none { packageName ->
+                        AuthorizationPlanFactory.validateComponent(
+                            ManagedComponent(
+                                componentId = document.appId,
+                                packageName = packageName,
+                                setup = setup,
+                                order = document.sortOrder,
+                            ),
+                        )
+                    }
+                ) {
+                    return AppsValidation.Failure("distribution_config_device_setup_invalid")
+                }
             }
             if (rawSetup.appOps.size != rawSetup.appOps.toSet().size ||
                     rawSetup.runtimePermissions.size != rawSetup.runtimePermissions.toSet().size ||
@@ -576,6 +612,15 @@ class CloudInstallerDistributionConfigAdapter(
             }
             if (setup?.launchComponent?.let { !isSafeComponentName(it) } == true || setup?.requiredServices?.any { !isSafeComponentName(it) } == true) {
                 return AppsValidation.Failure("distribution_config_device_setup_component_invalid")
+            }
+            val iconAsset = when {
+                schemaVersion >= ICON_SCHEMA_VERSION -> when (val result = validateIcon(document.icon, document.enabled, document.appId)) {
+                    is IconValidation.Failure -> return AppsValidation.Failure(result.reasonCode)
+                    is IconValidation.Success -> result.value
+                }
+
+                document.icon != null -> return AppsValidation.Failure("distribution_config_legacy_icon_not_supported")
+                else -> null
             }
             InstallerComponentSource(
                 componentId = document.appId,
@@ -592,6 +637,7 @@ class CloudInstallerDistributionConfigAdapter(
                 versionCode = document.versionCode,
                 versionName = document.versionName,
                 apkSizeBytes = document.apkSizeBytes,
+                iconAsset = iconAsset,
             )
         }.sortedWith(compareBy<InstallerComponentSource> { it.sortOrder }.thenBy { it.componentId })
         return AppsValidation.Success(apps)
@@ -602,6 +648,36 @@ class CloudInstallerDistributionConfigAdapter(
     private fun isValidVersionName(value: String): Boolean =
         value.toByteArray(Charsets.UTF_8).size <= MAX_VERSION_LABEL_BYTES &&
             VERSION_NAME_PATTERN.matches(value)
+
+    private fun validateIcon(document: InstallerAppIconDocument?, enabled: Boolean, appId: String): IconValidation {
+        if (document == null) {
+            return if (enabled) IconValidation.Failure("distribution_config_icon_missing") else IconValidation.Success(null)
+        }
+        if (!ICON_ASSET_ID_PATTERN.matches(document.assetId) || document.assetVersion <= 0 ||
+            document.mimeType !in ICON_MIME_TYPES || document.width !in 1..MAX_ICON_EDGE ||
+            document.height !in 1..MAX_ICON_EDGE || document.width != document.height ||
+            document.sizeBytes !in 1..MAX_ICON_BYTES || !ICON_SHA256_PATTERN.matches(document.sha256)
+        ) {
+            return IconValidation.Failure("distribution_config_icon_invalid")
+        }
+        val urlMatch = ICON_URL_PATTERN.matchEntire(document.url)
+            ?: return IconValidation.Failure("distribution_config_icon_url_invalid")
+        if (urlMatch.groupValues[2] != document.sha256) {
+            return IconValidation.Failure("distribution_config_icon_digest_mismatch")
+        }
+        val productId = urlMatch.groupValues[1]
+        val expectedProductId = ICON_PRODUCT_ID_BY_APP_ID[appId]
+        if ((expectedProductId != null && productId != expectedProductId) ||
+            (document.assetId != productId && !document.assetId.startsWith("$productId-"))
+        ) {
+            return IconValidation.Failure("distribution_config_icon_product_mismatch")
+        }
+        val expectedExtension = if (document.mimeType == "image/png") "png" else "webp"
+        if (urlMatch.groupValues[3] != expectedExtension) {
+            return IconValidation.Failure("distribution_config_icon_mime_mismatch")
+        }
+        return IconValidation.Success(document.toDomain())
+    }
 
     private fun isSafeArchiveName(value: String): Boolean = value.isNotBlank() &&
         value.endsWith(".zip", ignoreCase = true) &&
@@ -620,8 +696,11 @@ class CloudInstallerDistributionConfigAdapter(
                 it == '(' || it == ')' || it == '{' || it == '}' || it == '[' || it == ']'
         }
 
-    private companion object {
-        const val SUPPORTED_SCHEMA_VERSION = 3
+    companion object {
+        const val SUPPORTED_SCHEMA_VERSION = 4
+        const val LEGACY_SCHEMA_VERSION = 3
+        const val ICON_SCHEMA_VERSION = 4
+        val SUPPORTED_SCHEMA_VERSIONS = setOf(LEGACY_SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSION)
         const val MAX_CONFIG_BYTES = 768 * 1024
         const val MAX_PAYLOAD_BYTES = 512 * 1024
         const val MAX_PASSWORD_BYTES = 512
@@ -634,6 +713,8 @@ class CloudInstallerDistributionConfigAdapter(
         const val MAX_CATALOG_VERSION_BYTES = 128
         const val MAX_COMPONENT_NAME_CHARS = 256
         const val MAX_CLOCK_SKEW_SECONDS = 300L
+        const val MAX_ICON_BYTES = 256 * 1024L
+        const val MAX_ICON_EDGE = 512
         val VERSION_NAME_PATTERN = Regex("^[A-Za-z0-9][A-Za-z0-9._+\\-]{0,63}$")
         val SUPPORTED_SIGNATURE_ALGORITHMS = setOf("SHA256withECDSA", "Ed25519")
         val APP_ID_PATTERN = Regex("^[a-z0-9][a-z0-9._-]{0,63}$")
@@ -643,11 +724,26 @@ class CloudInstallerDistributionConfigAdapter(
         val TRUST_PROFILE_PATTERN = Regex("^[a-z0-9][a-z0-9._-]{0,63}$")
         val PROFILE_ID_PATTERN = Regex("^[a-z0-9][a-z0-9._-]{0,63}$")
         val ACTION_ID_PATTERN = Regex("^[a-z0-9][a-z0-9._-]{0,63}$")
+        val ICON_ASSET_ID_PATTERN = Regex("^[a-z0-9][a-z0-9._-]{0,127}$")
+        val ICON_SHA256_PATTERN = Regex("^[a-f0-9]{64}$")
+        val ICON_URL_PATTERN = Regex("^https://download\\.9\\.9studio\\.fun/03-apps/logos/(03[a-z]+)/sha256-([a-f0-9]{64})\\.(png|webp)$")
+        val ICON_MIME_TYPES = setOf("image/png", "image/webp")
+        val ICON_PRODUCT_ID_BY_APP_ID = mapOf(
+            "desktop" to "03desktop",
+            "lyrics" to "03lyrics",
+            "cast" to "03cast",
+            "file-manager" to "03filemanager",
+        )
     }
 
     private sealed interface AppsValidation {
         data class Success(val apps: List<InstallerComponentSource>) : AppsValidation
         data class Failure(val reasonCode: String) : AppsValidation
+    }
+
+    private sealed interface IconValidation {
+        data class Success(val value: AppIconAsset?) : IconValidation
+        data class Failure(val reasonCode: String) : IconValidation
     }
 }
 

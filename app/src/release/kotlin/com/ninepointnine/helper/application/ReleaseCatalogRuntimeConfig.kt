@@ -8,10 +8,12 @@ import com.ninepointnine.helper.data.catalog.UnavailableReleaseCatalogTransport
 import com.ninepointnine.helper.data.catalog.UrlConnectionReleaseCatalogTransport
 import com.ninepointnine.helper.domain.artifact.ReleaseSourcePolicy
 import com.ninepointnine.helper.domain.artifact.ReleaseSourceMode
+import com.ninepointnine.helper.domain.artifact.ArtifactReleaseTrack
 import java.net.URL
 
 /** Release composition keeps production trust data unavailable until Cloud supplies v3 trust data. */
 internal object ReleaseCatalogRuntimeConfig {
+    val artifactReleaseTrack: ArtifactReleaseTrack = ArtifactReleaseTrack.RELEASE
     val sourcePolicy: ReleaseSourcePolicy = ReleaseSourcePolicy(mode = ReleaseSourceMode.FOLDER_CONFIG)
 
     @Suppress("UNUSED_PARAMETER")

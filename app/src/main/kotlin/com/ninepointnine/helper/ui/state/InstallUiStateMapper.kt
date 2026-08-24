@@ -272,9 +272,11 @@ object InstallUiStateMapper {
                 installed = it.installed,
                 configured = it.configured,
                 available = it.available,
-                errorReason = snapshot.components.firstOrNull { component ->
-                    component.id == it.componentId
-                }?.errorReason?.toUserMessage(),
+                errorReason = (
+                    it.failureReason
+                        ?: snapshot.components.firstOrNull { component -> component.id == it.componentId }?.errorReason
+                        ?: snapshot.failure?.reasonCode.takeIf { reason -> it.componentId == null }
+                    )?.toUserMessage(),
             )
         },
         canContinue = kind != ResultKind.SUCCESS,

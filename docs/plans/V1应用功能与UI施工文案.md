@@ -2,7 +2,7 @@
 
 ## 1. 文档状态
 
-> 现行版本字段口径：选择行显示 Cloud 提供的 `versionName`（规范化为 `V1.2.3`）与 `apkSizeBytes`（规范化为 `2.6M`）；`catalogVersion` 不得出现在应用行。
+> 现行版本字段口径：选择行显示 Cloud 提供的 `versionName`（规范化为 `v1.2.3`）与 `apkSizeBytes`（规范化为 `2.6M`）；`catalogVersion` 不得出现在应用行。APK 安装准入只检查包名与发布者证书，大小与摘要作为传输证据保留。
 
 1. 本文是 Android V1 的产品、界面和施工基线；F0 Android 工程、视觉令牌、状态投影和确定性 Debug 场景、F1 唯一安装会话与页面接线、F2 本地下载 / 校验链、F3 LAN ADB 持久在线连接接线已经完成，但 Cloud Android profile、正式签名、车机安装授权和真实网络主测仍未完成。
 2. 当前真实锚点为单 `app` 模块、`applicationId/namespace=com.ninepointnine.helper`、`app/src/main/kotlin/com/ninepointnine/helper/` 源码根与 `Theme.ThreeHelper`；完整 owner 与文件边界以 `docs/architecture/项目长期总纲.md` 第 2 节为准，不得从本文另建包名、状态机或动效参数。
@@ -117,13 +117,13 @@
 |---|---|---|---|
 | 全部成功 | `安装完成` | `安装和授权已完成，请在车机开始使用。` | `完成！` |
 | 可恢复中断 | `等待连接恢复` | `连接恢复后，将从已完成步骤继续。` | `继续安装` |
-| 部分失败 | `部分应用未完成` | `失败的应用已记录原因，其余应用已继续处理。请查看下方结果。` | 车机可用时 `完成！`，否则 `重新尝试` |
-| 下载失败 | `安装包暂时无法获取` | `请检查网络后重新尝试。` | `重新尝试` |
-| 安装失败 | `安装未完成` | `已保留可继续的进度。` | `继续安装` |
-| 自动授权失败 | `自动授权未完成` | `助手未能完成自动授权，请保持手机与车机连接后重试。` | `重新授权` |
+| 部分失败 | `安装失败` | — | 车机可用时 `完成！`，否则 `重新尝试`并返回选择应用 |
+| 下载失败 | `安装失败` | — | `重新尝试`并返回选择应用 |
+| 安装失败 | `安装失败` | — | `重新尝试`并返回选择应用 |
+| 自动授权失败 | `安装失败` | — | `重新尝试`并返回选择应用 |
 
 1. 成功页或部分失败页列出每个组件的“已安装 / 已完成授权 / 可用”结果和可理解的失败原因，不展示原始命令输出。
-2. 失败页只展示当前失败阶段、受影响组件和下一步；技术详情只能从维护态的脱敏诊断入口查看。
+2. 失败页标题统一为 `安装失败` 并横向居中，不显示简介；结果列表可滚动，主按钮固定在页面底部。`重新尝试`返回选择应用页并保留此前勾选的可选应用；技术详情只能从维护态的脱敏诊断入口查看。
 
 ## 6. 维护态信息架构
 
@@ -190,7 +190,7 @@
 
 1. 先冻结 `ArtifactManifest`、`ResolvedDownloadRequest`、来源切换结果和结构化错误的最小 schema；清单只能声明签名发布物、哈希、包身份、版本和兼容范围，不能携带任意 shell、动态权限或运行时任意 URL。
 2. 按长期总纲的 owner 建立 `ReleaseSourcePolicy`、`CloudInstallerDistributionConfigAdapter`、`FolderArtifactCatalogAdapter`、`LanzouFolderSourceAdapter`、`LanzouWebSourceAdapter`、`ArtifactDownloader`、`ArchiveIdentityVerifier`、`ArtifactArchiveExtractor` 和 `ArtifactIdentityVerifier`；它们通过端口把结构化结果送入 `InstallationSession`，不直接操作 Compose 状态。
-3. 当前来源固定为“签名配置（含 `versionCode` / `versionName` / `apkSizeBytes`）-> 公共 `Download` 优先 -> 蓝奏密码根文件夹中的声明 ZIP 按需获取”；选择页版本 / 体积只显示 Cloud 字段，公共 APK 或 ZIP 内 APK 只负责安装前身份复核。R2 / GitHub 不参与当前版本判断，密码文件夹、合并 ZIP 和第三方直链转换器不进入自动会话。
+3. 当前来源固定为“签名配置（含 `versionCode` / `versionName` / `apkSizeBytes`）-> 公共 `Download` 优先 -> 蓝奏密码根文件夹中的声明 ZIP 按需获取”；选择页版本 / 体积只显示 Cloud 字段，公共 APK 或 ZIP 内 APK 只负责安装前包名 / 发布者证书身份复核，大小与摘要作为传输证据保留。R2 / GitHub 不参与当前版本判断，密码文件夹、合并 ZIP 和第三方直链转换器不进入自动会话。
 4. 隐藏 WebView 使用 Android 默认手机端标识，挂载在当前安装页面背后并由不透明进度层遮挡；完成密码验证、目录枚举和下载回调后立即停止加载并销毁。不启动外部浏览器、不接收用户触摸 / 焦点、不暴露 JavaScript bridge。
 5. 下载器只写入应用私有缓存的 `.zip.part`；ZIP 大小与 SHA-256 通过后才允许受控解压。唯一 APK 的 entry 名称、大小、SHA-256、包名、版本和签名证书全部通过后，才向会话发送产物校验成功，并把 APK 发布到用户公共 `Download` 后删除临时 ZIP。
 6. F2 实际文件边界固定为 `domain/artifact/`（清单、类型和策略）、`data/catalog/`（Cloud 验签与解析）、`data/web/`（隐藏 WebView）、`data/download/`（私有临时缓存、公共 `Download` 适配与下载）、`data/artifact/`（ZIP / APK 校验）和 `application/artifact/`（事件编排）；事件只经 `InstallationSessionArtifactEventPort` 进入 F1 会话。

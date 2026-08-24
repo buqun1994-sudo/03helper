@@ -627,31 +627,45 @@ object AuthorizationPlanFactory {
         return fixed + declared.filter { it.id !in fixedIds }
     }
 
-    private fun managedComponent(component: ManagedComponent): ManagedComponentContract? =
-        when (component.componentId) {
+    private fun managedComponent(component: ManagedComponent): ManagedComponentContract? {
+        if (!InstallerComponentTrustRegistry.isAllowedPackageName(component.componentId, component.packageName)) {
+            return null
+        }
+        val packageName = component.packageName
+        return when (component.componentId) {
             LYRICS_COMPONENT_ID -> ManagedComponentContract(
-                packageName = LYRICS_PACKAGE_NAME,
+                packageName = packageName,
                 order = 1,
-                requiredRuntimeServices = listOf(LYRICS_NOTIFICATION_LISTENER, LYRICS_ACCESSIBILITY_SERVICE),
-                fixedLaunchComponent = LYRICS_MAIN_ACTIVITY,
+                requiredRuntimeServices = listOf(
+                    "$packageName/$packageName.MediaListenerService",
+                    "$packageName/$packageName.IcarDockAccessibilityService",
+                ),
+                fixedLaunchComponent = "$packageName/.MainActivity",
             )
 
             DESKTOP_COMPONENT_ID -> ManagedComponentContract(
-                packageName = DESKTOP_PACKAGE_NAME,
+                packageName = packageName,
                 order = 0,
-                requiredRuntimeServices = listOf(DESKTOP_ACCESSIBILITY_SERVICE),
-                fixedLaunchComponent = DESKTOP_MAIN_ACTIVITY,
+                requiredRuntimeServices = listOf(
+                    "$packageName/$packageName.debug.NavigationDemoAccessibilityService",
+                ),
+                fixedLaunchComponent = "$packageName/.MainActivity",
             )
 
             FILE_MANAGER_COMPONENT_ID -> ManagedComponentContract(
-                packageName = FILE_MANAGER_PACKAGE_NAME,
+                packageName = packageName,
                 order = 2,
                 requiredRuntimeServices = emptyList(),
-                fixedLaunchComponent = FILE_MANAGER_MAIN_ACTIVITY,
+                fixedLaunchComponent = if (packageName == FILE_MANAGER_PACKAGE_NAME) {
+                    FILE_MANAGER_MAIN_ACTIVITY
+                } else {
+                    "$packageName/$packageName.activities.MainActivity"
+                },
             )
 
             else -> null
-        }?.takeIf { it.packageName == component.packageName }
+        }
+    }
 
     private fun isAllowedDynamicComponent(component: ManagedComponent): Boolean {
         if (component.componentId.isBlank() || !APP_ID_PATTERN.matches(component.componentId)) return false

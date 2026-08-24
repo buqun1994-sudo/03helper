@@ -6,6 +6,8 @@ import com.ninepointnine.helper.application.session.InstallationSessionEventDisp
 import com.ninepointnine.helper.application.session.InstallationSessionEventPort
 import com.ninepointnine.helper.data.catalog.CatalogLoadResult
 import com.ninepointnine.helper.application.maintenance.MaintenanceController
+import com.ninepointnine.helper.data.artifact.ApkIconRepository
+import com.ninepointnine.helper.data.artifact.RemoteLogoRepository
 import com.ninepointnine.helper.domain.artifact.ArtifactManifest
 import com.ninepointnine.helper.application.artifact.ArtifactPreparationResult
 import com.ninepointnine.helper.application.artifact.PreparedArtifact
@@ -44,6 +46,10 @@ class InstallerRuntime(
     private val persistMaintenanceSnapshot: (suspend (InstallationSessionSnapshot) -> Unit)? = null,
     coroutineContext: CoroutineContext,
     private val prepareSelectedCatalog: (suspend (Set<String>, InstallationSessionEventPort) -> CatalogLoadResult)? = null,
+    /** Optional UI adapter; production injects the APK-backed icon reader. */
+    val apkIconRepository: ApkIconRepository? = null,
+    /** Optional signed remote app-icon reader used before an APK is local. */
+    val remoteLogoRepository: RemoteLogoRepository? = null,
 ) : AutoCloseable {
     private val runtimeJob = SupervisorJob(coroutineContext[Job])
     private val scope = CoroutineScope(coroutineContext + runtimeJob)
@@ -211,10 +217,27 @@ class InstallerRuntime(
                 reconcile(after)
             }
 
+            InstallationSessionCommand.ReturnToSelection -> {
+                if (after.sessionId != before.sessionId) cancelTransferWork()
+                // A catalog failure may leave no component rows. Re-enter the
+                // connected selection route and let the normal reconcile path
+                // request a fresh catalog instead of leaving the page inert.
+                if (after.state == InstallationSessionState.CONNECTED && after.components.isEmpty()) {
+                    reconcile(after)
+                }
+            }
+
             InstallationSessionCommand.DisconnectDevice -> {
                 knownReconnectAttemptSessionId = null
                 maintenanceJob?.cancel()
                 closeDeviceConnection()
+            }
+
+            InstallationSessionCommand.LeaveMaintenanceAction -> {
+                // The command only clears the maintenance route state; keep
+                // the confirmed device lease alive for the home page.
+                maintenanceJob?.cancel()
+                maintenanceJob = null
             }
 
             is InstallationSessionCommand.ToggleOptionalComponent,

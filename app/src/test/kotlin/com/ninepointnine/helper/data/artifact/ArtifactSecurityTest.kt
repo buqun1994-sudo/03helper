@@ -15,6 +15,8 @@ import com.ninepointnine.helper.domain.artifact.ArtifactSource
 import com.ninepointnine.helper.domain.artifact.ArtifactSourceKind
 import com.ninepointnine.helper.domain.artifact.ArtifactVersion
 import com.ninepointnine.helper.domain.artifact.CompatibilityRange
+import com.ninepointnine.helper.domain.artifact.InstallerPublisherTrustRegistry
+import com.ninepointnine.helper.domain.artifact.ArtifactReleaseTrack
 import com.ninepointnine.helper.domain.artifact.ResolvedDownloadRequest
 import com.ninepointnine.helper.domain.artifact.SourcePlan
 import java.io.ByteArrayInputStream
@@ -31,10 +33,97 @@ import kotlinx.coroutines.launch
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ArtifactSecurityTest {
+    @Test
+    fun `publisher trust recognizes debug staging and production component identities`() {
+        assertTrue(
+            InstallerPublisherTrustRegistry.isTrusted(
+                "nine-studio",
+                "com.ninepointnine.desktop",
+                setOf("bfb70dc15b54ad2f1b8acd35fa26ecf552bf2ef21d416a44b7eeda5e5e9ebaa9"),
+            ),
+        )
+        assertTrue(
+            InstallerPublisherTrustRegistry.isTrusted(
+                "nine-studio",
+                "com.ninepointnine.desktoplyrics",
+                setOf("934b9151fe62b39a3474a11f00c2114c7f392b18fec85f39f8d71b9596860e03"),
+            ),
+        )
+        assertTrue(
+            InstallerPublisherTrustRegistry.isTrusted(
+                "nine-studio",
+                "com.tcrrry.desktop",
+                setOf("2990047fddf6d6ec1eb7f83731fcc1398616e5fb83aec97542a4f132c35a1a27"),
+            ),
+        )
+        assertFalse(
+            InstallerPublisherTrustRegistry.isTrusted(
+                "nine-studio",
+                "com.ninepointnine.desktoplyrics",
+                setOf("bfb70dc15b54ad2f1b8acd35fa26ecf552bf2ef21d416a44b7eeda5e5e9ebaa9"),
+            ),
+        )
+    }
+
+    @Test
+    fun `component identity selects the current track package and certificate exactly`() {
+        val stagingDesktop = InstallerPublisherTrustRegistry.matchComponentIdentity(
+            componentId = "desktop",
+            profileId = "nine-studio",
+            environment = "staging",
+            channel = "debug",
+            packageName = "com.ninepointnine.desktop",
+            certificateDigests = setOf("bfb70dc15b54ad2f1b8acd35fa26ecf552bf2ef21d416a44b7eeda5e5e9ebaa9"),
+        )
+        assertEquals(ArtifactReleaseTrack.STAGING, stagingDesktop?.track)
+        assertNull(
+            InstallerPublisherTrustRegistry.matchComponentIdentity(
+                componentId = "desktop",
+                profileId = "nine-studio",
+                environment = "staging",
+                channel = "debug",
+                packageName = "com.tcrrry.desktop",
+                certificateDigests = setOf("2990047fddf6d6ec1eb7f83731fcc1398616e5fb83aec97542a4f132c35a1a27"),
+            ),
+        )
+        assertEquals(
+            ArtifactReleaseTrack.STAGING,
+            InstallerPublisherTrustRegistry.matchComponentIdentity(
+                componentId = "lyrics",
+                profileId = "nine-studio",
+                environment = "staging",
+                channel = "debug",
+                packageName = "com.ninepointnine.desktoplyrics",
+                certificateDigests = setOf("1eb136fffd3f1e4c204d0933cab66c51ee4536a29e949b9c080925c01563b51d"),
+            )?.track,
+        )
+        assertEquals(
+            ArtifactReleaseTrack.STAGING,
+            InstallerPublisherTrustRegistry.matchComponentIdentity(
+                componentId = "cast",
+                profileId = "nine-studio",
+                environment = "staging",
+                channel = "debug",
+                packageName = "com.ninepointnine.desktopcast",
+                certificateDigests = setOf("98740b95c30064f727b9401a851ecf2e576d5e5c38fcc318284578747ba50e2a"),
+            )?.track,
+        )
+        assertNull(
+            InstallerPublisherTrustRegistry.matchComponentIdentity(
+                componentId = "cast",
+                profileId = "nine-studio",
+                environment = "staging",
+                channel = "debug",
+                packageName = "com.ninepointnine.desktopcast",
+                certificateDigests = setOf("2990047fddf6d6ec1eb7f83731fcc1398616e5fb83aec97542a4f132c35a1a27"),
+            ),
+        )
+    }
     @Test
     fun `transient download request string representation redacts URL and headers`() {
         val request = ResolvedDownloadRequest(
@@ -303,40 +392,48 @@ class ArtifactSecurityTest {
     }
 
     @Test
-    fun `identity verifier rejects apk hash version and certificate mismatches`() {
+    fun `identity verifier keeps package and publisher certificate as the minimum gate`() {
         val directory = Files.createTempDirectory("artifact-identity-fields").toFile()
         fun runCase(
+            name: String,
             manifestChange: (ArtifactManifest) -> ArtifactManifest,
             metadata: ApkMetadata,
-            expectedReason: String,
+            expectedFailure: String?,
         ) {
             val apk = byteArrayOf(3, 4, 5)
-            val archive = directory.resolve("$expectedReason.zip").apply {
+            val archive = directory.resolve("$name.zip").apply {
                 writeBytes(zipBytes(listOf("app.apk" to apk)))
             }
             val base = manifestFor(archive.readBytes(), apk)
             val changed = manifestChange(base)
             val verifiedArchive = ArchiveIdentityVerifier().verify(changed, archive) as ArchiveIdentityResult.Verified
             val extracted = ArtifactArchiveExtractor { Long.MAX_VALUE }
-                .extract(changed, verifiedArchive.archive, directory.resolve("$expectedReason.apk.part")) as ArchiveExtractionResult.Extracted
+                .extract(changed, verifiedArchive.archive, directory.resolve("$name.apk.part")) as ArchiveExtractionResult.Extracted
             val result = ArtifactIdentityVerifier { metadata }
-                .verify(changed, ArtifactSourceKind.R2, verifiedArchive.archive, extracted.apk, directory.resolve("$expectedReason.apk"))
-            assertEquals(expectedReason, (result as ArtifactIdentityResult.Failed).failure.reasonCode)
+                .verify(changed, ArtifactSourceKind.R2, verifiedArchive.archive, extracted.apk, directory.resolve("$name.apk"))
+            if (expectedFailure == null) {
+                assertTrue(result is ArtifactIdentityResult.Verified)
+            } else {
+                assertEquals(expectedFailure, (result as ArtifactIdentityResult.Failed).failure.reasonCode)
+            }
         }
         runCase(
+            name = "hash_stale",
             manifestChange = { it.copy(apkSha256 = "ff".repeat(32)) },
             metadata = ApkMetadata("com.example.app", ArtifactVersion("1.0.0", 7), setOf("aa".repeat(32))),
-            expectedReason = "apk_sha256_mismatch",
+            expectedFailure = null,
         )
         runCase(
+            name = "version_stale",
             manifestChange = { it },
             metadata = ApkMetadata("com.example.app", ArtifactVersion("9.0.0", 99), setOf("aa".repeat(32))),
-            expectedReason = "apk_version_mismatch",
+            expectedFailure = null,
         )
         runCase(
+            name = "certificate_wrong",
             manifestChange = { it },
             metadata = ApkMetadata("com.example.app", ArtifactVersion("1.0.0", 7), setOf("bb".repeat(32))),
-            expectedReason = "apk_certificate_mismatch",
+            expectedFailure = "apk_certificate_mismatch",
         )
     }
 

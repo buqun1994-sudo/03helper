@@ -233,8 +233,11 @@ sealed interface InstallUiIntent {
     data object CancelInstallation : InstallUiIntent
     data object ContinueInstallation : InstallUiIntent
     data object RetryInstallation : InstallUiIntent
+    /** Leaves a terminal install result and returns to the existing selection. */
+    data object ReturnToSelection : InstallUiIntent
     data object Reconfigure : InstallUiIntent
     data object EnterMaintenance : InstallUiIntent
+    data object LeaveMaintenanceAction : InstallUiIntent
     data class MaintenanceAction(val actionId: MaintenanceActionId) : InstallUiIntent
     data class MaintenanceApplicationAction(
         val componentId: String,

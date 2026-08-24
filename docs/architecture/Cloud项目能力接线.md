@@ -22,20 +22,20 @@
 
 ### 3.1 控制面与对象流分离
 
-1. 03helper 需要一个很小的 schema V3 签名配置作为控制面，配置描述当前蓝奏根文件夹、运行时密码、`environment`、`channel`、`catalogVersion`、`catalogRevision` 和动态 `apps[]`；每个条目可声明 `versionCode`、`versionName`、`apkSizeBytes`、展示信息、安装策略、排序、客户端能力门槛和受限 typed `deviceSetup`。包名、证书、最低 SDK、APK 哈希和实际身份由客户端读取并用官方发布者证书根校验，实际 APK 的版本 / 大小必须与配置字段一致。
-2. 安装包对象流不经过 03helper 自有服务器。客户端每次从配置取得同一个受密码保护的蓝奏根文件夹，在隐藏 WebView 中完成验证并枚举文件，只定位启用 `apps[]` 声明的 ZIP；未声明文件忽略，缺失 ZIP（包括 `desktop`）不在目录阶段把整次安装判死。用户确认后先扫描手机公共 `Download`，只有没有通过 Cloud 版本 / 大小 / 包身份校验的本地 APK 时才下载对应 ZIP；单个远端或本地来源失败逐项隔离，结果页再决定是否允许进入维护。最新版本展示以签名 `apps[]` 的 `versionCode`、`versionName`、`apkSizeBytes` 为准，`catalogVersion` 只作配置修订。
+1. 03helper 需要一个很小的 schema V4 签名配置作为控制面，配置描述当前蓝奏根文件夹、运行时密码、`environment`、`channel`、`catalogVersion`、`catalogRevision` 和动态 `apps[]`；每个条目可声明 `versionCode`、`versionName`、`apkSizeBytes`、展示信息、安装策略、排序、客户端能力门槛、受限 typed `deviceSetup` 和带 SHA-256 的 `icon` 元数据。包名、证书、最低 SDK、APK 哈希和实际身份由客户端读取并用官方发布者证书根校验；Cloud 版本 / 大小只负责展示与发布追踪，不再作为重复 APK 身份门禁。v3 仅作为无 Logo 历史配置的过渡读取。
+2. 安装包对象流不经过 03helper 自有服务器。客户端每次从配置取得同一个受密码保护的蓝奏根文件夹，在隐藏 WebView 中完成验证并枚举文件，只定位启用 `apps[]` 声明的 ZIP；未声明文件忽略，缺失 ZIP（包括 `desktop`）不在目录阶段把整次安装判死。用户确认后先扫描手机公共 `Download`，只有没有通过包名 / 受信证书身份校验的本地 APK 时才下载对应 ZIP；单个远端或本地来源失败逐项隔离，结果页再决定是否允许进入维护。最新版本展示以签名 `apps[]` 的 `versionCode`、`versionName`、`apkSizeBytes` 为准，`catalogVersion` 只作配置修订。
 3. R2 / GitHub Releases 不参与当前根文件夹自动版本判断；后续若增加备用对象，必须继续由同一签名配置声明并保持组件版本一致，不能让多个来源各自决定“最新版本”。
 4. 600GB/月额度只用于评估对象流量，不用于否定小清单控制面；几 KB 的清单请求不构成 APK 直链流量。
 
 ### 3.2 Android 清单适配边界
 
-V3 已冻结独立的 Android distribution-config 控制面。领域对象和签名 envelope 的本地实现位于 `com.ninepointnine.helper.domain.artifact` 与 `data/catalog`；这只代表客户端协议已实现，不代表 Cloud 生产配置已经发布。
+V4 已冻结独立的 Android distribution-config 控制面；客户端仍兼容读取没有 Logo 的 v3 历史快照。领域对象和签名 envelope 的本地实现位于 `com.ninepointnine.helper.domain.artifact` 与 `data/catalog`；这只代表客户端协议已实现，不代表 Cloud 生产配置已经发布。
 
-公共生产入口为 `GET https://api.9.9studio.fun/api/03helper/android-config`，Debug staging 入口为 `GET https://api-staging.9studio.fun/api/03helper/android-config`。envelope 使用 `schemaVersion=3`；payload 包含 `environment`、`channel`、`issuedAtUtc`、`expiresAt`、`catalogVersion`、`catalogRevision`、文件夹字段和动态 `apps[]`。客户端先对 Base64 解码后的原始 UTF-8 字节验签，再严格解析 payload；payload 最大 512 KiB，未知字段、危险文件名、过期快照和修订回滚均拒绝。
+公共生产入口为 `GET https://api.9.9studio.fun/api/03helper/android-config`，Debug staging 入口为 `GET https://api-staging.9.9studio.fun/api/03helper/android-config`。新 envelope 使用 `schemaVersion=4`，客户端同时兼容 `schemaVersion=3` 的无 Logo 历史快照；payload 包含 `environment`、`channel`、`issuedAtUtc`、`expiresAt`、`catalogVersion`、`catalogRevision`、文件夹字段、动态 `apps[]` 和 v4 `icon` 元数据。客户端先对 Base64 解码后的原始 UTF-8 字节验签，再严格解析 payload；payload 最大 512 KiB，未知字段、危险文件名、过期快照和修订回滚均拒绝。
 
 当前 staging 信任根已轮换为 `keyId=03helper-staging-config-2026-08-22-v1`，算法为 `SHA256withECDSA`、P-256 (`prime256v1`)，客户端内置公钥 SPKI DER SHA-256 为 `8c2573689e87e6c426add9f2249186ec7b6c0e8f44b196ea669c820adb1283d3`。Cloud 只能注入与该指纹匹配的 PKCS#8 私钥；旧 `03helper-real-debug-2026-08-20-v4` 已废弃且不做兼容。配置加密密钥 `ANDROID_CONFIG_ENCRYPTION_KEY_BASE64` 与签名私钥是两套独立材料。
 
-历史版本字段不属于当前 v3 主链；回滚通过新 `catalogRevision` 指向旧的不可变目录完成。客户端按 `environment + channel` 持久化最高修订号，旧签名快照不能覆盖新状态。
+历史版本字段不属于当前 v4 主链；回滚通过新 `catalogRevision` 指向旧的不可变目录完成。客户端按 `environment + channel` 持久化最高修订号，旧签名快照不能覆盖新状态。
 
 #### 03helper 自身发布身份交接
 
@@ -108,7 +108,7 @@ Cloud 最新 iCAR 03 官网已确认的可复用语言：
 
 ## 7. Cloud 路由索引
 
-本轮协议补充：`apps[]` 启用条目必须包含 `versionCode`、`versionName`、`apkSizeBytes`；客户端选择页展示为 `V1.2.3`、`2.6M`，下载后逐项核对 APK 实际版本与大小。
+本轮协议补充：`apps[]` 启用条目必须包含 `versionCode`、`versionName`、`apkSizeBytes`；客户端选择页展示为 `v1.2.3`、`2.6M`，下载后以包名 / 发布者证书完成最小身份校验，并保留实际大小与摘要证据。
 
 在 Cloud 仓库中继续读取：
 

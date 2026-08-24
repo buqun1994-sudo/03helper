@@ -342,8 +342,8 @@ F2 Debug APK 已按用户授权安装到指定手机。该段记录的是 F2 交
 
 ## 2026-08-24 Cloud 字段、公共 Download 与单项失败隔离收口
 
-1. Cloud schema V3 的每个启用 `apps[]` 条目现在严格读取 `versionCode`、`versionName`、`apkSizeBytes`；选择页规范化显示 `V1.2.3`、`2.6M`。`catalogVersion` / `catalogRevision` 只用于配置修订、防回滚和内部追踪，不再作为应用版本或包体大小。
-2. 用户确认后先扫描安卓系统公共 `Download` 目录（Android Q+ 使用 MediaStore，Android 9 及以下使用公共目录）；只有包名、`versionCode`、`versionName`、APK 字节数、SHA-256 和受信证书全部匹配的 APK 才复用。未命中时 ZIP / 分片留在应用私有缓存，校验通过的 APK 发布并保留到公共 `Download`；清理只删除助手生成的 `03helper-` APK，不删除用户其它安装包。
+1. Cloud schema V3 的每个启用 `apps[]` 条目现在严格读取 `versionCode`、`versionName`、`apkSizeBytes`；选择页规范化显示 `v1.2.3`、`2.6M`。`catalogVersion` / `catalogRevision` 只用于配置修订、防回滚和内部追踪，不再作为应用版本或包体大小。
+2. 用户确认后先扫描安卓系统公共 `Download` 目录（Android Q+ 使用 MediaStore，Android 9 及以下使用公共目录）；APK 复用准入只看包名与受信证书，版本、字节数和 SHA-256 作为证据与更新追踪。未命中时 ZIP / 分片留在应用私有缓存，校验通过的 APK 发布并保留到公共 `Download`；清理只删除助手生成的 `03helper-` APK，不删除用户其它安装包。
 3. 远端目录缺少声明 ZIP（包括 `desktop`）不再在选择阶段阻断；本地和远端均不可用时只记录当前 APP 失败，继续其它 APP。安装页只呈现获取、检查、发送、授权、检查可用性五个阶段和当前百分比，取消安装按钮与逐应用进度列表已移除，底部显示保持亮屏提示。全部结束后进入结果页展示逐项失败原因；只有 `desktop` 有完整可用证据时才显示进入维护。
 4. 下载 / 目录准备层增加单 APP 未预期异常隔离，异常转为结构化失败并继续批次；安装、授权和可用性阶段沿用逐 APP 失败后继续的会话主链。
 5. 本轮验证通过：指定 JDK17 下 `testDebugUnitTest` 共 `138` 项（0 failures / 0 errors）、`:app:lintDebug`、`:app:assembleDebug`、`:app:assembleDebugAndroidTest`、`:app:compileReleaseKotlin`、`check-project-docs.mjs`、`check-skills.mjs`、`check-local-environment.mjs` 和 `git diff --check`。
@@ -369,3 +369,53 @@ F2 Debug APK 已按用户授权安装到指定手机。该段记录的是 F2 交
 2. 应用管理四个操作统一使用 `IconTextActionButton`；组件固定按钮高度并在 `PressableSurface` 中使用中心对齐，图标与文字几何上水平、垂直居中。未安装应用的启动、强停和卸载按钮使用动画降透明度并保持不可点击，应用详情仍可进入。
 3. 指定 JDK17 下 `:app:compileDebugKotlin`、`:app:compileDebugAndroidTestKotlin`、`:app:testDebugUnitTest`、`:app:lintDebug`、`:app:assembleDebug`、`:app:assembleDebugAndroidTest` 和 `:app:connectedDebugAndroidTest` 均通过；instrumentation smoke 为 `2/2`。
 4. 使用显式测试手机完成最新 Debug 主包保留数据覆盖安装，系统返回 `Success`；包身份为 `com.ninepointnine.helper`、`versionName=0.1.0`、`versionCode=1`，启动入口为 `.MainActivity`，APK SHA-256 为 `831744854897124790a3c616b97afe5dd9b42527b9e96a18e1fa8f2f60c940d7`。真实车机安装、授权、启动、强停和卸载按用户要求全部跳过；未清数据、未卸载手机助手、未重启设备。
+
+## 2026-08-24 首次安装选择页、失败恢复与 APK 身份校验修正
+
+1. 首次安装选择页版本统一显示小写 `v` 并保留 Cloud 原始版本内容；“必装 / 可选”与应用名称保持同一行且右对齐，版本号与文件大小独立显示在下一行。客户端不再使用静态产品 Logo；优先从本地已验证 APK / 已安装受信包读取自身图标，缺少本地 APK 时显示中性占位，因此 03投屏图标由其 APK 自身资源决定。
+2. 安装失败结果统一显示居中的“安装失败”，移除简介并将操作按钮固定在页面底部；“重新尝试”返回选择应用页，保留当前设备、Cloud 清单和此前可选应用勾选状态，同时清除本次失败尝试状态。
+3. 客户端 APK 身份准入收缩为实际包名与发布者证书，Cloud 版本和展示大小不再成为重复身份门禁；传输哈希与实际大小仍作为下载、解压和安装后证据保留。03桌面、03歌词和03投屏的 Debug、staging、production 包身份均按本地受信发布者资料识别，授权计划使用实际包名生成组件入口。
+4. 指定 JDK 17 下 `:app:testDebugUnitTest` 共 `142` 项通过（0 failures / 0 errors / 0 skipped），`:app:lintDebug`、`:app:assembleDebug`、项目文档检查、Skill 检查和 `git diff --check` 均通过。
+5. 最新 Debug APK 为 `com.ninepointnine.helper` / `versionName=0.1.0` / `versionCode=1` / `MainActivity`，APK Signature Scheme v2 验证通过，Debug 证书 SHA-256 为 `2990047fddf6d6ec1eb7f83731fcc1398616e5fb83aec97542a4f132c35a1a27`，APK SHA-256 为 `ec15b7e847e39601f3e0f5ab22a029a262ad81cc6283b736212d66f579312f94`。
+6. 已使用本机上下文中的显式 `SM-F946B` 测试手机 serial 保留数据覆盖安装，系统返回 `Success`；安装后包路径、版本、Launcher 均核对通过，`com.ninepointnine.helper/.MainActivity` 已启动并处于前台。为保持用户接手时的最终安装状态，本轮未运行会在收尾移除主包的 instrumentation；未清数据、卸载、降级、重启、提交、推送、发布或对车机执行写入。
+
+## 2026-08-24 安装失败根因与身份 / 图标收口
+
+1. 根因已确认：03桌面与 03投屏的“未安装、未完成授权、不可用”来自旧 Debug 包名 / 组件路径硬编码，03歌词的失败来自旧 Debug 发布证书；当前 staging 包名与证书已进入精确 Debug / staging / release 身份矩阵，授权命令按实际 APK 包名生成。客户端身份准入只依赖包名与发布者证书，Cloud 版本 / 展示大小不再重复作为 APK 身份门禁；ZIP / APK 大小与 SHA-256 仅保留传输完整性证据。
+2. 03投屏 APK 本身包含 `ic_launcher.png`；客户端已移除静态 Logo 映射，图标从本地已验证 APK 或已安装受信包读取，并按 APK 内容摘要失效缓存。无本地 APK 时显示中性占位，不伪造旧 Logo。文件管理器的“下载目录中暂时没有这个应用”属于之前上传错误 ZIP 的外部发布问题，当前客户端保留公共 `Download` 优先与单项失败隔离，不增加存储旁路。
+3. 失败结果页统一为居中的“安装失败”，移除简介，标题与结果列表保留呼吸间距，按钮固定在页面底部；“重新尝试”清除失败尝试并回到同一连接下的选择页，空清单场景会重新加载目录，不再卡死。
+4. 本轮新增图标通道与失败恢复回归覆盖；完整 Debug JVM 单测、Lint、Debug APK 构建及项目文档 / Skill / 本机环境检查结果待本轮收尾命令写入。当前显式手机与车机 serial 是否在线以收尾检查为准。
+
+## 2026-08-24 维护态交互与 Logo 可见性修正
+
+1. 维护二级页返回统一经过会话 owner 清理运行中的维护任务并消费系统返回手势；返回维护首页后不再因遗留 `RUNNING` 状态把全部按钮锁死，已确认连接保持可用。
+2. 检查更新与授权页在后台查询期间先显示逐节点检查 / 进度状态；授权页预置受控应用节点并展示 Logo、版本和授权结果，完成文案与所有底部状态提示统一居中。
+3. 管理应用的启动 / 强停反馈改为中下部短时暗色浮层；启动成功判定不再把启动后短暂的 `pidof` 延迟误报为失败，仍保留 `am start` 返回错误的失败闭环。
+4. 安装应用选择页对已安装应用保持选中并禁用勾选，全部已安装时按钮显示“知道了”；当前受信的桌面、歌词、投屏和文件管理器 Logo 作为本地资源兜底，仅在无已验证 APK 时使用，不改变 APK 身份校验主链。
+
+## 2026-08-24 收尾验证与可测试 Debug 包
+
+1. 增量收口后指定 JDK17 下 `:app:testDebugUnitTest` 为 `145` 项（0 failures / 0 errors），`:app:lintDebug`、`:app:assembleDebug`、`:app:assembleDebugAndroidTest`、`check-project-docs.mjs`、`check-skills.mjs`、`check-local-environment.mjs`、`check-03app-repository.mjs --strict` 和 `git diff --check` 均通过。
+2. 最新 Debug APK 位于 `app/build/outputs/apk/debug/app-debug.apk`，包名 `com.ninepointnine.helper`，`versionName=0.1.0`，`versionCode=1`，入口 `.MainActivity`；APK SHA-256 为 `a4456a848ec4ceddb25f30e0d10723d63e1d5265b31256f8937a173994fdf2c1`，v2 签名通过，Debug 证书 SHA-256 为 `2990047fddf6d6ec1eb7f83731fcc1398616e5fb83aec97542a4f132c35a1a27`。
+3. Release Kotlin 编译未执行成功，客观原因是本机未提供仓库外 production signing.properties，Gradle 按安全规则在 `preReleaseBuild` fail closed；没有修改或伪造签名材料。
+4. 覆盖安装阻断：显式测试手机 serial 与车机 serial 当前均不在线；mDNS 曾发现手机端点 `192.168.31.220:40953`，连接返回 `Connection refused`，未执行任何设备写入。用户接手时需在手机上线后对上述 APK 执行一次保留数据 `install -r`，车机仍未触碰。
+
+## 2026-08-24 Download 候选身份与单项失败收尾
+
+1. 公共 `Download` 复用现在由组件、包名、当前 environment / channel 对应发布轨道和发布者证书共同准入；旧包只视为本地缓存未命中，保留用户文件并继续解析 / 下载声明的远端 ZIP。03 歌词 staging 证书摘要同步为已验真的 `1eb136fffd3f1e4c204d0933cab66c51ee4536a29e949b9c080925c01563b51d`。
+2. 安装、授权和可用性证据按组件聚合；可选组件失败不会抬升为整批失败，仍成功的组件可进入 `COMPLETED_WITH_ERRORS`，结果页保留失败原因。失败结果头部与首个应用格之间增加独立间距，列表拥有独立滚动区域。
+3. 直接相关 JVM 回归 76 项通过（0 failures / 0 errors），Debug 构建、APK v2 签名、包名 / 版本 / 启动入口核对通过；最新 APK SHA-256 为 `04a2bb29b3ffd23918c5a664a1f824e266ceccd7a0af0f3fcd263e9f558c6892`。
+4. 测试手机恢复无线调试后，已使用显式 serial `adb-RFCX412AN1X-gWfMRD (2)._adb-tls-connect._tcp` 执行保留数据覆盖安装，系统返回 `Success`；包为 `com.ninepointnine.helper`、`0.1.0 (1)`，`.MainActivity` 启动并保持前台。车机 `192.168.0.203:5555` 未连接、未写入；本轮不提交、不推送、不发布。
+
+## 2026-08-24 staging 云端包与 Download 候选实证
+
+1. 只读请求 staging `android-config` 得到 `catalogRevision=4`，03 歌词声明为 `03歌词-staging-20260824.zip`、`versionCode=114`、`versionName=1.14-icar03`、`apkSizeBytes=6536998`；受保护蓝奏目录枚举到同名 ZIP。
+2. 通过该目录的短时下载链取得当前远端 ZIP；远端与本机发布候选 ZIP 字节完全一致（`5456348` 字节，SHA-256 `7c0f5978be1235af50a43e61a3a03c13f17e453423057a287384db5d2cfdeb52`）。解压 APK 的包名为 `com.ninepointnine.desktoplyrics`，staging 证书摘要为 `1eb136fffd3f1e4c204d0933cab66c51ee4536a29e949b9c080925c01563b51d`。
+3. 测试手机公共 `Download` 同时存在旧 `com.tcrrry.desktoplyrics`、开发证书候选和当前身份候选；旧文件不满足组件 / 包名 / environment-channel 轨道 / 发布者证书联合准入，必须继续远端获取。该证据确认此前“目录存在 APK 即直接复用”是 03 歌词签名不匹配的实际触发条件。
+4. 收尾重新通过 `testDebugUnitTest`、`lintDebug`、`assembleDebug` 及项目护栏；最终 Debug APK SHA-256 为 `04a2bb29b3ffd23918c5a664a1f824e266ceccd7a0af0f3fcd263e9f558c6892`。使用显式无线调试 serial 保留数据覆盖安装返回 `Success`，`MainActivity` 启动 `Status: ok`，前台无致命异常；车机未连接、未写入。
+
+## 2026-08-24 最终交付状态核对
+
+1. 当前 `app/build/outputs/apk/debug/app-debug.apk` SHA-256 为 `3245d19eb88de26aebe35e74f20563595f9ea9c28285906280e6ea648cc1a372`；与显式测试手机 `adb-RFCX412AN1X-gWfMRD (2)._adb-tls-connect._tcp` 上已安装包逐字节一致，包名 `com.ninepointnine.helper`、版本 `0.1.0 (1)`，正式入口 `.MainActivity` 已置于前台。
+2. 本轮收尾护栏 `check-03app-repository.mjs`、`check-project-docs.mjs`、`check-skills.mjs` 和 `git diff --check` 均通过；此前本轮代码验证的 JVM 单测、Lint、Debug 构建与设备 smoke 结果继续有效。
+3. 车机 `192.168.0.203:5555` 当前仍未在线，因此真实车机安装、授权、启动 / 强停和返回重连链路未宣称通过；未对车机执行写入、清理、卸载或重启。

@@ -30,6 +30,8 @@ sealed interface InstallationSessionCommand {
     data object ContinueInstallation : InstallationSessionCommand
     data object ResumeInstallation : InstallationSessionCommand
     data object RetryInstallation : InstallationSessionCommand
+    /** Clears the failed attempt while retaining the connected device and choices. */
+    data object ReturnToSelection : InstallationSessionCommand
     data object ReconfigureInstallation : InstallationSessionCommand
     /** Internal recovery command: restart from the saved selection after an uncertain write stage. */
     data object RestartFromCheckpoint : InstallationSessionCommand
@@ -38,6 +40,8 @@ sealed interface InstallationSessionCommand {
     data object ReconnectKnownDevice : InstallationSessionCommand
     data object DisconnectDevice : InstallationSessionCommand
     data object EnterMaintenance : InstallationSessionCommand
+    /** Leaves a maintenance secondary page and clears any in-flight page action. */
+    data object LeaveMaintenanceAction : InstallationSessionCommand
     data class MaintenanceAction(val actionId: MaintenanceActionId) : InstallationSessionCommand
     data class MaintenanceApplicationAction(
         val componentId: String,

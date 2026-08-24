@@ -1,5 +1,6 @@
 package com.ninepointnine.helper.data.catalog
 
+import com.ninepointnine.helper.data.artifact.ApkMetadata
 import com.ninepointnine.helper.data.artifact.ApkMetadataReader
 import com.ninepointnine.helper.data.artifact.sha256
 import com.ninepointnine.helper.data.download.DynamicArtifactDownloader
@@ -20,6 +21,7 @@ import com.ninepointnine.helper.domain.artifact.ArtifactVersion
 import com.ninepointnine.helper.domain.artifact.CompatibilityRange
 import com.ninepointnine.helper.domain.artifact.ManifestValidation
 import com.ninepointnine.helper.domain.artifact.ReleaseSourcePolicy
+import com.ninepointnine.helper.domain.artifact.TrustedArtifactIdentity
 import com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
 import com.ninepointnine.helper.domain.artifact.InstallerPublisherTrustRegistry
 import com.ninepointnine.helper.domain.artifact.InstallerSelfIdentity
@@ -365,19 +367,11 @@ class FolderArtifactCatalogAdapter(
                 null
             } ?: return ManifestBuildResult.Failure("distribution_apk_metadata_unreadable", retryable = false)
 
-            if (component.hasReleaseMetadata) {
-                val expectedVersion = ArtifactVersion(component.versionName, component.versionCode)
-                if (metadata.version != expectedVersion) {
-                    return ManifestBuildResult.Failure("distribution_apk_version_mismatch", retryable = false)
-                }
-                if (inspection.apkSizeBytes != component.apkSizeBytes) {
-                    return ManifestBuildResult.Failure("distribution_apk_size_mismatch", retryable = false)
-                }
-            }
-
-            if (component.packageName.isNotBlank() && metadata.packageName != component.packageName) {
-                return ManifestBuildResult.Failure("distribution_apk_package_mismatch", retryable = false)
-            }
+            // Cloud version and size fields are display/release metadata. The
+            // APK identity gate below is deliberately limited to package and
+            // publisher certificate; the local manifest records what was
+            // actually inspected so stale Cloud metadata cannot reject a
+            // correctly signed APK.
             if (InstallerSelfIdentity.isSelfComponentId(component.componentId) &&
                 metadata.packageName != InstallerSelfIdentity.PACKAGE_NAME
             ) {
@@ -386,18 +380,19 @@ class FolderArtifactCatalogAdapter(
             if (!InstallerPublisherTrustRegistry.isKnownProfile(component.trustProfileId)) {
                 return ManifestBuildResult.Failure("distribution_trust_profile_invalid", retryable = false)
             }
-            if (!InstallerPublisherTrustRegistry.isTrusted(
-                    component.trustProfileId,
-                    metadata.packageName,
-                    metadata.certificateSha256s,
-                )
-            ) {
-                return ManifestBuildResult.Failure("distribution_apk_certificate_mismatch", retryable = false)
-            }
-            val trustedComponent = InstallerComponentTrustRegistry.get(component.componentId)
-            if (trustedComponent != null && metadata.packageName != trustedComponent.packageName) {
+            val packageIsKnown = InstallerComponentTrustRegistry.get(component.componentId) == null ||
+                InstallerComponentTrustRegistry.isAllowedPackageName(component.componentId, metadata.packageName)
+            if (!packageIsKnown) {
                 return ManifestBuildResult.Failure("distribution_apk_package_mismatch", retryable = false)
             }
+            val trustedIdentity = InstallerPublisherTrustRegistry.matchComponentIdentity(
+                componentId = component.componentId,
+                profileId = component.trustProfileId,
+                environment = config.environment,
+                channel = config.channel,
+                packageName = metadata.packageName,
+                certificateDigests = metadata.certificateSha256s,
+            ) ?: return ManifestBuildResult.Failure("distribution_apk_certificate_mismatch", retryable = false)
             if (!AuthorizationPlanFactory.validateComponent(
                     ManagedComponent(
                         componentId = component.componentId,
@@ -419,30 +414,17 @@ class FolderArtifactCatalogAdapter(
                 displayName = component.displayName,
                 description = component.description,
                 required = component.required,
-                version = if (component.hasReleaseMetadata) {
-                    ArtifactVersion(component.versionName, component.versionCode)
-                } else {
-                    metadata.version
-                },
+                version = metadata.version,
                 compatibility = CompatibilityRange(minAndroidSdk = metadata.minAndroidSdk ?: component.minAndroidSdk),
                 archiveFileName = component.archiveFileName,
                 archiveSizeBytes = archive.sizeBytes,
                 archiveSha256 = archive.sha256,
                 apkEntryName = inspection.entryName,
-                apkSizeBytes = if (component.hasReleaseMetadata) component.apkSizeBytes else inspection.apkSizeBytes,
+                apkSizeBytes = inspection.apkSizeBytes,
                 apkSha256 = inspection.apkSha256,
                 packageName = metadata.packageName,
-                apkVersion = if (component.hasReleaseMetadata) {
-                    ArtifactVersion(component.versionName, component.versionCode)
-                } else {
-                    metadata.version
-                },
-                certificateSha256 = checkNotNull(
-                    InstallerPublisherTrustRegistry.trustedCertificateSha256(
-                        component.trustProfileId,
-                        metadata.certificateSha256s,
-                    ),
-                ).lowercase(),
+                apkVersion = metadata.version,
+                certificateSha256 = trustedIdentity.certificateSha256.lowercase(),
                 sources = listOf(artifact.source),
                 rollbackId = "${config.effectiveCatalogVersion()}-${component.componentId}",
                 deviceSetup = component.deviceSetup,
@@ -525,10 +507,9 @@ class FolderArtifactCatalogAdapter(
     }
 
     /**
-     * Looks for a matching APK in the user's public Download directory before
-     * resolving a remote share. The APK is accepted only after package,
-     * version, digest and trusted-certificate checks; a random APK is never
-     * treated as a reusable install package.
+     * Looks for an APK with the exact local trust-root identity in the user's
+     * public Download directory. A non-matching candidate is a cache miss, not
+     * a terminal error; the caller must continue with the declared remote ZIP.
      */
     private fun prepareLocalArtifact(
         config: InstallerDistributionConfig,
@@ -539,53 +520,25 @@ class FolderArtifactCatalogAdapter(
         onProgress(CatalogPreparationProgress(component.componentId, InstallPhase.FETCH, ComponentProgressStatus.RUNNING))
         val candidate = artifactCache.publicApkCandidates()
             .asSequence()
-            .mapNotNull { file ->
-                val metadata = runCatching { metadataReader.read(file) }.getOrNull() ?: return@mapNotNull null
-                if (!component.hasReleaseMetadata ||
-                    metadata.version != ArtifactVersion(component.versionName, component.versionCode) ||
-                    file.length() != component.apkSizeBytes
-                ) {
-                    return@mapNotNull null
-                }
-                if (component.packageName.isNotBlank() && metadata.packageName != component.packageName) {
-                    return@mapNotNull null
-                }
-                if (InstallerSelfIdentity.isSelfComponentId(component.componentId) &&
-                    metadata.packageName != InstallerSelfIdentity.PACKAGE_NAME
-                ) {
-                    return@mapNotNull null
-                }
-                val trustedComponent = InstallerComponentTrustRegistry.get(component.componentId)
-                if (trustedComponent != null && metadata.packageName != trustedComponent.packageName) {
-                    return@mapNotNull null
-                }
-                if (!InstallerPublisherTrustRegistry.isKnownProfile(component.trustProfileId) ||
-                    !InstallerPublisherTrustRegistry.isTrusted(
-                        component.trustProfileId,
-                        metadata.packageName,
-                        metadata.certificateSha256s,
-                    )
-                ) {
-                    return@mapNotNull null
-                }
-                file to metadata
-            }
-            .sortedWith(compareBy<Pair<File, com.ninepointnine.helper.data.artifact.ApkMetadata>> { it.first.name })
+            .mapNotNull { file -> reusableCandidate(config, component, file) }
+            .sortedWith(
+                compareByDescending<Candidate> { it.identity.track == InstallerPublisherTrustRegistry.trackFor(config.environment, config.channel) }
+                    .thenByDescending { it.metadata.version.code }
+                    .thenByDescending { it.file.lastModified() }
+                    .thenBy { it.file.name },
+            )
             .firstOrNull()
             ?: return null
-        val file = candidate.first
-        val metadata = candidate.second
-        val certificate = InstallerPublisherTrustRegistry.trustedCertificateSha256(
-            component.trustProfileId,
-            metadata.certificateSha256s,
-        ) ?: return ManifestBuildResult.Failure("distribution_apk_certificate_mismatch", retryable = false)
+        val file = candidate.file
+        val metadata = candidate.metadata
+        val certificate = candidate.identity.certificateSha256
         val manifest = ArtifactManifest(
             schemaVersion = ArtifactManifestValidator.SUPPORTED_SCHEMA_VERSION,
             componentId = component.componentId,
             displayName = component.displayName,
             description = component.description,
             required = component.required,
-            version = ArtifactVersion(component.versionName, component.versionCode),
+            version = metadata.version,
             compatibility = CompatibilityRange(
                 minAndroidSdk = metadata.minAndroidSdk ?: component.minAndroidSdk,
             ),
@@ -596,12 +549,12 @@ class FolderArtifactCatalogAdapter(
             // manifest does not inspect ZIP entries, so keep a stable safe
             // placeholder instead of allowing the filename to affect reuse.
             apkEntryName = "local.apk",
-            apkSizeBytes = component.apkSizeBytes,
+            apkSizeBytes = file.length(),
             apkSha256 = runCatching { sha256(file) }.getOrElse {
                 return ManifestBuildResult.Failure("distribution_apk_hash_failed", retryable = false)
             },
             packageName = metadata.packageName,
-            apkVersion = ArtifactVersion(component.versionName, component.versionCode),
+            apkVersion = metadata.version,
             certificateSha256 = certificate.lowercase(),
             sources = listOf(
                 ArtifactSource(
@@ -630,6 +583,46 @@ class FolderArtifactCatalogAdapter(
         )
         return ManifestBuildResult.Success(manifest)
     }
+
+    private fun reusableCandidate(
+        config: InstallerDistributionConfig,
+        component: InstallerComponentSource,
+        file: File,
+    ): Candidate? {
+        val metadata = runCatching { metadataReader.read(file) }.getOrNull() ?: return null
+        if (component.packageName.isNotBlank() && metadata.packageName != component.packageName) return null
+        if (InstallerSelfIdentity.isSelfComponentId(component.componentId) &&
+            metadata.packageName != InstallerSelfIdentity.PACKAGE_NAME
+        ) {
+            return null
+        }
+        if (InstallerComponentTrustRegistry.get(component.componentId) != null &&
+            !InstallerComponentTrustRegistry.isAllowedPackageName(component.componentId, metadata.packageName)
+        ) {
+            return null
+        }
+        if (!InstallerPublisherTrustRegistry.isKnownProfile(component.trustProfileId)) return null
+        if (component.certificateSha256.isNotBlank() &&
+            metadata.certificateSha256s.none { it.equals(component.certificateSha256, ignoreCase = true) }
+        ) {
+            return null
+        }
+        val identity = InstallerPublisherTrustRegistry.matchComponentIdentity(
+            componentId = component.componentId,
+            profileId = component.trustProfileId,
+            environment = config.environment,
+            channel = config.channel,
+            packageName = metadata.packageName,
+            certificateDigests = metadata.certificateSha256s,
+        ) ?: return null
+        return Candidate(file = file, metadata = metadata, identity = identity)
+    }
+
+    private data class Candidate(
+        val file: File,
+        val metadata: ApkMetadata,
+        val identity: TrustedArtifactIdentity,
+    )
 
     private fun inspectArchive(archive: File, apkFile: File, expectedEntryName: String?): ArchiveInspection? {
         if (!archive.isFile || archive.length() <= 0L) return null

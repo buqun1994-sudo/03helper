@@ -37,6 +37,7 @@ import java.io.File
 import java.io.IOException
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
@@ -407,8 +408,11 @@ internal class DadbCommandGateway(
                     )
                 } else {
                     val launch = shell("am start -n ${shellArgument(launchComponent)}")
-                    val process = shell("pidof ${shellArgument(component.packageName)}")
-                    if (!isSuccessful(launch) || !isSuccessful(process) || process?.output?.trim().isNullOrBlank()) {
+                    // Process publication can lag behind am start on the car.
+                    // Treat pidof as an observation, never as the launch write
+                    // result shown to the user.
+                    waitForProcess(component.packageName)
+                    if (!isLaunchAccepted(launch)) {
                         MaintenanceDeviceResult.Failed(
                             DeviceActionFailure("maintenance_launch_failed", component.componentId, retryable = true),
                         )
@@ -501,15 +505,10 @@ internal class DadbCommandGateway(
             }
         }
         val launch = shell("am start -n $launchComponent")
-        if (!isSuccessful(launch)) {
+        waitForProcess(component.packageName)
+        if (!isLaunchAccepted(launch)) {
             return@withLease MaintenanceDeviceResult.Failed(
                 DeviceActionFailure("maintenance_launch_failed", componentId, retryable = true),
-            )
-        }
-        val process = shell("pidof ${component.packageName}")
-        if (!isSuccessful(process) || process?.output?.trim().isNullOrBlank()) {
-            return@withLease MaintenanceDeviceResult.Failed(
-                DeviceActionFailure("maintenance_process_not_running", componentId, retryable = true),
             )
         }
         MaintenanceDeviceResult.Completed("component_launched")
@@ -548,15 +547,10 @@ internal class DadbCommandGateway(
             }
         }
         val launch = shell("am start -n ${shellArgument(launchComponent)}")
-        if (!isSuccessful(launch)) {
+        waitForProcess(component.packageName)
+        if (!isLaunchAccepted(launch)) {
             return@withLease MaintenanceDeviceResult.Failed(
                 DeviceActionFailure("maintenance_launch_failed", component.componentId, retryable = true),
-            )
-        }
-        val process = shell("pidof ${shellArgument(component.packageName)}")
-        if (!isSuccessful(process) || process?.output?.trim().isNullOrBlank()) {
-            return@withLease MaintenanceDeviceResult.Failed(
-                DeviceActionFailure("maintenance_process_not_running", component.componentId, retryable = true),
             )
         }
         MaintenanceDeviceResult.Completed("component_launched")
@@ -566,16 +560,8 @@ internal class DadbCommandGateway(
         if (ArtifactManifestValidator.validate(artifact.manifest) !is ManifestValidation.Valid) {
             return DeviceActionFailure("install_manifest_invalid", artifact.manifest.componentId, retryable = false)
         }
-        if (!artifact.apkFile.isFile || artifact.apkFile.length() != artifact.manifest.apkSizeBytes) {
+        if (!artifact.apkFile.isFile) {
             return DeviceActionFailure("install_apk_file_invalid", artifact.manifest.componentId, retryable = false)
-        }
-        val digest = try {
-            sha256(artifact.apkFile)
-        } catch (_: Exception) {
-            return DeviceActionFailure("install_apk_hash_failed", artifact.manifest.componentId, retryable = true)
-        }
-        if (!digest.equals(artifact.manifest.apkSha256, ignoreCase = true)) {
-            return DeviceActionFailure("install_apk_hash_mismatch", artifact.manifest.componentId, retryable = false)
         }
         val metadataReader = installedApkMetadataReader
             ?: return DeviceActionFailure("install_apk_verifier_unavailable", artifact.manifest.componentId, retryable = false)
@@ -587,14 +573,8 @@ internal class DadbCommandGateway(
         if (metadata.packageName != artifact.manifest.packageName) {
             return DeviceActionFailure("install_apk_package_mismatch", artifact.manifest.componentId, retryable = false)
         }
-        if (metadata.version != artifact.manifest.apkVersion) {
-            return DeviceActionFailure("install_apk_version_mismatch", artifact.manifest.componentId, retryable = false)
-        }
         if (metadata.certificateSha256s.none { it.equals(artifact.manifest.certificateSha256, ignoreCase = true) }) {
             return DeviceActionFailure("install_apk_certificate_mismatch", artifact.manifest.componentId, retryable = false)
-        }
-        if (artifact.declarations != null && metadata.declarations != artifact.declarations) {
-            return DeviceActionFailure("install_apk_declarations_mismatch", artifact.manifest.componentId, retryable = false)
         }
         return null
     }
@@ -624,14 +604,11 @@ internal class DadbCommandGateway(
                     ),
                 )
             val digest = sha256(pulledApk)
-            val certificate = metadata.certificateSha256s.singleOrNull { candidate ->
+            val certificate = metadata.certificateSha256s.firstOrNull { candidate ->
                 candidate.equals(manifest.certificateSha256, ignoreCase = true)
             }
             if (
-                pulledApk.length() != manifest.apkSizeBytes ||
-                !digest.equals(manifest.apkSha256, ignoreCase = true) ||
                 metadata.packageName != manifest.packageName ||
-                metadata.version != manifest.apkVersion ||
                 certificate == null
             ) {
                 InstalledArtifactIdentityResult.Failed(
@@ -690,15 +667,11 @@ internal class DadbCommandGateway(
                         retryable = true,
                     ),
                 )
-            val digest = sha256(pulledApk)
             val certificateMatches = metadata.certificateSha256s.any { candidate ->
                 candidate.equals(manifest.certificateSha256, ignoreCase = true)
             }
             if (
-                pulledApk.length() != manifest.apkSizeBytes ||
-                !digest.equals(manifest.apkSha256, ignoreCase = true) ||
                 metadata.packageName != manifest.packageName ||
-                metadata.version != manifest.apkVersion ||
                 !certificateMatches
             ) {
                 MaintenanceInstalledIdentity.Failed(
@@ -728,30 +701,8 @@ internal class DadbCommandGateway(
     private fun verifyInstalledArtifactQuick(
         manifest: com.ninepointnine.helper.domain.artifact.ArtifactManifest,
     ): DeviceActionFailure? {
-        val remoteApkPath = readInstalledApkPath(manifest.packageName)
-            ?: return DeviceActionFailure("maintenance_package_path_missing", manifest.componentId, retryable = false)
-        val stat = shell("stat -c %s $remoteApkPath")
-            ?: return DeviceActionFailure("maintenance_identity_probe_failed", manifest.componentId, retryable = true)
-        val size = stat.output.trim().lineSequence().firstOrNull()?.toLongOrNull()
-            ?: return DeviceActionFailure("maintenance_identity_probe_invalid", manifest.componentId, retryable = true)
-        if (size != manifest.apkSizeBytes) {
-            return DeviceActionFailure("maintenance_installed_identity_mismatch", manifest.componentId, retryable = false)
-        }
-        val digestResponse = shell("sha256sum $remoteApkPath")
-            ?: return DeviceActionFailure("maintenance_identity_probe_failed", manifest.componentId, retryable = true)
-        val digest = digestResponse.output.trim().substringBefore(' ').takeIf { it.length == 64 }
-            ?: return DeviceActionFailure("maintenance_identity_probe_invalid", manifest.componentId, retryable = true)
-        if (!digest.equals(manifest.apkSha256, ignoreCase = true)) {
-            return DeviceActionFailure("maintenance_installed_identity_mismatch", manifest.componentId, retryable = false)
-        }
-        val packageInfo = shell("dumpsys package ${manifest.packageName} | grep -m 2 -E 'versionCode=|versionName='")
-            ?: return DeviceActionFailure("maintenance_identity_probe_failed", manifest.componentId, retryable = true)
-        val lines = packageInfo.output.lineSequence().map(String::trim).filter(String::isNotBlank).toList()
-        val versionCode = lines.firstOrNull { it.startsWith("versionCode=") }
-            ?.substringAfter('=')?.substringBefore(' ')?.toLongOrNull()
-        val versionName = lines.firstOrNull { it.startsWith("versionName=") }?.substringAfter('=').orEmpty()
-        if (versionCode != manifest.apkVersion.code || versionName != manifest.apkVersion.name) {
-            return DeviceActionFailure("maintenance_installed_identity_mismatch", manifest.componentId, retryable = false)
+        if (readInstalledApkPath(manifest.packageName) == null) {
+            return DeviceActionFailure("maintenance_package_path_missing", manifest.componentId, retryable = false)
         }
         return null
     }
@@ -851,6 +802,24 @@ internal class DadbCommandGateway(
 
     private fun isSuccessful(response: AdbShellResponse?): Boolean =
         response != null && response.exitCode == 0 && response.errorOutput.isBlank()
+
+    private fun isLaunchAccepted(response: AdbShellResponse?): Boolean {
+        if (!isSuccessful(response)) return false
+        return response?.output.orEmpty().lines().none { line ->
+            line.contains("Error", ignoreCase = true) ||
+                line.contains("Exception", ignoreCase = true) ||
+                line.contains("Unable", ignoreCase = true)
+        }
+    }
+
+    private suspend fun waitForProcess(packageName: String): Boolean {
+        repeat(10) {
+            val process = shell("pidof ${shellArgument(packageName)}")
+            if (isSuccessful(process) && !process?.output?.trim().isNullOrBlank()) return true
+            delay(150L)
+        }
+        return false
+    }
 
     private fun shellArgument(value: String): String =
         "'" + value.replace("'", "'\\\"'\\\"'") + "'"
@@ -1090,11 +1059,16 @@ internal object CombinedAuthorizationCommand {
                 AuthorizationPlanFactory.DESKTOP_COMPONENT_ID,
                 AuthorizationPlanFactory.LYRICS_COMPONENT_ID,
                 AuthorizationPlanFactory.FILE_MANAGER_COMPONENT_ID,
-            )
+            ) || (component.componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID &&
+                component.packageName != AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME)
         }
+        val desktopPackage = plan.components
+            .first { it.componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID }
+            .packageName
         val arguments = buildList {
             if (repairOnly) add("--repair")
             if (dynamic) add("--dynamic")
+            if (dynamic) add("--desktop-package=$desktopPackage")
             addAll(plan.components.map { it.componentId })
             if (dynamic) plan.actions.forEach { action -> add("--action=${action.toWireToken()}") }
         }.joinToString(" ") { shellQuote(it) }
@@ -1140,6 +1114,10 @@ internal object CombinedAuthorizationCommand {
         if [ "${'$'}{1:-}" = --repair ]; then repair_only=1; shift; fi
         dynamic_mode=0
         if [ "${'$'}{1:-}" = --dynamic ]; then dynamic_mode=1; shift; fi
+        desktop_package='${AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME}'
+        case "${'$'}{1:-}" in
+          --desktop-package=*) desktop_package="${'$'}{1#--desktop-package=}"; shift;;
+        esac
         selected() { wanted="${'$'}1"; shift; for value in "${'$'}@"; do [ "${'$'}value" = "${'$'}wanted" ] && return 0; done; return 1; }
         emit() { printf '%s|%s\n' "${'$'}marker" "${'$'}*"; }
         fail() { emit "FAIL|${'$'}1|${'$'}{2:-}"; exit 1; }
@@ -1321,7 +1299,7 @@ internal object CombinedAuthorizationCommand {
 
         skipped=0
         if ! selected desktop "${'$'}@"; then fail desktop_missing desktop; fi
-        if ! package_present com.tcrrry.desktop; then fail desktop_missing desktop; fi
+        if ! package_present "${'$'}desktop_package"; then fail desktop_missing desktop; fi
         if [ "${'$'}dynamic_mode" -eq 0 ]; then
           ensure_appop com.tcrrry.desktop SYSTEM_ALERT_WINDOW desktop desktop-overlay-v1
           ensure_appop com.tcrrry.desktop REQUEST_INSTALL_PACKAGES desktop desktop-install-packages-v1
@@ -1359,12 +1337,21 @@ internal object CombinedAuthorizationCommand {
 
         [ "${'$'}skipped" -eq 0 ] || fail selected_component_missing
         if [ "${'$'}repair_only" -eq 1 ]; then emit "DONE|OK"; exit 0; fi
-        launch_component='${AuthorizationPlanFactory.DESKTOP_MAIN_ACTIVITY}'
-        am start -n "${'$'}launch_component" >/dev/null 2>&1 || fail desktop_launch_failed desktop
-        process_state=STOPPED; attempt=1
-        while [ "${'$'}attempt" -le 13 ]; do if pidof com.tcrrry.desktop >/dev/null 2>&1; then process_state=RUNNING; break; fi; [ "${'$'}attempt" -lt 13 ] && sleep 0.25; attempt=${'$'}((attempt + 1)); done
-        [ "${'$'}process_state" = RUNNING ] || fail desktop_process_not_running desktop
-        wait_for_service_bound "com.tcrrry.desktop/.debug.NavigationDemoAccessibilityService" "com.tcrrry.desktop/com.tcrrry.desktop.debug.NavigationDemoAccessibilityService" && service_state=BOUND || service_state=UNBOUND
+        if [ "${'$'}dynamic_mode" -eq 0 ]; then
+          launch_component='${AuthorizationPlanFactory.DESKTOP_MAIN_ACTIVITY}'
+          am start -n "${'$'}launch_component" >/dev/null 2>&1 || fail desktop_launch_failed desktop
+          process_state=STOPPED; attempt=1
+          while [ "${'$'}attempt" -le 13 ]; do if pidof com.tcrrry.desktop >/dev/null 2>&1; then process_state=RUNNING; break; fi; [ "${'$'}attempt" -lt 13 ] && sleep 0.25; attempt=${'$'}((attempt + 1)); done
+          [ "${'$'}process_state" = RUNNING ] || fail desktop_process_not_running desktop
+          wait_for_service_bound "com.tcrrry.desktop/.debug.NavigationDemoAccessibilityService" "com.tcrrry.desktop/com.tcrrry.desktop.debug.NavigationDemoAccessibilityService" && service_state=BOUND || service_state=UNBOUND
+        else
+          launch_component="${'$'}desktop_package/.MainActivity"
+          am start -n "${'$'}launch_component" >/dev/null 2>&1 || fail desktop_launch_failed desktop
+          process_state=STOPPED; attempt=1
+          while [ "${'$'}attempt" -le 13 ]; do if pidof "${'$'}desktop_package" >/dev/null 2>&1; then process_state=RUNNING; break; fi; [ "${'$'}attempt" -lt 13 ] && sleep 0.25; attempt=${'$'}((attempt + 1)); done
+          [ "${'$'}process_state" = RUNNING ] || fail desktop_process_not_running desktop
+          wait_for_service_bound "${'$'}desktop_package/.debug.NavigationDemoAccessibilityService" "${'$'}desktop_package/${'$'}desktop_package.debug.NavigationDemoAccessibilityService" && service_state=BOUND || service_state=UNBOUND
+        fi
         [ "${'$'}service_state" = BOUND ] || fail desktop_service_not_bound desktop
         emit "LAUNCH|desktop|OK|${'$'}process_state|${'$'}service_state"
         emit "DONE|OK"

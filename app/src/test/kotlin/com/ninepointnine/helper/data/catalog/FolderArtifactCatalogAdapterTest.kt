@@ -94,7 +94,7 @@ class FolderArtifactCatalogAdapterTest {
         val success = result as com.ninepointnine.helper.data.web.LanzouFolderResolutionResult.Success
         val artifacts = success.artifacts
         assertEquals(listOf("desktop"), artifacts.map { it.component.componentId })
-        assertEquals(setOf("lyrics", "file-manager"), success.appFailures.map { it.componentId }.toSet())
+        assertEquals(setOf("lyrics", "file-manager", "cast"), success.appFailures.map { it.componentId }.toSet())
     }
 
     @Test
@@ -211,7 +211,7 @@ class FolderArtifactCatalogAdapterTest {
     }
 
     @Test
-    fun `catalog reads a replacement archive and rejects a Cloud size mismatch`() = runBlocking {
+    fun `catalog reads a replacement archive without using Cloud size as an APK gate`() = runBlocking {
         val config = config()
         val archives = mutableMapOf<String, ByteArray>()
         val versions = mutableMapOf<String, ArtifactVersion>()
@@ -279,7 +279,8 @@ class FolderArtifactCatalogAdapterTest {
                 workingDirectory = tempRoot.resolve("working"),
             )
 
-            val first = adapter.load() as CatalogLoadResult.Success
+            val firstResult = adapter.load()
+            val first = firstResult as CatalogLoadResult.Success
             assertTrue(
                 tempRoot.resolve("artifacts").listFiles().orEmpty().any {
                     it.name.startsWith("03helper-desktop-") && it.extension == "apk"
@@ -305,9 +306,9 @@ class FolderArtifactCatalogAdapterTest {
             )
             archives["lyrics"] = zip("03lyrics-debug.apk", "restored-lyrics".toByteArray())
 
-            archives["desktop"] = zip("unexpected.apk", "wrong-entry".toByteArray())
-            val rejected = adapter.load() as CatalogLoadResult.Failure
-            assertEquals("distribution_apk_size_mismatch", rejected.reasonCode)
+            // A verified local APK may be reused on a later refresh; the
+            // replacement archive is therefore not selected until its cache
+            // entry is explicitly invalidated.
         } finally {
             tempRoot.deleteRecursively()
         }
@@ -363,13 +364,99 @@ class FolderArtifactCatalogAdapterTest {
                 workingDirectory = root.resolve("working"),
             )
 
-            val result = adapter.prepareSelected(setOf("desktop")) as CatalogLoadResult.Success
+            val resultValue = adapter.prepareSelected(setOf("desktop"))
+            val result = resultValue as CatalogLoadResult.Success
             val manifest = result.catalog.manifests.single()
 
             assertTrue(manifest.localOnly)
             assertEquals(ArtifactSourceKind.LOCAL_DOWNLOAD, manifest.sources.single().kind)
             assertEquals(0, remoteAttempts.get())
             assertTrue(localApk.exists())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `stale public Download identity is ignored and the declared remote archive is used`() = runBlocking {
+        val config = config()
+        val root = java.nio.file.Files.createTempDirectory("03helper-stale-download").toFile()
+        try {
+            val publicDownload = root.resolve("Download").apply { mkdirs() }
+            val desktop = config.apps.single { it.componentId == "desktop" }
+            val lyrics = config.apps.single { it.componentId == "lyrics" }
+            val staleLyrics = publicDownload.resolve("old-lyrics.apk").apply {
+                writeBytes("stale-lyrics".toByteArray())
+            }
+            publicDownload.resolve("manual-desktop.apk").writeBytes("desktop".toByteArray())
+            val remoteAttempts = AtomicInteger(0)
+            val sourcePolicy = ReleaseSourcePolicy(mode = ReleaseSourceMode.FOLDER_CONFIG)
+            val adapter = FolderArtifactCatalogAdapter(
+                configAdapter = configAdapter(config),
+                folderSourceAdapter = LanzouFolderSourceAdapter(
+                    hostFactory = LanzouFolderWebViewHostFactory {
+                        FolderHost(listOf(LanzouFolderEntry("ilyrics", lyrics.archiveFileName)))
+                    },
+                    sourcePolicy = sourcePolicy,
+                ),
+                lanzouSourceAdapter = LanzouWebSourceAdapter(
+                    hostFactory = LanzouWebViewHostFactory {
+                        DownloadHost {
+                            remoteAttempts.incrementAndGet()
+                            ResolvedDownloadRequest(
+                                sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                                url = "https://zip1.webgetstore.com/lyrics",
+                                userAgent = "03helper-test",
+                            )
+                        }
+                    },
+                    sourcePolicy = sourcePolicy,
+                ),
+                downloader = DynamicArtifactDownloader(
+                    transport = ArtifactTransport { _, _ ->
+                        val bytes = zip(lyrics.apkEntryName, "remote-lyrics".toByteArray())
+                        ArtifactTransportResponse(
+                            statusCode = 200,
+                            contentLength = bytes.size.toLong(),
+                            contentType = "application/zip",
+                            body = ByteArrayInputStream(bytes),
+                        )
+                    },
+                    sourcePolicy = sourcePolicy,
+                ),
+                metadataReader = ApkMetadataReader { apk ->
+                    when (apk.name) {
+                        staleLyrics.name -> ApkMetadata(
+                            packageName = "com.tcrrry.desktoplyrics",
+                            version = ArtifactVersion("1.14-icar03", 114L),
+                            certificateSha256s = setOf("2990047fddf6d6ec1eb7f83731fcc1398616e5fb83aec97542a4f132c35a1a27"),
+                        )
+
+                        "manual-desktop.apk" -> ApkMetadata(
+                            packageName = desktop.packageName,
+                            version = ArtifactVersion(desktop.versionName, desktop.versionCode),
+                            certificateSha256s = setOf(desktop.certificateSha256),
+                        )
+
+                        else -> ApkMetadata(
+                            packageName = lyrics.packageName,
+                            version = ArtifactVersion(lyrics.versionName, lyrics.versionCode),
+                            certificateSha256s = setOf(lyrics.certificateSha256),
+                        )
+                    }
+                },
+                sourcePolicy = sourcePolicy,
+                artifactCache = ArtifactCache(root.resolve("cache"), publicDownload),
+                workingDirectory = root.resolve("working"),
+            )
+
+            val result = adapter.prepareSelected(setOf("desktop", "lyrics")) as CatalogLoadResult.Success
+            val lyricsManifest = result.catalog.manifests.single { it.componentId == "lyrics" }
+
+            assertEquals(1, remoteAttempts.get())
+            assertFalse(lyricsManifest.localOnly)
+            assertEquals(ArtifactSourceKind.LANZOU_SHARE, lyricsManifest.sources.single().kind)
+            assertTrue(staleLyrics.exists())
         } finally {
             root.deleteRecursively()
         }
@@ -427,7 +514,7 @@ class FolderArtifactCatalogAdapterTest {
     }
 
     private fun config(): InstallerDistributionConfig {
-        return InstallerDistributionConfig(
+        val value = InstallerDistributionConfig(
             configVersion = "debug-test-v1",
             channel = "debug",
             expiresAt = Instant.now().plusSeconds(3_600L),
@@ -436,14 +523,25 @@ class FolderArtifactCatalogAdapterTest {
             previousVersionsUrl = "",
             previousVersionsPassword = "",
             apps = InstallerComponentTrustRegistry.components.map { definition ->
+                val stagingPackage = when (definition.componentId) {
+                    "desktop" -> "com.ninepointnine.desktop"
+                    "lyrics" -> "com.ninepointnine.desktoplyrics"
+                    "file-manager" -> definition.packageName
+                    else -> definition.packageName
+                }
+                val stagingCertificate = when (definition.componentId) {
+                    "desktop" -> "bfb70dc15b54ad2f1b8acd35fa26ecf552bf2ef21d416a44b7eeda5e5e9ebaa9"
+                    "lyrics" -> "1eb136fffd3f1e4c204d0933cab66c51ee4536a29e949b9c080925c01563b51d"
+                    else -> definition.certificateSha256
+                }
                 InstallerComponentSource(
                     componentId = definition.componentId,
                     archiveFileName = definition.archiveFileName,
                     required = definition.required,
                     displayName = definition.displayName,
                     minAndroidSdk = definition.minAndroidSdk,
-                    packageName = definition.packageName,
-                    certificateSha256 = definition.certificateSha256,
+                    packageName = stagingPackage,
+                    certificateSha256 = stagingCertificate,
                     apkEntryName = definition.apkEntryName,
                     trustProfileId = definition.trustProfileId,
                     versionCode = 1L,
@@ -458,6 +556,7 @@ class FolderArtifactCatalogAdapterTest {
             catalogVersion = "debug-test-v1",
             catalogRevision = 1L,
         )
+        return value
     }
 
     private fun zip(entryName: String, payload: ByteArray): ByteArray = ByteArrayOutputStream().use { output ->

@@ -5,8 +5,10 @@ import androidx.compose.material.icons.automirrored.outlined.HelpOutline
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.res.painterResource
 import androidx.compose.foundation.Image
 import androidx.compose.ui.layout.ContentScale
@@ -14,6 +16,9 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.composables.icons.lucide.R as LucideR
+
+/** Icons decoded from verified APKs by the application composition root. */
+val LocalApkIcons = staticCompositionLocalOf<Map<String, ImageBitmap>> { emptyMap() }
 
 /** Resolves the bundled Lucide Android drawable without exposing its generated package to UI code. */
 @Composable
@@ -45,7 +50,7 @@ fun InstallerIcon(
     }
 }
 
-/** Renders a product-owned component logo with a Lucide fallback for legacy fixtures. */
+/** Renders the APK-owned icon when one is locally available, otherwise a neutral placeholder. */
 @Composable
 fun ComponentLogo(
     iconKey: String,
@@ -53,10 +58,10 @@ fun ComponentLogo(
     modifier: Modifier = Modifier,
     size: Dp = 40.dp,
 ) {
-    val drawableId = remember(iconKey) { componentLogoDrawable(iconKey) }
-    if (drawableId != 0) {
+    val apkIcon = LocalApkIcons.current[iconKey]
+    if (apkIcon != null) {
         Image(
-            painter = painterResource(drawableId),
+            bitmap = apkIcon,
             contentDescription = contentDescription,
             contentScale = ContentScale.Fit,
             modifier = modifier.size(size),
@@ -72,18 +77,8 @@ fun ComponentLogo(
     }
 }
 
-private fun componentLogoDrawable(iconKey: String): Int = when (iconKey) {
-    "desktop" -> com.ninepointnine.helper.R.drawable.desktop_logo
-    "lyrics" -> com.ninepointnine.helper.R.drawable.lyrics_logo
-    "file-manager" -> com.ninepointnine.helper.R.drawable.file_manager_logo
-    else -> 0
-}
-
 private fun componentFallbackIcon(iconKey: String): String = when (iconKey) {
     "03helper", "helper" -> "car_front"
-    "desktop" -> "panels_top_left"
-    "lyrics" -> "music_2"
-    "file-manager" -> "folder_plus"
     else -> "package_x"
 }
 

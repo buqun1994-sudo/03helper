@@ -18,6 +18,7 @@ import com.ninepointnine.helper.domain.device.AuthorizationPlanBuildResult
 import com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
 import com.ninepointnine.helper.domain.device.AuthorizationValueState
 import com.ninepointnine.helper.domain.device.ConnectedDevice
+import com.ninepointnine.helper.domain.device.ManagedComponent
 import com.ninepointnine.helper.domain.device.DeviceActionConnectionLease
 import com.ninepointnine.helper.domain.device.DeviceAvailabilityEvidence
 import com.ninepointnine.helper.domain.device.DeviceCapability
@@ -121,6 +122,21 @@ class DeviceActionsTest {
     }
 
     @Test
+    fun `staging desktop plan carries its verified package into launch probes`() {
+        val desktop = AuthorizationPlanFactory.allManagedComponents()
+            .first { it.componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID }
+            .copy(packageName = "com.ninepointnine.desktop")
+        val ready = AuthorizationPlanFactory.createForComponents(listOf(desktop)) as AuthorizationPlanBuildResult.Ready
+
+        val command = CombinedAuthorizationCommand.build(ready.plan)
+
+        assertTrue(command.contains("--dynamic"))
+        assertTrue(command.contains("--desktop-package=com.ninepointnine.desktop"))
+        assertTrue(command.contains("launch_component=\"${'$'}desktop_package/.MainActivity\""))
+        assertTrue(command.contains("wait_for_service_bound \"${'$'}desktop_package/.debug.NavigationDemoAccessibilityService\""))
+    }
+
+    @Test
     fun `repair command never launches an application and still requires terminal evidence`() {
         val command = CombinedAuthorizationCommand.build(setOf("desktop", "lyrics"), repairOnly = true)
 
@@ -203,6 +219,29 @@ class DeviceActionsTest {
         assertEquals(
             "combined_command_result_missing",
             (rejected as DeviceShortcutResult.Failed).failure.reasonCode,
+        )
+    }
+
+    @Test
+    fun `staging package identities use the same bounded authorization contract`() {
+        val result = AuthorizationPlanFactory.createForComponents(
+            listOf(
+                ManagedComponent(
+                    componentId = "desktop",
+                    packageName = "com.ninepointnine.desktop",
+                    order = 0,
+                ),
+            ),
+        ) as AuthorizationPlanBuildResult.Ready
+
+        assertTrue(AuthorizationPlanFactory.validate(result.plan))
+        assertEquals(
+            "com.ninepointnine.desktop/.MainActivity",
+            AuthorizationPlanFactory.fixedLaunchComponent(result.plan.components.single()),
+        )
+        assertEquals(
+            "com.ninepointnine.desktop/com.ninepointnine.desktop.debug.NavigationDemoAccessibilityService",
+            AuthorizationPlanFactory.requiredRuntimeService(result.plan.components.single()),
         )
     }
 

@@ -9,6 +9,7 @@ import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInHorizontally
 import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -19,6 +20,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.background
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
@@ -42,7 +45,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import kotlinx.coroutines.delay
 import com.ninepointnine.helper.R
 import com.ninepointnine.helper.domain.session.MaintenanceActionId
 import com.ninepointnine.helper.domain.session.MaintenanceGroupId
@@ -86,14 +92,12 @@ fun MaintenanceHome(
     val overviewScrollState = rememberLazyListState()
     var applicationPage by remember { mutableStateOf(ApplicationMaintenancePage.LIST) }
     LaunchedEffect(selectedAction) { applicationPage = ApplicationMaintenancePage.LIST }
-    val selectedActionRunning = selectedAction != null &&
-        state.installationSelection == null &&
-        ((state.feedback?.actionId == selectedAction &&
-            state.feedback?.status == MaintenanceActionStatus.RUNNING) ||
-            state.authorization.state == MaintenanceAuthorizationFlowState.CHECKING ||
-            state.applicationAction?.status == MaintenanceActionStatus.RUNNING)
-    BackHandler(enabled = selectedAction != null && !selectedActionRunning && applicationPage == ApplicationMaintenancePage.LIST) {
+    val leaveAction = {
+        onIntent(InstallUiIntent.LeaveMaintenanceAction)
         onSelectedActionChange(null)
+    }
+    BackHandler(enabled = selectedAction != null && applicationPage == ApplicationMaintenancePage.LIST) {
+        leaveAction()
     }
 
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
@@ -153,13 +157,13 @@ fun MaintenanceHome(
                             onSelectedActionChange(MaintenanceActionId.REINSTALL)
                             onIntent(InstallUiIntent.MaintenanceAction(MaintenanceActionId.REINSTALL))
                         },
-                        onBack = { onSelectedActionChange(null) },
+                        onBack = leaveAction,
                     )
 
                     MaintenanceActionId.REPAIR_CONFIGURATION -> MaintenanceAuthorizationPage(
                         state = state,
                         onIntent = onIntent,
-                        onBack = { onSelectedActionChange(null) },
+                        onBack = leaveAction,
                     )
 
                     MaintenanceActionId.MANAGE_APPS -> MaintenanceManageAppsPage(
@@ -167,7 +171,7 @@ fun MaintenanceHome(
                         page = applicationPage,
                         onPageChange = { applicationPage = it },
                         onIntent = onIntent,
-                        onBack = { onSelectedActionChange(null) },
+                        onBack = leaveAction,
                     )
 
                     else -> if (action == MaintenanceActionId.INSTALL_FILE_MANAGER &&
@@ -176,13 +180,13 @@ fun MaintenanceHome(
                         MaintenanceInstallationSelectionPage(
                             selection = state.installationSelection,
                             onIntent = onIntent,
-                            onBack = { onSelectedActionChange(null) },
+                            onBack = leaveAction,
                         )
                     } else {
                         MaintenanceActionPage(
                             action = action,
                             state = state,
-                            onBack = { onSelectedActionChange(null) },
+                        onBack = leaveAction,
                         )
                     }
                 }
@@ -206,10 +210,14 @@ private fun MaintenanceUpdatesPage(
     val self = state.updateStatuses.filter { it.isSelf }
     val apps = state.updateStatuses.filterNot { it.isSelf }
     val visibleStatuses = if (state.connected) state.updateStatuses else self
+    val checking = state.feedback?.actionId == MaintenanceActionId.CHECK_UPDATES &&
+        state.feedback?.status == MaintenanceActionStatus.RUNNING
     val hasUpdate = visibleStatuses.any {
         it.state == com.ninepointnine.helper.domain.session.MaintenanceUpdateState.UPDATE_AVAILABLE
     }
-    BackHandler(enabled = state.feedback?.status != MaintenanceActionStatus.RUNNING, onBack = onBack)
+    // A running read-only check is still a navigable page. Consume the system
+    // gesture and cancel the route through the shared maintenance owner.
+    BackHandler(enabled = true, onBack = onBack)
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -219,20 +227,34 @@ private fun MaintenanceUpdatesPage(
         TaskTopBar(
             title = stringResource(R.string.maintenance_check_updates),
             iconName = actionIcon(MaintenanceActionId.CHECK_UPDATES),
-            onBack = onBack.takeIf { state.feedback?.status != MaintenanceActionStatus.RUNNING },
+            onBack = onBack,
         )
         LazyColumn(
             modifier = Modifier.weight(1f),
             verticalArrangement = Arrangement.spacedBy(InstallerDimensions.ContentSpacing),
         ) {
-            item { Text(stringResource(R.string.maintenance_update_self_section), color = InstallerColors.AuxiliaryWhite) }
-            if (self.isEmpty()) {
+            item {
+                Text(
+                    text = stringResource(R.string.maintenance_update_self_section),
+                    color = InstallerColors.AuxiliaryWhite,
+                )
+            }
+            if (checking) {
+                item { MaintenanceUpdateCheckingState(stringResource(R.string.maintenance_update_self_section)) }
+            } else if (self.isEmpty()) {
                 item { MaintenanceEmptyState(stringResource(R.string.maintenance_update_unavailable)) }
             } else {
                 items(self, key = { "self:${it.componentId}" }) { row -> MaintenanceUpdateRow(row) }
             }
-            item { Text(stringResource(R.string.maintenance_update_apps_section), color = InstallerColors.AuxiliaryWhite) }
-            if (!state.connected) {
+            item {
+                Text(
+                    text = stringResource(R.string.maintenance_update_apps_section),
+                    color = InstallerColors.AuxiliaryWhite,
+                )
+            }
+            if (checking) {
+                item { MaintenanceUpdateCheckingState(stringResource(R.string.maintenance_update_apps_section)) }
+            } else if (!state.connected) {
                 item { MaintenanceEmptyState(stringResource(R.string.maintenance_update_car_disconnected)) }
             } else if (apps.isEmpty()) {
                 item { MaintenanceEmptyState(stringResource(R.string.maintenance_update_unavailable)) }
@@ -240,7 +262,14 @@ private fun MaintenanceUpdatesPage(
                 items(apps, key = { it.componentId }) { row -> MaintenanceUpdateRow(row) }
             }
         }
-        if (hasUpdate) {
+        if (checking) {
+            Text(
+                text = stringResource(R.string.maintenance_update_checking),
+                color = InstallerColors.AuxiliaryWhite,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        } else if (hasUpdate) {
             PrimaryActionButton(
                 text = stringResource(R.string.maintenance_update_all),
                 onClick = onBeginUpdates,
@@ -256,6 +285,7 @@ private fun MaintenanceUpdatesPage(
             Text(
                 text = stringResource(R.string.maintenance_update_current),
                 color = InstallerColors.Success,
+                textAlign = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth(),
             )
         }
@@ -321,6 +351,26 @@ private fun MaintenanceEmptyState(text: String) {
 }
 
 @Composable
+private fun MaintenanceUpdateCheckingState(label: String) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        CircularProgressIndicator(
+            modifier = Modifier.size(20.dp),
+            color = InstallerColors.White,
+            strokeWidth = 2.dp,
+        )
+        Text(
+            text = stringResource(R.string.maintenance_update_node_checking, label),
+            color = InstallerColors.White,
+            style = MaterialTheme.typography.bodyMedium,
+        )
+    }
+}
+
+@Composable
 private fun MaintenanceAuthorizationPage(
     state: InstallUiState.Maintenance,
     onIntent: (InstallUiIntent) -> Unit,
@@ -329,10 +379,20 @@ private fun MaintenanceAuthorizationPage(
     val checking = state.authorization.state == MaintenanceAuthorizationFlowState.CHECKING
     val actionRunning = state.feedback?.actionId == MaintenanceActionId.REPAIR_CONFIGURATION &&
         state.feedback?.status == MaintenanceActionStatus.RUNNING
-    val allAuthorized = state.authorization.applications.isNotEmpty() &&
-        state.authorization.applications.all { it.authorized == true }
+    val authorizationRows = state.authorization.applications.ifEmpty {
+        state.applications.map { app ->
+            MaintenanceAuthorizationRow(
+                componentId = app.componentId,
+                packageName = app.packageName,
+                versionLabel = app.versionLabel,
+                state = if (checking) MaintenanceAuthorizationState.CHECKING else MaintenanceAuthorizationState.UNKNOWN,
+                authorized = null,
+            )
+        }
+    }
+    val allAuthorized = authorizationRows.isNotEmpty() && authorizationRows.all { it.authorized == true }
     val completedRepair = state.feedback?.resultCode == "authorization_repaired"
-    BackHandler(enabled = !checking && !actionRunning, onBack = onBack)
+    BackHandler(enabled = true, onBack = onBack)
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -342,7 +402,7 @@ private fun MaintenanceAuthorizationPage(
         TaskTopBar(
             title = stringResource(R.string.maintenance_repair),
             iconName = actionIcon(MaintenanceActionId.REPAIR_CONFIGURATION),
-            onBack = onBack.takeIf { !checking && !actionRunning },
+            onBack = onBack,
         )
         if (!state.connected) {
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -358,7 +418,7 @@ private fun MaintenanceAuthorizationPage(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(InstallerDimensions.ListSpacing),
             ) {
-                items(state.authorization.applications, key = { it.componentId }) { row ->
+                items(authorizationRows, key = { it.componentId }) { row ->
                     MaintenanceAuthorizationRowView(
                         row = row,
                         displayName = state.applications.firstOrNull { it.componentId == row.componentId }?.displayName
@@ -366,7 +426,7 @@ private fun MaintenanceAuthorizationPage(
                         current = state.authorization.currentComponentId == row.componentId,
                     )
                 }
-                if (checking && state.authorization.applications.isEmpty()) {
+                if ((checking || actionRunning) && authorizationRows.isEmpty()) {
                     item { MaintenanceActionWaiting() }
                 }
             }
@@ -380,6 +440,7 @@ private fun MaintenanceAuthorizationPage(
                         },
                     ),
                     color = InstallerColors.Success,
+                    textAlign = TextAlign.Center,
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
@@ -444,48 +505,51 @@ private fun MaintenanceManageAppsPage(
     val applicationListState = rememberLazyListState()
     var pendingUninstall by remember { mutableStateOf<MaintenanceApplicationRow?>(null) }
     val appActionRunning = state.applicationAction?.status == MaintenanceActionStatus.RUNNING
-    BackHandler(enabled = !appActionRunning, onBack = {
+    BackHandler(enabled = true, onBack = {
         if (page == ApplicationMaintenancePage.LIST) onBack() else onPageChange(ApplicationMaintenancePage.LIST)
     })
     when (page) {
         ApplicationMaintenancePage.LIST -> {
-            Column(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(horizontal = InstallerDimensions.PageHorizontalPadding)
-                    .testTag("maintenance_manage_apps_page"),
-            ) {
-                TaskTopBar(
-                    title = stringResource(R.string.maintenance_manage_apps),
-                    iconName = actionIcon(MaintenanceActionId.MANAGE_APPS),
-                    onBack = onBack.takeIf { !appActionRunning },
-                )
-                LazyColumn(
-                    modifier = Modifier.weight(1f),
-                    state = applicationListState,
-                    verticalArrangement = Arrangement.spacedBy(InstallerDimensions.ListSpacing),
+            Box(modifier = Modifier.fillMaxSize()) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = InstallerDimensions.PageHorizontalPadding)
+                        .testTag("maintenance_manage_apps_page"),
                 ) {
-                    if (state.feedback?.status == MaintenanceActionStatus.RUNNING && state.applications.isEmpty()) {
-                        item { MaintenanceActionWaiting() }
-                    } else {
-                        items(state.applications, key = { it.componentId }) { app ->
-                            ManagedApplicationCard(
-                                app = app,
-                                action = state.applicationAction,
-                                onStart = { onIntent(InstallUiIntent.MaintenanceApplicationAction(app.componentId, MaintenanceApplicationActionId.START)) },
-                                onForceStop = { onIntent(InstallUiIntent.MaintenanceApplicationAction(app.componentId, MaintenanceApplicationActionId.FORCE_STOP)) },
-                                onUninstall = { pendingUninstall = app },
-                                onDetails = {
-                                    onPageChange(ApplicationMaintenancePage.DETAILS)
-                                    onIntent(InstallUiIntent.MaintenanceApplicationAction(app.componentId, MaintenanceApplicationActionId.DETAILS))
-                                },
-                            )
+                    TaskTopBar(
+                        title = stringResource(R.string.maintenance_manage_apps),
+                        iconName = actionIcon(MaintenanceActionId.MANAGE_APPS),
+                        onBack = onBack,
+                    )
+                    LazyColumn(
+                        modifier = Modifier.weight(1f),
+                        state = applicationListState,
+                        verticalArrangement = Arrangement.spacedBy(InstallerDimensions.ListSpacing),
+                    ) {
+                        if (state.feedback?.status == MaintenanceActionStatus.RUNNING && state.applications.isEmpty()) {
+                            item { MaintenanceActionWaiting() }
+                        } else {
+                            items(state.applications, key = { it.componentId }) { app ->
+                                ManagedApplicationCard(
+                                    app = app,
+                                    action = state.applicationAction,
+                                    onStart = { onIntent(InstallUiIntent.MaintenanceApplicationAction(app.componentId, MaintenanceApplicationActionId.START)) },
+                                    onForceStop = { onIntent(InstallUiIntent.MaintenanceApplicationAction(app.componentId, MaintenanceApplicationActionId.FORCE_STOP)) },
+                                    onUninstall = { pendingUninstall = app },
+                                    onDetails = {
+                                        onPageChange(ApplicationMaintenancePage.DETAILS)
+                                        onIntent(InstallUiIntent.MaintenanceApplicationAction(app.componentId, MaintenanceApplicationActionId.DETAILS))
+                                    },
+                                )
+                            }
                         }
                     }
-                    state.applicationAction?.takeIf { it.actionId == MaintenanceApplicationActionId.START || it.actionId == MaintenanceApplicationActionId.FORCE_STOP }
-                        ?.let { feedback -> item { ApplicationActionToast(feedback, state.applications) } }
+                    Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
                 }
-                Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
+                state.applicationAction
+                    ?.takeIf { it.actionId == MaintenanceApplicationActionId.START || it.actionId == MaintenanceApplicationActionId.FORCE_STOP }
+                    ?.let { feedback -> ApplicationActionToast(feedback, state.applications) }
             }
         }
 
@@ -543,6 +607,7 @@ private fun ManagedApplicationCard(
     onUninstall: () -> Unit,
     onDetails: () -> Unit,
 ) {
+    val actionEnabled = action?.status != MaintenanceActionStatus.RUNNING
     PressableSurface(onClick = {}, enabled = false, minHeight = 132.dp) {
         Column(modifier = Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -565,12 +630,12 @@ private fun ManagedApplicationCard(
                 )
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                IconTextActionButton(stringResource(R.string.maintenance_start), "play", onStart, Modifier.weight(1f), app.installed)
-                IconTextActionButton(stringResource(R.string.maintenance_force_stop), "square", onForceStop, Modifier.weight(1f), app.installed)
+                IconTextActionButton(stringResource(R.string.maintenance_start), "play", onStart, Modifier.weight(1f), app.installed && actionEnabled)
+                IconTextActionButton(stringResource(R.string.maintenance_force_stop), "square", onForceStop, Modifier.weight(1f), app.installed && actionEnabled)
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
-                IconTextActionButton(stringResource(R.string.maintenance_uninstall), "trash_2", onUninstall, Modifier.weight(1f), app.installed)
-                IconTextActionButton(stringResource(R.string.maintenance_details), "info", onDetails, Modifier.weight(1f))
+                IconTextActionButton(stringResource(R.string.maintenance_uninstall), "trash_2", onUninstall, Modifier.weight(1f), app.installed && actionEnabled)
+                IconTextActionButton(stringResource(R.string.maintenance_details), "info", onDetails, Modifier.weight(1f), actionEnabled)
             }
         }
     }
@@ -581,6 +646,17 @@ private fun ApplicationActionToast(
     feedback: MaintenanceApplicationFeedback,
     applications: List<MaintenanceApplicationRow>,
 ) {
+    var visible by remember(feedback.componentId, feedback.actionId, feedback.status, feedback.resultCode, feedback.reasonCode) {
+        mutableStateOf(true)
+    }
+    LaunchedEffect(feedback.componentId, feedback.actionId, feedback.status, feedback.resultCode, feedback.reasonCode) {
+        visible = true
+        if (feedback.status != MaintenanceActionStatus.RUNNING) {
+            delay(2200L)
+            visible = false
+        }
+    }
+    if (!visible) return
     val appName = applications.firstOrNull { it.componentId == feedback.componentId }?.displayName ?: feedback.componentId
     val text = when {
         feedback.status == MaintenanceActionStatus.RUNNING -> stringResource(R.string.maintenance_action_running, appName)
@@ -588,7 +664,24 @@ private fun ApplicationActionToast(
         feedback.actionId == MaintenanceApplicationActionId.FORCE_STOP && feedback.status == MaintenanceActionStatus.SUCCEEDED -> stringResource(R.string.maintenance_force_stop_success)
         else -> stringResource(R.string.maintenance_application_action_failed)
     }
-    Text(text = text, color = if (feedback.status == MaintenanceActionStatus.SUCCEEDED) InstallerColors.Success else InstallerColors.Warning)
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(bottom = 56.dp),
+        contentAlignment = Alignment.BottomCenter,
+    ) {
+        Text(
+            text = text,
+            color = InstallerColors.White,
+            style = MaterialTheme.typography.bodyMedium,
+            modifier = Modifier
+                .background(
+                    color = Color(0xE61D232B),
+                    shape = RoundedCornerShape(20.dp),
+                )
+                .padding(horizontal = 18.dp, vertical = 10.dp),
+        )
+    }
 }
 
 @Composable
@@ -607,7 +700,7 @@ private fun MaintenanceApplicationDetailsPage(
         TaskTopBar(
             title = stringResource(R.string.maintenance_details),
             iconName = "info",
-            onBack = onBack.takeIf { !loading },
+            onBack = onBack,
         )
         if (details == null) {
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -657,7 +750,7 @@ private fun MaintenanceUninstallPage(
         TaskTopBar(
             title = application?.displayName ?: stringResource(R.string.maintenance_uninstall_title),
             iconName = "trash_2",
-            onBack = onBack.takeIf { !success && feedback?.status != MaintenanceActionStatus.RUNNING },
+            onBack = onBack,
         )
         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             if (feedback?.status == MaintenanceActionStatus.RUNNING) {
@@ -685,6 +778,8 @@ private fun MaintenanceInstallationSelectionPage(
     onIntent: (InstallUiIntent) -> Unit,
     onBack: () -> Unit,
 ) {
+    val allInstalled = selection.options.isNotEmpty() && selection.options.all { it.installed }
+    BackHandler(enabled = true, onBack = onBack)
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -707,6 +802,7 @@ private fun MaintenanceInstallationSelectionPage(
                             ),
                         )
                     },
+                    enabled = !option.installed,
                     minHeight = 76.dp,
                 ) {
                     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -729,16 +825,19 @@ private fun MaintenanceInstallationSelectionPage(
                             onCheckedChange = { checked ->
                                 onIntent(InstallUiIntent.ToggleMaintenanceInstallationComponent(option.componentId, checked))
                             },
-                            enabled = !option.required,
+                            enabled = !option.required && !option.installed,
                         )
                     }
                 }
             }
         }
         PrimaryActionButton(
-            text = stringResource(R.string.maintenance_install_start),
-            onClick = { onIntent(InstallUiIntent.StartMaintenanceInstallation) },
-            enabled = selection.selectedComponentIds.isNotEmpty(),
+            text = stringResource(if (allInstalled) R.string.maintenance_install_done else R.string.maintenance_install_start),
+            onClick = {
+                if (allInstalled) onBack()
+                else onIntent(InstallUiIntent.StartMaintenanceInstallation)
+            },
+            enabled = allInstalled || selection.selectedComponentIds.isNotEmpty(),
             modifier = Modifier.fillMaxWidth(),
         )
         Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
@@ -809,7 +908,10 @@ fun MaintenanceActionFlowPage(
     modifier: Modifier = Modifier,
 ) {
     val canNavigateBack = state !is InstallUiState.Installing
-    BackHandler(enabled = canNavigateBack, onBack = onBack)
+    // Consume the gesture while an install is active. The install pipeline is
+    // intentionally not cancellable from this page, but it must not minimize
+    // the activity through the system back dispatcher.
+    BackHandler(enabled = true, onBack = { if (canNavigateBack) onBack() })
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -880,6 +982,7 @@ private fun MaintenanceInstallProgress(
             text = stringResource(R.string.install_keep_screen_on),
             style = MaterialTheme.typography.bodySmall,
             color = InstallerColors.AuxiliaryWhite,
+            textAlign = TextAlign.Center,
             modifier = Modifier.fillMaxWidth(),
         )
         Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
@@ -979,12 +1082,12 @@ private fun MaintenanceInstallResult(
             InstallUiIntent.EnterMaintenance,
         )
         ResultKind.PARTIAL_FAILURE -> ResultFlowCopy(
-            R.string.result_partial_failure_title,
-            R.string.result_partial_failure_description,
+            R.string.result_failure_title,
+            null,
             "triangle_alert",
             InstallerColors.Warning,
             if (state.canEnterMaintenance) R.string.result_enter_maintenance else R.string.result_retry,
-            if (state.canEnterMaintenance) InstallUiIntent.EnterMaintenance else InstallUiIntent.RetryInstallation,
+            if (state.canEnterMaintenance) InstallUiIntent.EnterMaintenance else InstallUiIntent.ReturnToSelection,
         )
         ResultKind.PAUSED -> ResultFlowCopy(
             R.string.result_paused_title,
@@ -995,28 +1098,28 @@ private fun MaintenanceInstallResult(
             InstallUiIntent.ContinueInstallation,
         )
         ResultKind.DOWNLOAD_FAILED -> ResultFlowCopy(
-            R.string.result_download_failed_title,
-            R.string.result_download_failed_description,
+            R.string.result_failure_title,
+            null,
             "cloud_off",
             InstallerColors.Error,
             R.string.result_retry,
-            InstallUiIntent.RetryInstallation,
+            InstallUiIntent.ReturnToSelection,
         )
         ResultKind.INSTALLATION_FAILED -> ResultFlowCopy(
-            R.string.result_install_failed_title,
-            R.string.result_install_failed_description,
+            R.string.result_failure_title,
+            null,
             "triangle_alert",
             InstallerColors.Error,
-            R.string.result_continue,
-            InstallUiIntent.ContinueInstallation,
+            R.string.result_retry,
+            InstallUiIntent.ReturnToSelection,
         )
         ResultKind.CONFIGURATION_FAILED -> ResultFlowCopy(
-            R.string.result_configuration_failed_title,
-            R.string.result_configuration_failed_description,
+            R.string.result_failure_title,
+            null,
             "settings_2",
             InstallerColors.Warning,
-            R.string.result_reconfigure,
-            InstallUiIntent.Reconfigure,
+            R.string.result_retry,
+            InstallUiIntent.ReturnToSelection,
         )
     }
     Column(
@@ -1032,8 +1135,23 @@ private fun MaintenanceInstallResult(
             tint = tint,
             modifier = Modifier.align(Alignment.CenterHorizontally),
         )
-        Text(text = stringResource(title), style = MaterialTheme.typography.headlineSmall, color = InstallerColors.White)
-        Text(text = stringResource(description), style = MaterialTheme.typography.bodyLarge, color = InstallerColors.AuxiliaryWhite)
+        Text(
+            text = stringResource(title),
+            style = MaterialTheme.typography.headlineSmall,
+            color = InstallerColors.White,
+            textAlign = if (state.kind == ResultKind.SUCCESS || state.kind == ResultKind.PAUSED) androidx.compose.ui.text.style.TextAlign.Start else androidx.compose.ui.text.style.TextAlign.Center,
+            modifier = Modifier.fillMaxWidth(),
+        )
+        description?.let { copy ->
+            Text(
+                text = stringResource(copy),
+                style = MaterialTheme.typography.bodyLarge,
+                color = InstallerColors.AuxiliaryWhite,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        Spacer(modifier = Modifier.height(InstallerDimensions.SectionVerticalSpacing))
         LazyColumn(
             modifier = Modifier.weight(1f),
             verticalArrangement = Arrangement.spacedBy(InstallerDimensions.ListSpacing),
@@ -1043,15 +1161,23 @@ private fun MaintenanceInstallResult(
                     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text(text = result.componentName, style = MaterialTheme.typography.bodyLarge, color = InstallerColors.White)
-                            Text(
-                                text = listOf(
-                                    stringResource(if (result.installed) R.string.result_status_installed else R.string.result_status_not_installed),
-                                    stringResource(if (result.configured) R.string.result_status_configured else R.string.result_status_not_configured),
-                                    stringResource(if (result.available) R.string.result_status_available else R.string.result_status_not_available),
-                                ).joinToString(" · "),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = InstallerColors.AuxiliaryWhite,
-                            )
+                            if (result.errorReason != null) {
+                                Text(
+                                    text = result.errorReason,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = InstallerColors.Warning,
+                                )
+                            } else {
+                                Text(
+                                    text = listOf(
+                                        stringResource(if (result.installed) R.string.result_status_installed else R.string.result_status_not_installed),
+                                        stringResource(if (result.configured) R.string.result_status_configured else R.string.result_status_not_configured),
+                                        stringResource(if (result.available) R.string.result_status_available else R.string.result_status_not_available),
+                                    ).joinToString(" · "),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = InstallerColors.AuxiliaryWhite,
+                                )
+                            }
                         }
                         StatusIcon(
                             name = if (result.installed && result.configured && result.available) "circle_check" else "circle_alert",
@@ -1079,7 +1205,7 @@ private fun MaintenanceInstallResult(
 
 private data class ResultFlowCopy(
     val title: Int,
-    val description: Int,
+    val description: Int?,
     val icon: String,
     val tint: androidx.compose.ui.graphics.Color,
     val actionText: Int,
@@ -1140,7 +1266,8 @@ private fun MaintenanceActionPage(
     onBack: () -> Unit,
 ) {
     val feedback = state.feedback?.takeIf { it.actionId == action }
-    val canNavigateBack = feedback?.status != MaintenanceActionStatus.RUNNING
+    val canNavigateBack = true
+    BackHandler(enabled = true, onBack = onBack)
     Column(
         modifier = Modifier
             .fillMaxSize()
@@ -1149,7 +1276,7 @@ private fun MaintenanceActionPage(
     ) {
         TaskTopBar(
             title = stringResource(actionTitle(action)),
-            onBack = onBack.takeIf { canNavigateBack },
+            onBack = onBack,
             iconName = actionIcon(action),
         )
         LazyColumn(
