@@ -5,6 +5,7 @@ import com.ninepointnine.helper.domain.artifact.ArtifactManifestValidator
 import com.ninepointnine.helper.domain.artifact.ArtifactSourceKind
 import com.ninepointnine.helper.domain.artifact.ManifestValidation
 import com.ninepointnine.helper.domain.artifact.ReleaseSourcePolicy
+import com.ninepointnine.helper.domain.artifact.InstallerSelfIdentity
 import java.security.KeyFactory
 import java.security.Signature
 import java.security.spec.X509EncodedKeySpec
@@ -143,6 +144,11 @@ class CloudReleaseCatalogAdapter(
             ManifestValidation.Valid -> Unit
         }
         val orderedManifests = manifests.map { manifest ->
+            if (InstallerSelfIdentity.isSelfComponentId(manifest.componentId) &&
+                manifest.packageName != InstallerSelfIdentity.PACKAGE_NAME
+            ) {
+                return CatalogLoadResult.Failure("catalog_self_package_mismatch", retryable = false)
+            }
             when (val plan = sourcePolicy.plan(manifest)) {
                 is com.ninepointnine.helper.domain.artifact.SourcePlan.Rejected -> {
                     return CatalogLoadResult.Failure(plan.reasonCode, retryable = false)

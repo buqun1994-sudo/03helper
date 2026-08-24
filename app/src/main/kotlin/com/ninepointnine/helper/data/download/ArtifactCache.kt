@@ -194,6 +194,11 @@ class ArtifactCache(
         }
     }
 
+    /** Removes only the installer's private working files after an install run. */
+    fun clearPrivateCache() {
+        root.listFiles()?.forEach { file -> file.deleteRecursively() }
+    }
+
     fun writeResumeMetadata(manifest: ArtifactManifest, sourceKind: String) {
         val paths = paths(manifest)
         paths.resumeMetadata.writeText(

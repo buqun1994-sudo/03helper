@@ -8,6 +8,7 @@ import com.ninepointnine.helper.domain.session.InstallPhase
 import com.ninepointnine.helper.domain.session.InstallationSessionSnapshot
 import com.ninepointnine.helper.domain.session.InstallationSessionState
 import com.ninepointnine.helper.domain.session.ResultKind
+import com.ninepointnine.helper.domain.session.MaintenanceApplicationActionId
 import com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
 
 object InstallUiStateMapper {
@@ -81,7 +82,84 @@ object InstallUiStateMapper {
                     componentId = application.componentId,
                     displayName = snapshot.components.firstOrNull { it.id == application.componentId }
                         ?.displayName ?: application.componentId,
+                    packageName = application.packageName,
                     installed = application.installed,
+                    versionLabel = application.versionLabel,
+                    versionCode = application.versionCode,
+                    fileSizeBytes = application.fileSizeBytes,
+                    installTimeEpochMillis = application.installTimeEpochMillis,
+                    updateTimeEpochMillis = application.updateTimeEpochMillis,
+                    filePath = application.filePath,
+                    uid = application.uid,
+                    iconKey = application.componentId,
+                )
+            },
+            updateStatuses = snapshot.maintenance.updateStatuses.map { status ->
+                MaintenanceUpdateRow(
+                    componentId = status.componentId,
+                    displayName = status.displayName,
+                    versionLabel = status.versionLabel,
+                    installedVersionLabel = status.installedVersionLabel,
+                    state = status.state,
+                    isSelf = status.isSelf,
+                    iconKey = status.iconKey,
+                )
+            },
+            authorization = MaintenanceAuthorizationUi(
+                state = snapshot.maintenance.authorization.state,
+                currentComponentId = snapshot.maintenance.authorization.currentComponentId,
+                applications = snapshot.maintenance.authorization.applications.map { item ->
+                    val managed = snapshot.maintenance.managedApplications
+                        .firstOrNull { application -> application.componentId == item.componentId }
+                    MaintenanceAuthorizationRow(
+                        componentId = item.componentId,
+                        packageName = item.packageName,
+                        versionLabel = managed?.versionLabel
+                            ?: snapshot.components.firstOrNull { component -> component.id == item.componentId }?.versionLabel,
+                        state = item.state,
+                        authorized = item.authorized,
+                        reasonCode = item.reasonCode,
+                    )
+                },
+            ),
+            applicationAction = snapshot.maintenance.applicationAction?.let { action ->
+                MaintenanceApplicationFeedback(
+                    componentId = action.componentId,
+                    actionId = action.actionId,
+                    status = action.status,
+                    resultCode = action.resultCode,
+                    reasonCode = action.reasonCode,
+                )
+            },
+            applicationDetails = snapshot.maintenance.applicationDetails?.let { details ->
+                MaintenanceApplicationDetailsRow(
+                    componentId = details.componentId,
+                    displayName = details.displayName,
+                    packageName = details.packageName,
+                    versionLabel = details.versionLabel,
+                    versionCode = details.versionCode,
+                    fileSizeBytes = details.fileSizeBytes,
+                    installTimeEpochMillis = details.installTimeEpochMillis,
+                    updateTimeEpochMillis = details.updateTimeEpochMillis,
+                    filePath = details.filePath,
+                    uid = details.uid,
+                )
+            },
+            installationSelection = snapshot.maintenance.installationSelection?.let { selection ->
+                MaintenanceInstallationSelectionUi(
+                    actionId = selection.actionId,
+                    options = selection.options.map { option ->
+                        MaintenanceInstallationOptionRow(
+                            componentId = option.componentId,
+                            displayName = option.displayName,
+                            versionLabel = option.versionLabel,
+                            sizeLabel = option.sizeLabel,
+                            installed = option.installed,
+                            required = option.required,
+                            iconKey = option.iconKey,
+                        )
+                    },
+                    selectedComponentIds = selection.selectedComponentIds,
                 )
             },
         )

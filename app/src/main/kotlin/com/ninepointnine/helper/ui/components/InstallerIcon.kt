@@ -80,6 +80,7 @@ private fun componentLogoDrawable(iconKey: String): Int = when (iconKey) {
 }
 
 private fun componentFallbackIcon(iconKey: String): String = when (iconKey) {
+    "03helper", "helper" -> "car_front"
     "desktop" -> "panels_top_left"
     "lyrics" -> "music_2"
     "file-manager" -> "folder_plus"
@@ -104,11 +105,14 @@ private fun lucideDrawable(name: String): Int = when (name) {
     "music_2" -> LucideR.drawable.lucide_ic_music_2
     "package_x" -> LucideR.drawable.lucide_ic_package_x
     "panels_top_left" -> LucideR.drawable.lucide_ic_panels_top_left
+    "play" -> LucideR.drawable.lucide_ic_play
     "refresh_cw" -> LucideR.drawable.lucide_ic_refresh_cw
     "search" -> LucideR.drawable.lucide_ic_search
     "settings_2" -> LucideR.drawable.lucide_ic_settings_2
     "trash_2" -> LucideR.drawable.lucide_ic_trash_2
     "triangle_alert" -> LucideR.drawable.lucide_ic_triangle_alert
+    "square" -> LucideR.drawable.lucide_ic_square
+    "info" -> LucideR.drawable.lucide_ic_info
     "wifi_off" -> LucideR.drawable.lucide_ic_wifi_off
     "wrench" -> LucideR.drawable.lucide_ic_wrench
     else -> 0

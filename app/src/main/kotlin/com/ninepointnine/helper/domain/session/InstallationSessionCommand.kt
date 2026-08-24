@@ -10,6 +10,7 @@ import com.ninepointnine.helper.domain.artifact.SourceSelectionEvidence
 import com.ninepointnine.helper.domain.device.AuthorizationActionEvidence
 import com.ninepointnine.helper.domain.device.DeviceAvailabilityEvidence
 import com.ninepointnine.helper.domain.device.InstalledArtifactEvidence
+import com.ninepointnine.helper.domain.device.ManagedApplicationAuthorizationStatus
 
 /** Commands accepted by the single installation-session owner. */
 sealed interface InstallationSessionCommand {
@@ -38,6 +39,15 @@ sealed interface InstallationSessionCommand {
     data object DisconnectDevice : InstallationSessionCommand
     data object EnterMaintenance : InstallationSessionCommand
     data class MaintenanceAction(val actionId: MaintenanceActionId) : InstallationSessionCommand
+    data class MaintenanceApplicationAction(
+        val componentId: String,
+        val actionId: MaintenanceApplicationActionId,
+    ) : InstallationSessionCommand
+    data class ToggleMaintenanceInstallationComponent(
+        val componentId: String,
+        val selected: Boolean,
+    ) : InstallationSessionCommand
+    data object StartMaintenanceInstallation : InstallationSessionCommand
 
     /** An event emitted by a discovery or installation adapter. */
     data class AdapterEvent(
@@ -209,6 +219,36 @@ sealed interface InstallationSessionEvent {
         val applications: List<ManagedApplicationStatus>,
     ) : InstallationSessionEvent
 
+    data class MaintenanceApplicationActionCompleted(
+        val componentId: String,
+        val actionId: MaintenanceApplicationActionId,
+        val resultCode: String = "completed",
+    ) : InstallationSessionEvent
+
+    data class MaintenanceApplicationActionFailed(
+        val componentId: String,
+        val actionId: MaintenanceApplicationActionId,
+        val reasonCode: String,
+        val retryable: Boolean = true,
+    ) : InstallationSessionEvent
+
+    data class MaintenanceApplicationDetailsResolved(
+        val details: ManagedApplicationDetails,
+    ) : InstallationSessionEvent
+
+    data class MaintenanceAuthorizationCheckStarted(
+        val componentIds: List<String>,
+    ) : InstallationSessionEvent
+
+    data class MaintenanceAuthorizationCheckProgress(
+        val componentId: String,
+        val status: ManagedApplicationAuthorizationStatus,
+    ) : InstallationSessionEvent
+
+    data class MaintenanceAuthorizationChecked(
+        val applications: List<ManagedApplicationAuthorizationStatus>,
+    ) : InstallationSessionEvent
+
     data class MaintenanceCatalogRefreshed(
         val catalogVersion: String,
         val keyId: String,
@@ -217,6 +257,7 @@ sealed interface InstallationSessionEvent {
         val apps: List<ComponentDescriptor> = emptyList(),
         val appFailures: Map<String, String> = emptyMap(),
         val catalogRevision: Long = 0L,
+        val updateStatuses: List<MaintenanceUpdateStatus> = emptyList(),
     ) : InstallationSessionEvent
 
     data class RecoverableError(

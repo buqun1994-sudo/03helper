@@ -22,8 +22,14 @@ import com.ninepointnine.helper.domain.device.InstallableArtifact
 import com.ninepointnine.helper.domain.device.InstalledArtifactEvidence
 import com.ninepointnine.helper.domain.device.ManagedApplicationProbe
 import com.ninepointnine.helper.domain.device.ManagedApplicationsResult
+import com.ninepointnine.helper.domain.device.ManagedApplicationDetailsProbe
+import com.ninepointnine.helper.domain.device.ManagedApplicationDetailsProbeResult
+import com.ninepointnine.helper.domain.device.ManagedApplicationAuthorizationStatus
+import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationResult
+import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationState
 import com.ninepointnine.helper.domain.device.MaintenanceCommandGateway
 import com.ninepointnine.helper.domain.device.MaintenanceDeviceResult
+import com.ninepointnine.helper.domain.session.MaintenanceApplicationActionId
 import android.util.Log
 import dadb.AdbShellResponse
 import dadb.Dadb
@@ -323,16 +329,153 @@ internal class DadbCommandGateway(
         val applications = mutableListOf<ManagedApplicationProbe>()
         components.forEach { component ->
             when (val result = inspectInstalledPackage(component.componentId, component.packageName)) {
-                is PackageInspection.Completed -> applications += ManagedApplicationProbe(
-                    componentId = component.componentId,
-                    packageName = component.packageName,
-                    installed = result.installed,
-                )
+                is PackageInspection.Completed -> applications += result.toProbe(component)
 
                 is PackageInspection.Failed -> return@withLease ManagedApplicationsResult.Failed(result.failure)
             }
         }
         ManagedApplicationsResult.Completed(applications)
+    }
+
+    override suspend fun inspectAuthorization(
+        manifests: List<com.ninepointnine.helper.domain.artifact.ArtifactManifest>,
+    ): MaintenanceAuthorizationResult = withLease(
+        whenClosed = MaintenanceAuthorizationResult.Failed(
+            DeviceActionFailure("adb_connection_closed", retryable = true),
+        ),
+    ) {
+        if (manifests.isEmpty() || manifests.map { it.componentId }.toSet().size != manifests.size) {
+            return@withLease MaintenanceAuthorizationResult.Failed(
+                DeviceActionFailure("maintenance_manifest_selection_mismatch", retryable = false),
+            )
+        }
+        val statuses = manifests.map { manifest ->
+            when (val result = inspectInstalledPackage(manifest.componentId, manifest.packageName)) {
+                is PackageInspection.Completed -> ManagedApplicationAuthorizationStatus(
+                    componentId = manifest.componentId,
+                    packageName = manifest.packageName,
+                    authorized = result.installed,
+                    state = if (result.installed) {
+                        MaintenanceAuthorizationState.AUTHORIZED
+                    } else {
+                        MaintenanceAuthorizationState.NOT_AUTHORIZED
+                    },
+                    reasonCode = if (result.installed) null else "package_not_installed",
+                )
+
+                is PackageInspection.Failed -> ManagedApplicationAuthorizationStatus(
+                    componentId = manifest.componentId,
+                    packageName = manifest.packageName,
+                    authorized = null,
+                    state = MaintenanceAuthorizationState.ERROR,
+                    reasonCode = result.failure.reasonCode,
+                )
+            }
+        }
+        MaintenanceAuthorizationResult.Completed(statuses)
+    }
+
+    override suspend fun performApplicationAction(
+        component: com.ninepointnine.helper.domain.device.ManagedComponent,
+        actionId: MaintenanceApplicationActionId,
+    ): MaintenanceDeviceResult = withLease(
+        whenClosed = MaintenanceDeviceResult.Failed(
+            DeviceActionFailure("adb_connection_closed", retryable = true),
+        ),
+    ) {
+        if (!COMPONENT_ID_PATTERN.matches(component.componentId) ||
+            !PACKAGE_NAME_PATTERN.matches(component.packageName)
+        ) {
+            return@withLease MaintenanceDeviceResult.Failed(
+                DeviceActionFailure("maintenance_component_identity_invalid", component.componentId, retryable = false),
+            )
+        }
+        when (val installed = inspectInstalledPackage(component.componentId, component.packageName)) {
+            is PackageInspection.Failed -> return@withLease MaintenanceDeviceResult.Failed(installed.failure)
+            is PackageInspection.Completed -> if (!installed.installed) {
+                return@withLease MaintenanceDeviceResult.Failed(
+                    DeviceActionFailure("maintenance_component_not_installed", component.componentId, retryable = false),
+                )
+            }
+        }
+        when (actionId) {
+            MaintenanceApplicationActionId.START -> {
+                val launchComponent = AuthorizationPlanFactory.fixedLaunchComponent(component)
+                if (launchComponent == null) {
+                    MaintenanceDeviceResult.Failed(
+                        DeviceActionFailure("maintenance_launch_unavailable", component.componentId, retryable = false),
+                    )
+                } else {
+                    val launch = shell("am start -n ${shellArgument(launchComponent)}")
+                    val process = shell("pidof ${shellArgument(component.packageName)}")
+                    if (!isSuccessful(launch) || !isSuccessful(process) || process?.output?.trim().isNullOrBlank()) {
+                        MaintenanceDeviceResult.Failed(
+                            DeviceActionFailure("maintenance_launch_failed", component.componentId, retryable = true),
+                        )
+                    } else {
+                        MaintenanceDeviceResult.Completed("component_launched")
+                    }
+                }
+            }
+            MaintenanceApplicationActionId.FORCE_STOP -> {
+                val response = shell("am force-stop ${shellArgument(component.packageName)}")
+                if (!isSuccessful(response)) {
+                    MaintenanceDeviceResult.Failed(
+                        DeviceActionFailure("maintenance_force_stop_failed", component.componentId, retryable = true),
+                    )
+                } else {
+                    MaintenanceDeviceResult.Completed("component_force_stopped")
+                }
+            }
+
+            MaintenanceApplicationActionId.UNINSTALL -> {
+                val response = shell("pm uninstall ${shellArgument(component.packageName)}")
+                if (!isSuccessful(response) || !response?.output.orEmpty().trim().equals("Success", ignoreCase = true)) {
+                    MaintenanceDeviceResult.Failed(
+                        DeviceActionFailure("maintenance_uninstall_failed", component.componentId, retryable = true),
+                    )
+                } else {
+                    MaintenanceDeviceResult.Completed("component_uninstalled")
+                }
+            }
+
+            MaintenanceApplicationActionId.DETAILS -> MaintenanceDeviceResult.Failed(
+                DeviceActionFailure("maintenance_application_details_unavailable", component.componentId, retryable = false),
+            )
+        }
+    }
+
+    override suspend fun inspectManagedApplicationDetails(
+        component: com.ninepointnine.helper.domain.device.ManagedComponent,
+    ): ManagedApplicationDetailsProbeResult = withLease(
+        whenClosed = ManagedApplicationDetailsProbeResult.Failed(
+            DeviceActionFailure("adb_connection_closed", retryable = true),
+        ),
+    ) {
+        if (!COMPONENT_ID_PATTERN.matches(component.componentId) ||
+            !PACKAGE_NAME_PATTERN.matches(component.packageName)
+        ) {
+            return@withLease ManagedApplicationDetailsProbeResult.Failed(
+                DeviceActionFailure("maintenance_component_identity_invalid", component.componentId, retryable = false),
+            )
+        }
+        when (val result = inspectInstalledPackage(component.componentId, component.packageName)) {
+            is PackageInspection.Failed -> ManagedApplicationDetailsProbeResult.Failed(result.failure)
+            is PackageInspection.Completed -> ManagedApplicationDetailsProbeResult.Completed(
+                ManagedApplicationDetailsProbe(
+                    componentId = component.componentId,
+                    packageName = component.packageName,
+                    installed = result.installed,
+                    versionLabel = result.versionLabel,
+                    versionCode = result.versionCode,
+                    fileSizeBytes = result.fileSizeBytes,
+                    installTimeEpochMillis = result.installTimeEpochMillis,
+                    updateTimeEpochMillis = result.updateTimeEpochMillis,
+                    filePath = result.filePath,
+                    uid = result.uid,
+                ),
+            )
+        }
     }
 
     override suspend fun launchManagedComponent(componentId: String): MaintenanceDeviceResult = withLease(
@@ -634,8 +777,46 @@ internal class DadbCommandGateway(
                 DeviceActionFailure("maintenance_package_identity_invalid", componentId, retryable = false),
             )
         }
-        return PackageInspection.Completed(installed = true)
+        val packageInfo = shell("dumpsys package ${shellArgument(packageName)}")
+            ?: return PackageInspection.Failed(
+                DeviceActionFailure("maintenance_package_details_failed", componentId, retryable = true),
+            )
+        if (!isSuccessful(packageInfo)) {
+            return PackageInspection.Failed(
+                DeviceActionFailure("maintenance_package_details_failed", componentId, retryable = true),
+            )
+        }
+        val output = packageInfo.output
+        val versionCode = Regex("versionCode=(\\d+)").find(output)?.groupValues?.getOrNull(1)?.toLongOrNull()
+        val versionLabel = Regex("versionName=([^\\s}]+)").find(output)?.groupValues?.getOrNull(1)
+        val uid = Regex("userId=(\\d+)").find(output)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        val firstInstall = Regex("firstInstallTime=([^\\s]+)").find(output)?.groupValues?.getOrNull(1)
+            ?.let(::parseEpochMillis)
+        val lastUpdate = Regex("lastUpdateTime=([^\\s]+)").find(output)?.groupValues?.getOrNull(1)
+            ?.let(::parseEpochMillis)
+        val filePath = paths.single()
+        val fileSize = shell("stat -c %s ${shellArgument(filePath)}")
+            ?.takeIf(::isSuccessful)
+            ?.output
+            ?.trim()
+            ?.lineSequence()
+            ?.firstOrNull()
+            ?.toLongOrNull()
+        return PackageInspection.Completed(
+            installed = true,
+            versionLabel = versionLabel,
+            versionCode = versionCode,
+            fileSizeBytes = fileSize,
+            installTimeEpochMillis = firstInstall,
+            updateTimeEpochMillis = lastUpdate,
+            filePath = filePath,
+            uid = uid,
+        )
     }
+
+    private fun parseEpochMillis(value: String): Long? = runCatching {
+        java.time.Instant.parse(value).toEpochMilli()
+    }.getOrNull()
 
     private fun remoteApkPath(artifact: InstallableArtifact): String? {
         val componentId = artifact.manifest.componentId
@@ -699,7 +880,30 @@ internal class DadbCommandGateway(
     }
 
     private sealed interface PackageInspection {
-        data class Completed(val installed: Boolean) : PackageInspection
+        data class Completed(
+            val installed: Boolean,
+            val versionLabel: String? = null,
+            val versionCode: Long? = null,
+            val fileSizeBytes: Long? = null,
+            val installTimeEpochMillis: Long? = null,
+            val updateTimeEpochMillis: Long? = null,
+            val filePath: String? = null,
+            val uid: Int? = null,
+        ) : PackageInspection {
+            fun toProbe(component: com.ninepointnine.helper.domain.device.ManagedComponent) =
+                ManagedApplicationProbe(
+                    componentId = component.componentId,
+                    packageName = component.packageName,
+                    installed = installed,
+                    versionLabel = versionLabel,
+                    versionCode = versionCode,
+                    fileSizeBytes = fileSizeBytes,
+                    installTimeEpochMillis = installTimeEpochMillis,
+                    updateTimeEpochMillis = updateTimeEpochMillis,
+                    filePath = filePath,
+                    uid = uid,
+                )
+        }
 
         data class Failed(val failure: DeviceActionFailure) : PackageInspection
     }

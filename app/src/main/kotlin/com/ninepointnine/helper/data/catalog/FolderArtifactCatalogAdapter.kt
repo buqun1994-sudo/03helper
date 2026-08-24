@@ -22,6 +22,7 @@ import com.ninepointnine.helper.domain.artifact.ManifestValidation
 import com.ninepointnine.helper.domain.artifact.ReleaseSourcePolicy
 import com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
 import com.ninepointnine.helper.domain.artifact.InstallerPublisherTrustRegistry
+import com.ninepointnine.helper.domain.artifact.InstallerSelfIdentity
 import com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
 import com.ninepointnine.helper.domain.device.ManagedComponent
 import com.ninepointnine.helper.domain.session.ComponentProgressStatus
@@ -111,13 +112,16 @@ class FolderArtifactCatalogAdapter(
                 manifests = emptyList(),
                 apps = config.declaredApps()
                     .filter { it.enabled }
+                    .filterNot { InstallerSelfIdentity.isSelfComponentId(it.componentId) }
                     .map { app ->
                         // catalogVersion is an internal revision identifier,
                         // never a user-facing application version. A missing
                         // hint remains unknown until a verified APK supplies it.
                         listedAppsById[app.componentId]?.component ?: app
                     },
-                appFailures = folder.appFailures.map {
+                appFailures = folder.appFailures.filterNot {
+                    InstallerSelfIdentity.isSelfComponentId(it.componentId)
+                }.map {
                     CatalogAppFailure(it.componentId, it.reasonCode, it.retryable)
                 },
                 catalogRevision = config.catalogRevision,
@@ -374,6 +378,11 @@ class FolderArtifactCatalogAdapter(
             if (component.packageName.isNotBlank() && metadata.packageName != component.packageName) {
                 return ManifestBuildResult.Failure("distribution_apk_package_mismatch", retryable = false)
             }
+            if (InstallerSelfIdentity.isSelfComponentId(component.componentId) &&
+                metadata.packageName != InstallerSelfIdentity.PACKAGE_NAME
+            ) {
+                return ManifestBuildResult.Failure("distribution_self_apk_package_mismatch", retryable = false)
+            }
             if (!InstallerPublisherTrustRegistry.isKnownProfile(component.trustProfileId)) {
                 return ManifestBuildResult.Failure("distribution_trust_profile_invalid", retryable = false)
             }
@@ -539,6 +548,11 @@ class FolderArtifactCatalogAdapter(
                     return@mapNotNull null
                 }
                 if (component.packageName.isNotBlank() && metadata.packageName != component.packageName) {
+                    return@mapNotNull null
+                }
+                if (InstallerSelfIdentity.isSelfComponentId(component.componentId) &&
+                    metadata.packageName != InstallerSelfIdentity.PACKAGE_NAME
+                ) {
                     return@mapNotNull null
                 }
                 val trustedComponent = InstallerComponentTrustRegistry.get(component.componentId)

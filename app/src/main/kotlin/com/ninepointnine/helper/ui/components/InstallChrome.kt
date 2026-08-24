@@ -9,6 +9,7 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -17,9 +18,12 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
+import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
@@ -37,6 +41,7 @@ fun TaskTopBar(
     title: String,
     modifier: Modifier = Modifier,
     onBack: (() -> Unit)? = null,
+    iconName: String? = null,
 ) {
     Row(
         modifier = modifier
@@ -45,33 +50,32 @@ fun TaskTopBar(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (onBack != null) {
-            PressableSurface(
+            IconButton(
                 onClick = onBack,
                 modifier = Modifier.size(48.dp),
-                minHeight = 48.dp,
-                containerColor = InstallerColors.PageBlue,
-                pressedColor = InstallerColors.PressedBlue,
-                borderColor = InstallerColors.WhiteBorder,
-                contentPadding = androidx.compose.foundation.layout.PaddingValues(0.dp),
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.Center,
-                ) {
-                    InstallerIcon(
-                        name = "arrow_left",
-                        contentDescription = stringResource(R.string.navigation_back),
-                        tint = InstallerColors.White,
-                        size = 24.dp,
-                    )
-                }
+                InstallerIcon(
+                    name = "arrow_left",
+                    contentDescription = stringResource(R.string.navigation_back),
+                    tint = InstallerColors.White,
+                    size = 24.dp,
+                )
             }
+        }
+        if (iconName != null) {
+            InstallerIcon(
+                name = iconName,
+                contentDescription = title,
+                tint = InstallerColors.White,
+                size = 24.dp,
+                modifier = Modifier.padding(start = if (onBack != null) 4.dp else 0.dp),
+            )
         }
         Text(
             text = title,
             style = androidx.compose.material3.MaterialTheme.typography.titleLarge,
             color = InstallerColors.White,
-            modifier = if (onBack != null) Modifier.padding(start = 12.dp) else Modifier,
+            modifier = Modifier.padding(start = 10.dp),
         )
     }
 }
@@ -167,6 +171,40 @@ fun PrimaryActionButton(
                 style = androidx.compose.material3.MaterialTheme.typography.bodyLarge,
                 color = InstallerColors.PressedBlue,
             )
+        }
+    }
+}
+
+@Composable
+fun IconTextActionButton(
+    text: String,
+    iconName: String,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+    enabled: Boolean = true,
+) {
+    val contentAlpha by androidx.compose.animation.core.animateFloatAsState(
+        targetValue = if (enabled) 1f else 0.45f,
+        animationSpec = InstallerMotion.stateChange(),
+        label = "iconTextActionEnabled",
+    )
+    PressableSurface(
+        onClick = onClick,
+        modifier = modifier.alpha(contentAlpha),
+        enabled = enabled,
+        minHeight = 48.dp,
+        containerColor = InstallerColors.PageBlue,
+        pressedColor = InstallerColors.PressedBlue,
+        borderColor = InstallerColors.WhiteBorder,
+        contentPadding = PaddingValues(horizontal = 8.dp, vertical = 0.dp),
+    ) {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            StatusIcon(name = iconName, contentDescription = text, tint = InstallerColors.White, size = 20.dp)
+            Text(text, color = InstallerColors.White, style = androidx.compose.material3.MaterialTheme.typography.labelLarge)
         }
     }
 }

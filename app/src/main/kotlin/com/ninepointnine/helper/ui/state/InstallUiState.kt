@@ -5,8 +5,12 @@ import com.ninepointnine.helper.domain.session.ComponentCompatibility
 import com.ninepointnine.helper.domain.session.InstallPhase
 import com.ninepointnine.helper.domain.session.MaintenanceActionId
 import com.ninepointnine.helper.domain.session.MaintenanceActionStatus
+import com.ninepointnine.helper.domain.session.MaintenanceApplicationActionId
 import com.ninepointnine.helper.domain.session.MaintenanceGroupId
 import com.ninepointnine.helper.domain.session.ResultKind
+import com.ninepointnine.helper.domain.session.MaintenanceUpdateState
+import com.ninepointnine.helper.domain.session.MaintenanceAuthorizationFlowState
+import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationState
 
 sealed interface InstallUiState {
     val screen: InstallScreen
@@ -56,10 +60,14 @@ sealed interface InstallUiState {
         val reconnecting: Boolean = false,
         val feedback: MaintenanceFeedback? = null,
         val applications: List<MaintenanceApplicationRow> = emptyList(),
+        val updateStatuses: List<MaintenanceUpdateRow> = emptyList(),
+        val authorization: MaintenanceAuthorizationUi = MaintenanceAuthorizationUi(),
+        val applicationAction: MaintenanceApplicationFeedback? = null,
+        val applicationDetails: MaintenanceApplicationDetailsRow? = null,
+        val installationSelection: MaintenanceInstallationSelectionUi? = null,
         val groups: List<MaintenanceGroupId> = listOf(
             MaintenanceGroupId.COMMON,
             MaintenanceGroupId.APPS,
-            MaintenanceGroupId.STORAGE,
         ),
     ) : InstallUiState {
         override val screen: InstallScreen = InstallScreen.MAINTENANCE
@@ -139,7 +147,78 @@ data class MaintenanceFeedback(
 data class MaintenanceApplicationRow(
     val componentId: String,
     val displayName: String,
+    val packageName: String = "",
     val installed: Boolean,
+    val versionLabel: String? = null,
+    val versionCode: Long? = null,
+    val fileSizeBytes: Long? = null,
+    val installTimeEpochMillis: Long? = null,
+    val updateTimeEpochMillis: Long? = null,
+    val filePath: String? = null,
+    val uid: Int? = null,
+    val iconKey: String = componentId,
+)
+
+data class MaintenanceUpdateRow(
+    val componentId: String,
+    val displayName: String,
+    val versionLabel: String?,
+    val installedVersionLabel: String?,
+    val state: MaintenanceUpdateState,
+    val isSelf: Boolean,
+    val iconKey: String,
+)
+
+data class MaintenanceAuthorizationUi(
+    val state: MaintenanceAuthorizationFlowState = MaintenanceAuthorizationFlowState.NOT_STARTED,
+    val currentComponentId: String? = null,
+    val applications: List<MaintenanceAuthorizationRow> = emptyList(),
+)
+
+data class MaintenanceAuthorizationRow(
+    val componentId: String,
+    val packageName: String,
+    val versionLabel: String? = null,
+    val state: MaintenanceAuthorizationState,
+    val authorized: Boolean?,
+    val reasonCode: String? = null,
+)
+
+data class MaintenanceApplicationFeedback(
+    val componentId: String,
+    val actionId: MaintenanceApplicationActionId,
+    val status: MaintenanceActionStatus,
+    val resultCode: String? = null,
+    val reasonCode: String? = null,
+)
+
+data class MaintenanceApplicationDetailsRow(
+    val componentId: String,
+    val displayName: String,
+    val packageName: String,
+    val versionLabel: String?,
+    val versionCode: Long?,
+    val fileSizeBytes: Long?,
+    val installTimeEpochMillis: Long?,
+    val updateTimeEpochMillis: Long?,
+    val filePath: String?,
+    val uid: Int?,
+)
+
+data class MaintenanceInstallationSelectionUi(
+    val actionId: MaintenanceActionId,
+    val options: List<MaintenanceInstallationOptionRow>,
+    val selectedComponentIds: Set<String>,
+)
+
+data class MaintenanceInstallationOptionRow(
+    val componentId: String,
+    val displayName: String,
+    val versionLabel: String?,
+    val sizeLabel: String?,
+    val installed: Boolean,
+    val required: Boolean,
+    val iconKey: String,
 )
 
 sealed interface InstallUiIntent {
@@ -157,4 +236,13 @@ sealed interface InstallUiIntent {
     data object Reconfigure : InstallUiIntent
     data object EnterMaintenance : InstallUiIntent
     data class MaintenanceAction(val actionId: MaintenanceActionId) : InstallUiIntent
+    data class MaintenanceApplicationAction(
+        val componentId: String,
+        val actionId: MaintenanceApplicationActionId,
+    ) : InstallUiIntent
+    data class ToggleMaintenanceInstallationComponent(
+        val componentId: String,
+        val selected: Boolean,
+    ) : InstallUiIntent
+    data object StartMaintenanceInstallation : InstallUiIntent
 }

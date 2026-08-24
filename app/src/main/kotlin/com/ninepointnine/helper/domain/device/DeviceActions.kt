@@ -3,6 +3,7 @@ package com.ninepointnine.helper.domain.device
 import com.ninepointnine.helper.domain.artifact.ArtifactManifest
 import com.ninepointnine.helper.domain.artifact.ArtifactVersion
 import com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
+import com.ninepointnine.helper.domain.session.MaintenanceApplicationActionId
 import java.io.File
 import java.util.LinkedHashSet
 
@@ -59,6 +60,31 @@ interface MaintenanceCommandGateway {
     /** Dynamic maintenance launch uses the verified package identity plus a typed catalog setup. */
     suspend fun launchManagedComponent(component: ManagedComponent): MaintenanceDeviceResult =
         launchManagedComponent(component.componentId)
+
+    /** Read-only authorization inspection. Implementations must not mutate the device. */
+    suspend fun inspectAuthorization(
+        manifests: List<ArtifactManifest>,
+    ): MaintenanceAuthorizationResult = MaintenanceAuthorizationResult.Completed(emptyList())
+
+    /** Fixed application operation selected by the maintenance UI. */
+    suspend fun performApplicationAction(
+        component: ManagedComponent,
+        actionId: MaintenanceApplicationActionId,
+    ): MaintenanceDeviceResult = when (actionId) {
+        MaintenanceApplicationActionId.START -> launchManagedComponent(component)
+        MaintenanceApplicationActionId.FORCE_STOP,
+        MaintenanceApplicationActionId.UNINSTALL,
+        MaintenanceApplicationActionId.DETAILS,
+        -> MaintenanceDeviceResult.Failed(
+            DeviceActionFailure("maintenance_application_action_unavailable", component.componentId, retryable = false),
+        )
+    }
+
+    suspend fun inspectManagedApplicationDetails(
+        component: ManagedComponent,
+    ): ManagedApplicationDetailsProbeResult = ManagedApplicationDetailsProbeResult.Failed(
+        DeviceActionFailure("maintenance_application_details_unavailable", component.componentId, retryable = false),
+    )
 }
 
 sealed interface MaintenanceDeviceResult {
@@ -71,7 +97,61 @@ data class ManagedApplicationProbe(
     val componentId: String,
     val packageName: String,
     val installed: Boolean,
+    val versionLabel: String? = null,
+    val versionCode: Long? = null,
+    val fileSizeBytes: Long? = null,
+    val installTimeEpochMillis: Long? = null,
+    val updateTimeEpochMillis: Long? = null,
+    val filePath: String? = null,
+    val uid: Int? = null,
 )
+
+data class ManagedApplicationDetailsProbe(
+    val componentId: String,
+    val packageName: String,
+    val installed: Boolean,
+    val versionLabel: String? = null,
+    val versionCode: Long? = null,
+    val fileSizeBytes: Long? = null,
+    val installTimeEpochMillis: Long? = null,
+    val updateTimeEpochMillis: Long? = null,
+    val filePath: String? = null,
+    val uid: Int? = null,
+)
+
+sealed interface ManagedApplicationDetailsProbeResult {
+    data class Completed(val details: ManagedApplicationDetailsProbe) : ManagedApplicationDetailsProbeResult
+
+    data class Failed(val failure: DeviceActionFailure) : ManagedApplicationDetailsProbeResult
+}
+
+enum class MaintenanceAuthorizationState {
+    CHECKING,
+    AUTHORIZED,
+    NOT_AUTHORIZED,
+    UNKNOWN,
+    ERROR,
+}
+
+data class ManagedApplicationAuthorizationStatus(
+    val componentId: String,
+    val packageName: String,
+    val authorized: Boolean?,
+    val state: MaintenanceAuthorizationState = when (authorized) {
+        true -> MaintenanceAuthorizationState.AUTHORIZED
+        false -> MaintenanceAuthorizationState.NOT_AUTHORIZED
+        null -> MaintenanceAuthorizationState.UNKNOWN
+    },
+    val reasonCode: String? = null,
+)
+
+sealed interface MaintenanceAuthorizationResult {
+    data class Completed(
+        val applications: List<ManagedApplicationAuthorizationStatus>,
+    ) : MaintenanceAuthorizationResult
+
+    data class Failed(val failure: DeviceActionFailure) : MaintenanceAuthorizationResult
+}
 
 sealed interface ManagedApplicationsResult {
     data class Completed(val applications: List<ManagedApplicationProbe>) : ManagedApplicationsResult

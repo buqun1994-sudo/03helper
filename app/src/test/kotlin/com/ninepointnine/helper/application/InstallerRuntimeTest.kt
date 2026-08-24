@@ -143,6 +143,48 @@ class InstallerRuntimeTest {
     }
 
     @Test
+    fun `manual maintenance disconnect does not start a reconnect generation`() = runTest {
+        var discoveryPasses = 0
+        var connectionAttempts = 0
+        val runtime = InstallerRuntime(
+            session = InstallationSession(
+                initialSnapshot = InstallationSessionSnapshot(
+                    state = InstallationSessionState.MAINTENANCE,
+                    device = fakeVehicle().toDeviceSummary().copy(
+                        connectionStatus = DeviceConnectionStatus.DISCONNECTED,
+                    ),
+                ),
+            ),
+            createDiscoveryAdapter = { port ->
+                discoveryPasses += 1
+                DeviceDiscoverySessionAdapter(fakeDiscovery(), port)
+            },
+            createConnectionAdapter = { port ->
+                connectionAttempts += 1
+                fakeConnectionAdapter(port)
+            },
+            loadCatalog = {},
+            coroutineContext = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        runtime.onForeground()
+        advanceUntilIdle()
+        assertEquals(DeviceConnectionStatus.CONFIRMED, runtime.session.currentSnapshot().device?.connectionStatus)
+        val discoveryBeforeDisconnect = discoveryPasses
+        val connectionsBeforeDisconnect = connectionAttempts
+
+        runtime.dispatch(InstallationSessionCommand.DisconnectDevice)
+        advanceUntilIdle()
+
+        val disconnected = runtime.session.currentSnapshot()
+        assertEquals(InstallationSessionState.MAINTENANCE, disconnected.state)
+        assertEquals(DeviceConnectionStatus.DISCONNECTED, disconnected.device?.connectionStatus)
+        assertEquals(discoveryBeforeDisconnect, discoveryPasses)
+        assertEquals(connectionsBeforeDisconnect, connectionAttempts)
+        runtime.close()
+    }
+
+    @Test
     fun `known maintenance reconnect falls back to one bounded discovery pass`() = runTest {
         var discoveryPasses = 0
         var connectionAttempts = 0

@@ -8,6 +8,7 @@ import com.ninepointnine.helper.domain.artifact.ArtifactVersion
 import com.ninepointnine.helper.domain.artifact.CompatibilityRange
 import com.ninepointnine.helper.domain.artifact.ManifestValidation
 import com.ninepointnine.helper.domain.artifact.ReleaseSourcePolicy
+import com.ninepointnine.helper.domain.artifact.InstallerSelfIdentity
 import com.ninepointnine.helper.domain.artifact.SourcePlan
 import com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
 import com.ninepointnine.helper.domain.device.DeviceCapability
@@ -231,7 +232,9 @@ private data class StoredMaintenanceState(
         if (
             parsedAvailableManifests.isNotEmpty() &&
             (parsedAvailableManifests.any { it.componentId.isBlank() } ||
-                !parsedAvailableManifests.map { it.componentId }.toSet().all { it in componentIds })
+                !parsedAvailableManifests.map { it.componentId }.toSet().all {
+                    it in componentIds || InstallerSelfIdentity.isSelfComponentId(it)
+                })
         ) {
             return null
         }
@@ -568,19 +571,44 @@ private data class StoredApplication(
     val componentId: String,
     val packageName: String,
     val installed: Boolean,
+    val versionLabel: String? = null,
+    val versionCode: Long? = null,
+    val fileSizeBytes: Long? = null,
+    val installTimeEpochMillis: Long? = null,
+    val updateTimeEpochMillis: Long? = null,
+    val filePath: String? = null,
+    val uid: Int? = null,
 ) {
-    companion object {
+        companion object {
         fun from(application: ManagedApplicationStatus): StoredApplication = StoredApplication(
             componentId = application.componentId,
             packageName = application.packageName,
             installed = application.installed,
+            versionLabel = application.versionLabel,
+            versionCode = application.versionCode,
+            fileSizeBytes = application.fileSizeBytes,
+            installTimeEpochMillis = application.installTimeEpochMillis,
+            updateTimeEpochMillis = application.updateTimeEpochMillis,
+            filePath = application.filePath,
+            uid = application.uid,
         )
     }
 
     fun toDomainOrNull(): ManagedApplicationStatus? {
         val packagePattern = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$")
         return if (componentId.matches(Regex("^[a-z][a-z0-9-]{0,63}$")) && packageName.matches(packagePattern)) {
-            ManagedApplicationStatus(componentId, packageName, installed)
+            ManagedApplicationStatus(
+                componentId = componentId,
+                packageName = packageName,
+                installed = installed,
+                versionLabel = versionLabel,
+                versionCode = versionCode,
+                fileSizeBytes = fileSizeBytes,
+                installTimeEpochMillis = installTimeEpochMillis,
+                updateTimeEpochMillis = updateTimeEpochMillis,
+                filePath = filePath,
+                uid = uid,
+            )
         } else {
             null
         }

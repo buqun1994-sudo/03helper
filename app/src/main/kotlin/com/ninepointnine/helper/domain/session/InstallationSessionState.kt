@@ -61,6 +61,13 @@ enum class MaintenanceActionStatus {
     FAILED,
 }
 
+enum class MaintenanceApplicationActionId {
+    START,
+    FORCE_STOP,
+    UNINSTALL,
+    DETAILS,
+}
+
 enum class MaintenanceActionId {
     CHECK_UPDATES,
     REINSTALL,

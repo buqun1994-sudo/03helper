@@ -87,4 +87,11 @@ internal fun InstallUiIntent.toInstallationSessionCommand(): InstallationSession
     InstallUiIntent.Reconfigure -> InstallationSessionCommand.ReconfigureInstallation
     InstallUiIntent.EnterMaintenance -> InstallationSessionCommand.EnterMaintenance
     is InstallUiIntent.MaintenanceAction -> InstallationSessionCommand.MaintenanceAction(actionId)
+    is InstallUiIntent.MaintenanceApplicationAction -> InstallationSessionCommand.MaintenanceApplicationAction(
+        componentId = componentId,
+        actionId = actionId,
+    )
+    is InstallUiIntent.ToggleMaintenanceInstallationComponent ->
+        InstallationSessionCommand.ToggleMaintenanceInstallationComponent(componentId, selected)
+    InstallUiIntent.StartMaintenanceInstallation -> InstallationSessionCommand.StartMaintenanceInstallation
 }

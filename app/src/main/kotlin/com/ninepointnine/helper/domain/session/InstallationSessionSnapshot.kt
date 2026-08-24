@@ -11,6 +11,8 @@ import com.ninepointnine.helper.domain.device.DeviceCapability
 import com.ninepointnine.helper.domain.device.AuthorizationActionEvidence
 import com.ninepointnine.helper.domain.device.DeviceAvailabilityEvidence
 import com.ninepointnine.helper.domain.device.InstalledArtifactEvidence
+import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationState
+import com.ninepointnine.helper.domain.device.ManagedApplicationAuthorizationStatus
 
 data class InstallationSessionSnapshot(
     val state: InstallationSessionState,
@@ -154,6 +156,12 @@ data class MaintenanceSnapshot(
     val availableCatalogRevision: Long = 0L,
     val availableCatalogKeyId: String? = null,
     val availableCatalogSignatureAlgorithm: String? = null,
+    val applicationAction: MaintenanceApplicationActionRecord? = null,
+    val applicationDetails: ManagedApplicationDetails? = null,
+    val updateStatuses: List<MaintenanceUpdateStatus> = emptyList(),
+    val diagnostic: MaintenanceDiagnosticSnapshot? = null,
+    val authorization: MaintenanceAuthorizationSnapshot = MaintenanceAuthorizationSnapshot(),
+    val installationSelection: MaintenanceInstallationSelection? = null,
 )
 
 data class MaintenanceActionRecord(
@@ -168,7 +176,106 @@ data class ManagedApplicationStatus(
     val componentId: String,
     val packageName: String,
     val installed: Boolean,
+    val versionLabel: String? = null,
+    val versionCode: Long? = null,
+    val fileSizeBytes: Long? = null,
+    val installTimeEpochMillis: Long? = null,
+    val updateTimeEpochMillis: Long? = null,
+    val filePath: String? = null,
+    val uid: Int? = null,
+    val authorizationState: MaintenanceAuthorizationState? = null,
 )
+
+data class MaintenanceAuthorizationSnapshot(
+    val state: MaintenanceAuthorizationFlowState = MaintenanceAuthorizationFlowState.NOT_STARTED,
+    val currentComponentId: String? = null,
+    val applications: List<ManagedApplicationAuthorizationStatus> = emptyList(),
+)
+
+data class MaintenanceInstallationSelection(
+    val actionId: MaintenanceActionId,
+    val options: List<MaintenanceInstallationOption> = emptyList(),
+    val selectedComponentIds: Set<String> = emptySet(),
+)
+
+data class MaintenanceInstallationOption(
+    val componentId: String,
+    val displayName: String,
+    val versionLabel: String? = null,
+    val sizeLabel: String? = null,
+    val installed: Boolean = false,
+    val required: Boolean = false,
+    val iconKey: String = componentId,
+)
+
+enum class MaintenanceAuthorizationFlowState {
+    NOT_STARTED,
+    CHECKING,
+    READY,
+    REPAIRING,
+    COMPLETED,
+    FAILED,
+}
+
+/**
+ * Static package metadata shown by the maintenance application-details page.
+ * The values are read from the confirmed car connection and never contain
+ * arbitrary command output.
+ */
+data class ManagedApplicationDetails(
+    val componentId: String,
+    val displayName: String,
+    val packageName: String,
+    val versionLabel: String? = null,
+    val versionCode: Long? = null,
+    val fileSizeBytes: Long? = null,
+    val installTimeEpochMillis: Long? = null,
+    val updateTimeEpochMillis: Long? = null,
+    val filePath: String? = null,
+    val uid: Int? = null,
+)
+
+data class MaintenanceApplicationActionRecord(
+    val componentId: String,
+    val actionId: MaintenanceApplicationActionId,
+    val status: MaintenanceActionStatus,
+    val resultCode: String? = null,
+    val reasonCode: String? = null,
+    val retryable: Boolean = false,
+)
+
+enum class MaintenanceUpdateState {
+    CHECKING,
+    CURRENT,
+    UPDATE_AVAILABLE,
+    NOT_INSTALLED,
+    DEVICE_DISCONNECTED,
+    UNAVAILABLE,
+}
+
+data class MaintenanceUpdateStatus(
+    val componentId: String,
+    val displayName: String,
+    val versionLabel: String? = null,
+    val installedVersionLabel: String? = null,
+    val state: MaintenanceUpdateState = MaintenanceUpdateState.CHECKING,
+    val isSelf: Boolean = false,
+    val iconKey: String = componentId,
+)
+
+data class MaintenanceDiagnosticSnapshot(
+    val state: DiagnosticLoadState = DiagnosticLoadState.NOT_STARTED,
+    val fileName: String? = null,
+    val sizeBytes: Long? = null,
+    val modifiedEpochMillis: Long? = null,
+)
+
+enum class DiagnosticLoadState {
+    NOT_STARTED,
+    LOADING,
+    READY,
+    FAILED,
+}
 
 /** The last reliable point from which a paused installation can resume. */
 data class SessionCheckpoint(

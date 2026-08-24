@@ -1,5 +1,12 @@
 # 03helper 进度
 
+## 2026-08-24 维护与云端配置施工（进行中）
+
+1. 已在基线提交 `13ad8ca` 后继续施工：Cloud 清单允许携带 `03helper` 自身包，首次安装会在会话边界和蓝奏云选择层过滤自身；维护更新保留自身清单用于版本比对，并对蓝奏云构建结果执行自身包名强校验。
+2. 已修复维护态手动断开后的错误重连代次；返回按钮改为无框图标，二级页标题统一为图标 + 标题，首页滚动位置由 `LazyListState` 保留，移除旧的重新安装 / 启动组件 / 一键清理 / 诊断入口。
+3. 已接入检查更新双板块、授权检查状态、受控应用启动 / 强停 / 卸载 / 详情动作、安装应用选择页和安装后私有缓存自动清理；新增页面均沿 `InstallationSession` / `MaintenanceController` / `InstallUiStateMapper` 主链。
+4. 本阶段已通过 `:app:compileDebugKotlin`、`:app:testDebugUnitTest`、`:app:lintDebug` 和 `git diff --check`。真实手机页面 smoke、显式 Debug APK 覆盖安装和真实车机维护动作仍待收尾；自身 APK 的系统级安装端口尚未接入，不能宣称已完成自身覆盖安装。
+
 ## 2026-08-24 Android 身份、版本与签名规则固化
 
 1. 已将五个 Android source-set 的源码根和所有 Kotlin / 测试包迁移为 `com.ninepointnine.helper`，Gradle `namespace` / `applicationId` 同步更新；历史 `com.tcrrry.helper` 不再作为构建身份。
@@ -355,3 +362,10 @@ F2 Debug APK 已按用户授权安装到指定手机。该段记录的是 F2 交
 1. 按用户当次明确授权，在样本车机上对 03桌面、03歌词和文件管理器执行 user 0 卸载；三个目标包的安装路径、用户包列表和进程回读均已为空。
 2. 卸载前已撤销本次安装链对应的精确授权：桌面悬浮窗 / 安装包 AppOps 与无障碍服务，歌词悬浮窗 / 通知监听 / 无障碍服务，文件管理器存储运行时权限 / AppOps 与安装包 AppOp。
 3. 回读确认目标通知监听和无障碍服务已移除，车机原有的 `com.mengbo.monitor` 无障碍服务保留；未触碰其它应用或车机数据。
+
+## 2026-08-24 维护页面版本与操作按钮 UI 收口
+
+1. 更新页现在只呈现一个版本值：最新应用显示 `当前 vX`，可更新应用显示远端目标 `vX` 并使用成功绿强调，未安装 / 不可用状态使用警示色；不再同时显示当前版本和远端版本。断开车机时，车机应用区只显示未连接提示，底部更新按钮和完成提示只依据助手自身状态。
+2. 应用管理四个操作统一使用 `IconTextActionButton`；组件固定按钮高度并在 `PressableSurface` 中使用中心对齐，图标与文字几何上水平、垂直居中。未安装应用的启动、强停和卸载按钮使用动画降透明度并保持不可点击，应用详情仍可进入。
+3. 指定 JDK17 下 `:app:compileDebugKotlin`、`:app:compileDebugAndroidTestKotlin`、`:app:testDebugUnitTest`、`:app:lintDebug`、`:app:assembleDebug`、`:app:assembleDebugAndroidTest` 和 `:app:connectedDebugAndroidTest` 均通过；instrumentation smoke 为 `2/2`。
+4. 使用显式测试手机完成最新 Debug 主包保留数据覆盖安装，系统返回 `Success`；包身份为 `com.ninepointnine.helper`、`versionName=0.1.0`、`versionCode=1`，启动入口为 `.MainActivity`，APK SHA-256 为 `831744854897124790a3c616b97afe5dd9b42527b9e96a18e1fa8f2f60c940d7`。真实车机安装、授权、启动、强停和卸载按用户要求全部跳过；未清数据、未卸载手机助手、未重启设备。

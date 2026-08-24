@@ -52,6 +52,18 @@ data class TrustedInstallerComponent(
     val trustProfileId: String = "nine-studio",
 )
 
+/** Stable identity for the installer APK when Cloud publishes it alongside car apps. */
+object InstallerSelfIdentity {
+    const val COMPONENT_ID = "03helper"
+    const val LEGACY_COMPONENT_ID = "helper"
+    const val PACKAGE_NAME = "com.ninepointnine.helper"
+    const val TRUST_PROFILE_ID = "helper-approved"
+
+    private val componentIds = setOf(COMPONENT_ID, LEGACY_COMPONENT_ID)
+
+    fun isSelfComponentId(componentId: String): Boolean = componentId.lowercase() in componentIds
+}
+
 object InstallerComponentTrustRegistry {
     const val DESKTOP_COMPONENT_ID = "desktop"
     const val LYRICS_COMPONENT_ID = "lyrics"
@@ -107,6 +119,7 @@ object InstallerComponentTrustRegistry {
     fun ids(): Set<String> = byId.keys
 
     fun expectedTrustProfileId(componentId: String): String? = byId[componentId]?.trustProfileId
+        ?: InstallerSelfIdentity.TRUST_PROFILE_ID.takeIf { InstallerSelfIdentity.isSelfComponentId(componentId) }
 
     /**
      * Legacy component metadata remains available to old local fixtures, but
@@ -139,10 +152,28 @@ object InstallerPublisherTrustRegistry {
         certificateSha256 = DEBUG_CERTIFICATE_SHA256,
         packagePrefixes = setOf("org.fossify."),
     )
+    private val helperCertificates = listOf(
+        // Debug certificate used by local component fixtures.
+        TrustedPublisherCertificate(
+            certificateSha256 = DEBUG_CERTIFICATE_SHA256,
+            packagePrefixes = setOf(InstallerSelfIdentity.PACKAGE_NAME),
+        ),
+        // Public staging / production certificate roots are intentionally
+        // package-scoped and are only used for the signed self-update entry.
+        TrustedPublisherCertificate(
+            certificateSha256 = "aca4f178fea11ccc97a1373c8aa5345b274a3a783398929a9340a79ee83663af",
+            packagePrefixes = setOf(InstallerSelfIdentity.PACKAGE_NAME),
+        ),
+        TrustedPublisherCertificate(
+            certificateSha256 = "31ca80dd21a5208eaabd5f3e1440a3db2f7dc79122e03eaa6ba01730fb31f18b",
+            packagePrefixes = setOf(InstallerSelfIdentity.PACKAGE_NAME),
+        ),
+    )
 
     val profiles: List<TrustedPublisherProfile> = listOf(
         TrustedPublisherProfile("nine-studio", listOf(nineStudioCertificate)),
         TrustedPublisherProfile("fossify-approved", listOf(fossifyCertificate)),
+        TrustedPublisherProfile(InstallerSelfIdentity.TRUST_PROFILE_ID, helperCertificates),
     )
 
     val certificates: List<TrustedPublisherCertificate> = listOf(
@@ -150,6 +181,7 @@ object InstallerPublisherTrustRegistry {
             certificateSha256 = DEBUG_CERTIFICATE_SHA256,
             packagePrefixes = setOf("com.tcrrry.", "org.fossify."),
         ),
+        *helperCertificates.toTypedArray(),
     )
 
     fun isTrusted(packageName: String, certificateDigests: Set<String>): Boolean = certificates.any { trusted ->

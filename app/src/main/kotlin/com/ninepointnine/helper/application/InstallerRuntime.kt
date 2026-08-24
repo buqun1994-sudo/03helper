@@ -18,6 +18,7 @@ import com.ninepointnine.helper.domain.session.InstallationSessionCommand
 import com.ninepointnine.helper.domain.session.InstallationSessionEvent
 import com.ninepointnine.helper.domain.session.InstallationSessionSnapshot
 import com.ninepointnine.helper.domain.session.InstallationSessionState
+import com.ninepointnine.helper.domain.session.MaintenanceActionStatus
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -95,6 +96,18 @@ class InstallerRuntime(
     @Synchronized
     fun dispatch(command: InstallationSessionCommand): InstallationSessionSnapshot {
         if (closed) return session.currentSnapshot()
+        // Mark a manual maintenance disconnect before publishing the snapshot.
+        // StateFlow collectors may reconcile synchronously on the same dispatcher;
+        // setting this after dispatch lets the collector mistake the user action
+        // for an unexpected drop and start a reconnect generation.
+        if (command == InstallationSessionCommand.DisconnectDevice &&
+            session.currentSnapshot().state == InstallationSessionState.MAINTENANCE
+        ) {
+            manualMaintenanceDisconnect = true
+            maintenanceReconnectGeneration = foregroundGeneration
+            knownReconnectAttemptSessionId = null
+            maintenanceJob?.cancel()
+        }
         val before = session.currentSnapshot()
         val effectiveCommand = if (
             command == InstallationSessionCommand.Reconnect &&
@@ -200,8 +213,6 @@ class InstallerRuntime(
 
             InstallationSessionCommand.DisconnectDevice -> {
                 knownReconnectAttemptSessionId = null
-                manualMaintenanceDisconnect = true
-                maintenanceReconnectGeneration = foregroundGeneration
                 maintenanceJob?.cancel()
                 closeDeviceConnection()
             }
@@ -220,6 +231,32 @@ class InstallerRuntime(
                     after.maintenance.activeAction == effectiveCommand.actionId &&
                     before.maintenance.activeAction != effectiveCommand.actionId -> launchMaintenanceAction(effectiveCommand.actionId, after)
             }
+
+            is InstallationSessionCommand.MaintenanceApplicationAction -> {
+                if (
+                    before.state == InstallationSessionState.MAINTENANCE &&
+                    after.maintenance.applicationAction?.componentId == effectiveCommand.componentId &&
+                    after.maintenance.applicationAction?.actionId == effectiveCommand.actionId &&
+                    after.maintenance.applicationAction?.status == MaintenanceActionStatus.RUNNING
+                ) {
+                    launchMaintenanceApplicationAction(effectiveCommand, after)
+                }
+            }
+
+            InstallationSessionCommand.StartMaintenanceInstallation -> {
+                if (
+                    before.state == InstallationSessionState.MAINTENANCE &&
+                    after.state == InstallationSessionState.SELECTION_CONFIRMED
+                ) {
+                    if (after.artifactManifests.isEmpty() && prepareSelectedCatalog != null) {
+                        beginSelectedCatalogPreparation(after)
+                    } else {
+                        beginArtifactPreparation(after)
+                    }
+                }
+            }
+
+            is InstallationSessionCommand.ToggleMaintenanceInstallationComponent -> Unit
 
             is InstallationSessionCommand.AdapterEvent -> {
                 if (effectiveCommand.event is InstallationSessionEvent.DeviceDisconnected) {
@@ -496,7 +533,9 @@ class InstallerRuntime(
                     (
                     confirmedSnapshot.state !in CONNECTION_HELD_STATES
                         ) ||
-                    confirmedSnapshot.device?.id != device.identity.stableId
+                    confirmedSnapshot.device?.id != device.identity.stableId ||
+                    confirmedSnapshot.device?.connectionStatus != DeviceConnectionStatus.CONFIRMED ||
+                    (manualMaintenanceDisconnect && confirmedSnapshot.state == InstallationSessionState.MAINTENANCE)
                 ) {
                     connection.close()
                     return@launch
@@ -631,6 +670,49 @@ class InstallerRuntime(
                     InstallationSessionEvent.MaintenanceActionFailed(
                         actionId = actionId,
                         reasonCode = "maintenance_action_failed",
+                        retryable = true,
+                    ),
+                )
+            }
+        }
+    }
+
+    private fun launchMaintenanceApplicationAction(
+        command: InstallationSessionCommand.MaintenanceApplicationAction,
+        snapshot: InstallationSessionSnapshot,
+    ) {
+        maintenanceJob?.cancel()
+        val port = eventPortFor(snapshot)
+        val controller = maintenanceController
+        if (controller == null) {
+            port.emit(
+                InstallationSessionEvent.MaintenanceApplicationActionFailed(
+                    componentId = command.componentId,
+                    actionId = command.actionId,
+                    reasonCode = "maintenance_controller_unavailable",
+                    retryable = false,
+                ),
+            )
+            return
+        }
+        val connection = activeConnection
+        maintenanceJob = scope.launch {
+            try {
+                controller.executeApplicationAction(
+                    componentId = command.componentId,
+                    actionId = command.actionId,
+                    snapshot = snapshot,
+                    connection = connection,
+                    eventPort = port,
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                port.emit(
+                    InstallationSessionEvent.MaintenanceApplicationActionFailed(
+                        componentId = command.componentId,
+                        actionId = command.actionId,
+                        reasonCode = "maintenance_application_action_failed",
                         retryable = true,
                     ),
                 )

@@ -2,6 +2,7 @@ package com.ninepointnine.helper.application
 
 import android.content.Context
 import android.os.Environment
+import com.ninepointnine.helper.BuildConfig
 import com.ninepointnine.helper.application.artifact.ArtifactCatalogSessionAdapter
 import com.ninepointnine.helper.application.artifact.ArtifactPreparationCoordinator
 import com.ninepointnine.helper.application.artifact.InstallerCatalogLoader
@@ -31,6 +32,7 @@ import com.ninepointnine.helper.data.web.LanzouFolderWebViewHostFactory
 import com.ninepointnine.helper.data.web.LanzouWebSourceAdapter
 import com.ninepointnine.helper.data.web.LanzouWebViewHostFactory
 import com.ninepointnine.helper.domain.artifact.ReleaseSourcePolicy
+import com.ninepointnine.helper.domain.artifact.ArtifactVersion
 import com.ninepointnine.helper.domain.session.InstallationSession
 import com.ninepointnine.helper.domain.session.InstallationSessionSnapshot
 import com.ninepointnine.helper.domain.session.InstallationSessionState
@@ -151,7 +153,13 @@ object ProductionInstallerRuntimeFactory {
                 ).prepare(manifests)
             },
             executeDeviceInstallation = { connection, artifacts, eventPort ->
-                DeviceInstallationCoordinator(eventPort).execute(connection, artifacts)
+                try {
+                    DeviceInstallationCoordinator(eventPort).execute(connection, artifacts)
+                } finally {
+                    // Every install attempt, including a partial failure, ends
+                    // with disposal of private transfer and extraction files.
+                    artifactCache.clearPrivateCache()
+                }
                 Unit
             },
             maintenanceController = MaintenanceController(
@@ -160,6 +168,7 @@ object ProductionInstallerRuntimeFactory {
                     File(applicationContext.cacheDir, DIAGNOSTIC_CACHE_DIRECTORY),
                 ),
                 loadCatalog = { catalogLoader.load() },
+                selfVersion = ArtifactVersion(BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE.toLong()),
             ),
             persistMaintenanceSnapshot = { snapshot ->
                 withContext(Dispatchers.IO) { maintenanceSessionStore.save(snapshot) }
