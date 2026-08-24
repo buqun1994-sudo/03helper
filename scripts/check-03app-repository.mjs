@@ -16,7 +16,7 @@ if (!existsSync(guard)) {
   process.exit(1);
 }
 
-const result = spawnSync(process.execPath, [guard, ...process.argv.slice(2)], {
+const result = spawnSync(process.execPath, [guard, `--product-id=03helper`, `--repository-root=${projectRoot}`, ...process.argv.slice(2)], {
   cwd: cloudRoot,
   stdio: "inherit",
   env: process.env,
