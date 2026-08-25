@@ -25,6 +25,7 @@ import com.ninepointnine.helper.domain.session.MaintenanceInventoryState
 import com.ninepointnine.helper.domain.session.ManagedApplicationStatus
 import com.ninepointnine.helper.domain.session.MaintenanceSnapshot
 import com.ninepointnine.helper.domain.session.SessionEvidence
+import com.ninepointnine.helper.domain.session.ArtifactCatalogStage
 import java.nio.file.Files
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -67,6 +68,7 @@ class MaintenanceSessionStoreTest {
         assertEquals(DeviceConnectionStatus.DISCONNECTED, restored?.device?.connectionStatus)
         assertEquals(snapshot.device?.id, restored?.device?.id)
         assertEquals(installed, restored?.artifactManifests)
+        assertEquals(installed, restored?.maintenance?.installedManifests)
         assertEquals(available, restored?.maintenance?.availableManifests)
         assertEquals(snapshot.evidence, restored?.evidence)
         assertEquals(snapshot.maintenance.managedApplications, restored?.maintenance?.managedApplications)
@@ -100,6 +102,47 @@ class MaintenanceSessionStoreTest {
             setOf("desktop", "lyrics", "file-manager"),
             restored.components.map { it.id }.toSet(),
         )
+    }
+
+    @Test
+    fun `partial missing-only batch survives without requiring desktop in batch manifests`() {
+        val file = Files.createTempDirectory("maintenance-store-partial-batch").resolve("session.json").toFile()
+        val desktop = manifest("desktop", 1L, required = true)
+        val lyrics = manifest("lyrics", 2L, required = false)
+        val base = maintenanceSnapshot(listOf(desktop), listOf(desktop, lyrics))
+        val snapshot = base.copy(
+            components = listOf(desktop, lyrics).map { it.toComponentDescriptor() },
+            artifactManifests = listOf(lyrics),
+            artifactCatalogStage = ArtifactCatalogStage.PREPARED,
+            selectedOptionalComponentIds = setOf("lyrics"),
+            evidence = SessionEvidence(installed = setOf("desktop", "lyrics")),
+            maintenance = base.maintenance.copy(
+                installedManifests = listOf(desktop),
+                availableManifests = listOf(desktop, lyrics),
+                managedApplications = listOf(
+                    ManagedApplicationStatus(
+                        componentId = "desktop",
+                        packageName = desktop.packageName,
+                        installed = true,
+                        versionCode = desktop.apkVersion.code,
+                    ),
+                    ManagedApplicationStatus(
+                        componentId = "lyrics",
+                        packageName = lyrics.packageName,
+                        installed = true,
+                        versionCode = lyrics.apkVersion.code,
+                    ),
+                ),
+            ),
+        )
+        val store = MaintenanceSessionStore(file)
+
+        assertTrue(store.save(snapshot))
+        val restored = store.load() ?: error("snapshot_not_restored")
+
+        assertEquals(listOf("lyrics"), restored.artifactManifests.map { it.componentId })
+        assertEquals(listOf("desktop"), restored.maintenance.installedManifests.map { it.componentId })
+        assertEquals(setOf("desktop", "lyrics"), restored.maintenance.availableManifests.map { it.componentId }.toSet())
     }
 
     @Test

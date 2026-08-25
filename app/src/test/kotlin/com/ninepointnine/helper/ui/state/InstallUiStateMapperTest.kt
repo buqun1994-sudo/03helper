@@ -12,6 +12,9 @@ import com.ninepointnine.helper.domain.session.MaintenanceActionRecord
 import com.ninepointnine.helper.domain.session.MaintenanceActionStatus
 import com.ninepointnine.helper.domain.session.MaintenanceSnapshot
 import com.ninepointnine.helper.domain.session.MaintenanceInventoryState
+import com.ninepointnine.helper.domain.session.MaintenanceInstallationSelection
+import com.ninepointnine.helper.domain.session.MaintenanceInstallationOption
+import com.ninepointnine.helper.domain.session.ArtifactCatalogStage
 import com.ninepointnine.helper.domain.session.ManagedApplicationStatus
 import com.ninepointnine.helper.domain.session.ResultKind
 import com.ninepointnine.helper.domain.session.SessionFailure
@@ -283,6 +286,65 @@ class InstallUiStateMapperTest {
 
         assertEquals(MaintenanceInventoryState.READY, state.applicationsState)
         assertTrue(state.applications.isEmpty())
+    }
+
+    @Test
+    fun `maintenance selection projects a failed start back into the same page`() {
+        val state = InstallUiStateMapper.map(
+            InstallationSessionSnapshot(
+                state = InstallationSessionState.MAINTENANCE,
+                device = device,
+                maintenance = MaintenanceSnapshot(
+                    lastAction = MaintenanceActionRecord(
+                        actionId = MaintenanceActionId.INSTALL_FILE_MANAGER,
+                        status = MaintenanceActionStatus.FAILED,
+                        reasonCode = "artifact_catalog_not_prepared",
+                        retryable = true,
+                    ),
+                    installationSelection = MaintenanceInstallationSelection(
+                        actionId = MaintenanceActionId.INSTALL_FILE_MANAGER,
+                        options = listOf(
+                            MaintenanceInstallationOption(
+                                componentId = "desktop",
+                                displayName = "desktop",
+                                installed = true,
+                                required = true,
+                            ),
+                            MaintenanceInstallationOption(
+                                componentId = "lyrics",
+                                displayName = "lyrics",
+                                installed = false,
+                            ),
+                        ),
+                        selectedComponentIds = setOf("lyrics"),
+                    ),
+                ),
+                artifactCatalogStage = ArtifactCatalogStage.CONTROL_PLANE_READY,
+            ),
+        ) as InstallUiState.Maintenance
+
+        assertEquals(MaintenanceActionStatus.FAILED, state.installationSelection?.feedback?.status)
+        assertEquals("artifact_catalog_not_prepared", state.installationSelection?.feedback?.reasonCode)
+    }
+
+    @Test
+    fun `connected catalog failure is projected as visible selection feedback`() {
+        val state = InstallUiStateMapper.map(
+            InstallationSessionSnapshot(
+                state = InstallationSessionState.CONNECTED,
+                device = device,
+                components = emptyList(),
+                failure = SessionFailure(
+                    category = FailureCategory.VERIFICATION,
+                    retryable = false,
+                    reasonCode = "catalog_android_profile_missing",
+                ),
+                artifactCatalogStage = ArtifactCatalogStage.NOT_LOADED,
+            ),
+        ) as InstallUiState.Selection
+
+        assertFalse(state.canStart)
+        assertEquals("暂时无法读取安装配置，请重试", state.failureReason)
     }
 
     private fun selectionSnapshot(

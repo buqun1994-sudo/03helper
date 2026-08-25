@@ -6,6 +6,8 @@ import com.ninepointnine.helper.application.device.DeviceDiscoverySessionAdapter
 import com.ninepointnine.helper.application.device.DeviceConnectionSessionAdapter
 import com.ninepointnine.helper.application.device.toDeviceSummary
 import com.ninepointnine.helper.application.session.InstallationSessionEventPort
+import com.ninepointnine.helper.data.catalog.CatalogLoadResult
+import com.ninepointnine.helper.data.catalog.TrustedArtifactCatalog
 import com.ninepointnine.helper.domain.artifact.ApkExtractionEvidence
 import com.ninepointnine.helper.domain.artifact.ArchiveDownloadEvidence
 import com.ninepointnine.helper.domain.artifact.ArchiveVerificationEvidence
@@ -27,12 +29,19 @@ import com.ninepointnine.helper.domain.device.DeviceDiscoveryResult
 import com.ninepointnine.helper.domain.device.DeviceEndpoint
 import com.ninepointnine.helper.domain.device.DeviceIdentity
 import com.ninepointnine.helper.domain.session.ComponentCheck
+import com.ninepointnine.helper.domain.session.ComponentDescriptor
 import com.ninepointnine.helper.domain.session.DeviceConnectionStatus
 import com.ninepointnine.helper.domain.session.InstallationSession
 import com.ninepointnine.helper.domain.session.InstallationSessionCommand
 import com.ninepointnine.helper.domain.session.InstallationSessionEvent
 import com.ninepointnine.helper.domain.session.InstallationSessionSnapshot
 import com.ninepointnine.helper.domain.session.InstallationSessionState
+import com.ninepointnine.helper.domain.session.InstallationStrategy
+import com.ninepointnine.helper.domain.session.MaintenanceInstallationOption
+import com.ninepointnine.helper.domain.session.MaintenanceInstallationSelection
+import com.ninepointnine.helper.domain.session.MaintenanceInventoryState
+import com.ninepointnine.helper.domain.session.MaintenanceSnapshot
+import com.ninepointnine.helper.domain.session.ManagedApplicationStatus
 import java.io.File
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.CompletableDeferred
@@ -320,6 +329,7 @@ class InstallerRuntimeTest {
         val lease = TrackingConnectionLease()
         var installationConnection: DeviceConnectionLease? = null
         var installationComponentIds = emptyList<String>()
+        var installationStrategy: InstallationStrategy? = null
         val runtime = InstallerRuntime(
             session = InstallationSession(),
             createDiscoveryAdapter = { port -> DeviceDiscoverySessionAdapter(fakeDiscovery(), port) },
@@ -353,9 +363,10 @@ class InstallerRuntimeTest {
                     },
                 )
             },
-            executeDeviceInstallation = { connection, artifacts, _ ->
+            executeDeviceInstallationWithStrategy = { connection, artifacts, strategy, _ ->
                 installationConnection = connection
                 installationComponentIds = artifacts.map { it.manifest.componentId }
+                installationStrategy = strategy
             },
             coroutineContext = UnconfinedTestDispatcher(testScheduler),
         )
@@ -374,8 +385,153 @@ class InstallerRuntimeTest {
 
         assertTrue(installationConnection === lease)
         assertEquals(listOf("lyrics", "desktop"), installationComponentIds)
+        assertEquals(InstallationStrategy.INSTALL_MISSING_ONLY, installationStrategy)
         assertEquals(InstallationSessionState.VERIFYING_ARTIFACTS, runtime.session.currentSnapshot().state)
 
+        runtime.close()
+    }
+
+    @Test
+    fun `maintenance runtime prepares only missing apps and passes installed prerequisite without an apk`() = runTest {
+        val desktop = manifest("desktop")
+        val lyrics = manifest("lyrics")
+        val manifests = listOf(desktop, lyrics)
+        val descriptors = manifests.map { manifest ->
+            ComponentDescriptor(
+                id = manifest.componentId,
+                displayName = manifest.displayName,
+                required = manifest.required,
+                versionLabel = "1.0.0",
+                sizeLabel = "50 B",
+                compatibilityLabel = "compatible",
+            )
+        }
+        val preparedIds = mutableListOf<String>()
+        var selectedCatalogIds: Set<String> = emptySet()
+        var skippedCatalogIds: Set<String> = emptySet()
+        var executedArtifacts: List<PreparedArtifact> = emptyList()
+        var executedStrategy: InstallationStrategy? = null
+        val runtime = InstallerRuntime(
+            session = InstallationSession(
+                initialSnapshot = InstallationSessionSnapshot(
+                    state = InstallationSessionState.MAINTENANCE,
+                    device = fakeVehicle().toDeviceSummary().copy(
+                        connectionStatus = DeviceConnectionStatus.DISCONNECTED,
+                    ),
+                    components = descriptors,
+                    artifactManifests = emptyList(),
+                    installationStrategy = InstallationStrategy.INSTALL_MISSING_ONLY,
+                    maintenance = MaintenanceSnapshot(
+                        managedApplicationsState = MaintenanceInventoryState.READY,
+                        managedApplications = listOf(
+                            ManagedApplicationStatus(
+                                componentId = "desktop",
+                                packageName = desktop.packageName,
+                                installed = true,
+                                versionCode = desktop.apkVersion.code,
+                            ),
+                            ManagedApplicationStatus(
+                                componentId = "cast",
+                                packageName = "com.ninepointnine.desktopcast",
+                                installed = true,
+                            ),
+                        ),
+                        availableComponents = descriptors,
+                        // Control-plane refreshes do not carry APK manifests;
+                        // the installed baseline remains the identity source
+                        // for the missing-only skip decision.
+                        installedManifests = listOf(desktop),
+                        availableManifests = emptyList(),
+                        catalogControlPlaneOnly = true,
+                        installationSelection = MaintenanceInstallationSelection(
+                            actionId = com.ninepointnine.helper.domain.session.MaintenanceActionId.INSTALL_FILE_MANAGER,
+                            options = listOf(
+                                MaintenanceInstallationOption(
+                                    componentId = "desktop",
+                                    displayName = "desktop",
+                                    installed = true,
+                                    required = true,
+                                ),
+                                MaintenanceInstallationOption(
+                                    componentId = "lyrics",
+                                    displayName = "lyrics",
+                                    installed = false,
+                                ),
+                            ),
+                            selectedComponentIds = setOf("lyrics"),
+                        ),
+                    ),
+                ),
+            ),
+            createDiscoveryAdapter = { port -> DeviceDiscoverySessionAdapter(fakeDiscovery(), port) },
+            createConnectionAdapter = { port -> fakeConnectionAdapter(port) },
+            loadCatalog = {},
+            prepareSelectedCatalogWithSkipped = { selected, skipped, port ->
+                selectedCatalogIds = selected
+                skippedCatalogIds = skipped
+                port.emit(
+                    InstallationSessionEvent.SelectedCatalogResolved(
+                        catalogVersion = "catalog-2",
+                        keyId = "key-1",
+                        signatureAlgorithm = "Ed25519",
+                        manifests = listOf(lyrics),
+                        apps = descriptors.map { descriptor ->
+                            if (descriptor.id == "desktop") {
+                                descriptor.copy(
+                                    status = com.ninepointnine.helper.domain.session.ComponentStatus.DIRECTORY_MISSING,
+                                    errorReason = "lanzou_folder_missing_desktop",
+                                )
+                            } else {
+                                descriptor
+                            }
+                        },
+                        appFailures = mapOf("desktop" to "lanzou_folder_missing_desktop"),
+                    ),
+                )
+                CatalogLoadResult.Success(
+                    TrustedArtifactCatalog(
+                        catalogVersion = "catalog-2",
+                        keyId = "key-1",
+                        signatureAlgorithm = "Ed25519",
+                        manifests = listOf(lyrics),
+                    ),
+                )
+            },
+            prepareArtifactsWithResult = { selected, port ->
+                preparedIds += selected.map { it.componentId }
+                emitArtifactPreparationEvidence(selected, port)
+                ArtifactPreparationResult.Prepared(
+                    selected.map { manifest ->
+                        PreparedArtifact(
+                            manifest = manifest,
+                            sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                            finalApk = File("${manifest.componentId}.apk"),
+                        )
+                    },
+                )
+            },
+            executeDeviceInstallationWithStrategy = { _, artifacts, strategy, _ ->
+                executedArtifacts = artifacts
+                executedStrategy = strategy
+            },
+            coroutineContext = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        runtime.dispatch(InstallationSessionCommand.Reconnect)
+        advanceUntilIdle()
+        assertEquals(InstallationSessionState.MAINTENANCE, runtime.session.currentSnapshot().state)
+
+        runtime.dispatch(InstallationSessionCommand.StartMaintenanceInstallation)
+        advanceUntilIdle()
+
+        assertEquals(setOf("desktop", "lyrics"), selectedCatalogIds)
+        assertEquals(setOf("desktop"), skippedCatalogIds)
+        assertEquals(null, runtime.session.currentSnapshot().components.single { it.id == "desktop" }.errorReason)
+        assertEquals(listOf("lyrics"), preparedIds)
+        assertEquals(InstallationStrategy.INSTALL_MISSING_ONLY, executedStrategy)
+        assertEquals(setOf("desktop", "lyrics"), executedArtifacts.map { it.manifest.componentId }.toSet())
+        assertTrue(executedArtifacts.single { it.manifest.componentId == "desktop" }.finalApk == null)
+        assertTrue(executedArtifacts.single { it.manifest.componentId == "lyrics" }.finalApk != null)
         runtime.close()
     }
 

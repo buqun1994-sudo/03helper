@@ -1,5 +1,30 @@
 # 03helper 进度
 
+## 2026-08-25 已安装身份与图标缓存收口
+
+1. 复核发现：维护页按实时库存显示“已安装”并隐藏勾选框后，若车机只能报告包存在而没有 `versionCode`，可选组件可能同时被排除在内部批次之外，导致 UI 真值与安全复用条件不一致。
+2. 已将该判定收回 `InstallationSession` 与 `DadbCommandGateway`：只有实时库存 `READY` 且包名 / `versionCode` 与受信 manifest 完全匹配的组件才跳过准备和设备写入；身份不完整或旧版的已安装可选组件仍保持不可勾选，但自动进入 APK 核验与安装批次。
+3. 持久化 Logo 只有在包名、发布者证书、版本和 APK 摘要完整匹配时才命中；03 歌词内置 Logo 已逐字节替换为当前 APK 的 `ic_launcher_art.png`（SHA-256 `cc38255660f381d79957b1fd0b6b26e98e8f0f906af64bd2e2d2dd14200dc119`）。新增设备回归断言覆盖旧版安装路径；JDK17 下全量 JVM 单测共 `180` 项（0 failures / 0 errors / 0 skipped）。
+4. 本轮最终 Debug APK 为 `com.ninepointnine.helper`、`0.1.0 (1)`、入口 `.MainActivity`，v2 签名有效，主包 SHA-256 为 `390e69c51982a59ca1f4d33084658d06a8b7755f159a91b838da92c7f6f31597`，AndroidTest APK SHA-256 为 `e7d46eff4e1930d9e7a297398e50b63c5615eec303af2916deaae2ae34fc0f5d`；显式测试手机 instrumentation smoke `2/2` 通过并已再次保留数据覆盖安装。
+5. 目标车机 `192.168.0.203:5555` 当前离线，因此真实车机混合库存、补缺安装和“全部更新”覆盖安装仍是最小人工主测；本轮未对车机写入，未提交、未推送、未发布。
+6. 共享 03 APP 登记 Guard 仅因当前工作树尚未提交、HEAD 与登记快照不一致而阻断；未修改共享登记库，也未把未提交代码标记为已发布产物。
+
+## 2026-08-25 安装缺失项逻辑最终验证
+
+1. 已按会话唯一安装策略收口：维护安装页把车机实时库存中的应用只显示为“已安装”，不加入本次默认安装集合；只有未安装应用进入清单准备、推送和 `pm install -r`。已安装应用仍执行车机 APK 路径、包名和发布者证书回读，库存读取失败时在任何设备写入前 fail closed；“全部更新”继续使用显式覆盖安装策略。
+2. 指定 JDK17 强制重跑 `:app:testDebugUnitTest --rerun-tasks`，180 项测试全部通过；Debug / AndroidTest Kotlin 编译、Lint、Debug APK 与 AndroidTest APK 构建，以及项目文档、Skills、本机环境和 `git diff --check` 均通过。
+3. 使用显式测试手机 serial `adb-RFCX412AN1X-gWfMRD (2)._adb-tls-connect._tcp` 直接运行 `InstallAppActivitySmokeTest`，2/2 通过；随后再次保留数据覆盖安装最新 Debug 主包并启动核对。最终包为 `com.ninepointnine.helper`、`0.1.0 (1)`、入口 `.MainActivity`，v2 签名有效，主包 SHA-256 为 `688449edd7bef3197183f7640ff29d9ae206e47c98def7ebd154fed79aaa4215`，AndroidTest APK SHA-256 为 `e7d46eff4e1930d9e7a297398e50b63c5615eec303af2916deaae2ae34fc0f5d`。
+4. 目标车机 `192.168.0.203:5555` 当前离线，因此真实车机混合库存、补缺安装和“全部更新”覆盖安装仍是最小人工主测；本轮未对车机写入，未提交、未推送、未发布。
+
+## 2026-08-25 维护安装缺失项分流施工（已完成）
+
+1. 已将安装意图收敛为会话唯一的 `InstallationStrategy`：首次安装与维护“安装应用”使用 `INSTALL_MISSING_ONLY`，维护“全部更新”使用 `REINSTALL_SELECTED`，并随检查点恢复。
+2. 维护安装选择页现在只把未安装的必需项放入默认集合；已安装项仅显示状态。已安装 03 桌面仍作为授权前置和最终证据的一部分，缺失的其它组件可以继续安装。
+3. `DadbCommandGateway` 在补缺策略下先读取一次可信包库存：已安装包跳过推送和 `pm install -r`，仍执行车机 APK 身份回读；库存不可判定时 fail closed。设备协调器与生产运行时已接入该策略，保留“全部更新”的覆盖安装语义。
+4. 已补充会话选择、策略恢复、运行时传递、混合库存设备写入分流、历史库存隔离和重装回归测试；JDK17 下 `:app:testDebugUnitTest` 共 174 项（0 failures / 0 errors / 0 skipped），`:app:compileDebugKotlin`、`:app:lintDebug`、`:app:assembleDebug`、`:app:assembleDebugAndroidTest`、项目文档 / Skill / 本机环境检查和 `git diff --check` 均通过。
+5. 最新 Debug APK 为 `com.ninepointnine.helper`、版本 `0.1.0 (1)`；在显式测试手机 serial 上完成主包与 AndroidTest 包保留数据覆盖安装，使用单一 serial 直接 runner 执行既有 `InstallAppActivitySmokeTest` 2/2 通过。instrumentation 收尾后再次覆盖安装主包并核对入口 `.MainActivity`，最终 APK SHA-256 为 `6526990a5184e11bd4b81d079f1a176f9434b75aeb65404e97b9d534c2e7de92`。
+6. Gradle connected task 发现同一手机的两个 mDNS serial 并行执行，产生重复设备 runner 崩溃；该次设备选择异常不作为业务测试结果，单一 serial 直接 runner 已通过并完成最终主包覆盖安装。真实目标车机当前未在线，车机上的混合库存、补缺安装和“全部更新”覆盖安装仍保留为用户人工主测；本轮未对车机写入，不提交、不推送、不发布。
+
 ## 2026-08-24 维护与云端配置施工（进行中）
 
 1. 已在基线提交 `13ad8ca` 后继续施工：Cloud 清单允许携带 `03helper` 自身包，首次安装会在会话边界和蓝奏云选择层过滤自身；维护更新保留自身清单用于版本比对，并对蓝奏云构建结果执行自身包名强校验。
@@ -460,3 +485,14 @@ F2 Debug APK 已按用户授权安装到指定手机。该段记录的是 F2 交
 2. 安装后核对包身份为 `com.ninepointnine.helper`、`versionName=0.1.0`、`versionCode=1`、入口 `.MainActivity`，v2 签名仍有效；随后启动返回 `Status: ok`，当前焦点为 `MainActivity`，界面已进入维护页并显示四个维护入口，最近日志未发现 `FATAL EXCEPTION`。
 3. `check-project-docs.mjs`、`check-skills.mjs`、`check-local-environment.mjs` 与 `git diff --check` 通过；`check-03app-repository.mjs --strict` 仅因登记快照 HEAD 与当前工作树 HEAD 不一致而失败，未修改登记库掩盖差异。
 4. 车机 `192.168.0.203:5555` 仍未在线；真实车机维护空态、实时库存、卸载回读、授权和完整配置交叉仍交由用户手测。本轮不提交、不推送、不发布。
+## 2026-08-25 维护安装失败恢复边界修正
+
+1. 根因确认：维护安装启动后原选择被清空，失败结果仍派发初始化安装的 `ReturnToSelection`，导致领域状态回到 `CONNECTED`，UI 投影成首次安装选择页。
+2. `InstallationSessionSnapshot` / `SessionCheckpoint` 新增 `installationFlow`，维护安装保留选择快照并使用独立恢复命令；维护失败返回维护“安装应用”选择页，初始化失败路径不变。
+3. 维护安装开始时只保留可复用已安装应用的既有证据，避免结果页把已安装 03桌面显示为“未安装”。新增领域回归覆盖恢复路由、原勾选和已安装证据。
+
+## 2026-08-25 维护安装失败恢复收尾
+
+1. 使用 JDK17 强制重跑 `:app:testDebugUnitTest --rerun-tasks`，全量 `181` 项 JVM 单测通过（0 failures / 0 errors / 0 skipped）；`:app:lintDebug`、`:app:assembleDebug`、`:app:assembleDebugAndroidTest`、项目文档、Skills、本机环境和 `git diff --check` 均通过。
+2. 显式测试手机上的 `InstallAppActivitySmokeTest` 2/2 通过；随后再次保留数据覆盖安装最新 Debug 主包并启动核对。最终包为 `com.ninepointnine.helper`、`0.1.0 (1)`、入口 `.MainActivity`，主包 SHA-256 为 `3be3b00cf833f7ecafbed5458723d825b75c178648cb039083782ab7b0007659`。
+3. 本轮未清数据、未卸载、未降级、未重启设备，未对目标车机写入；不提交、不推送、不发布。

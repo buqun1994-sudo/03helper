@@ -138,6 +138,19 @@ object ProductionInstallerRuntimeFactory {
                     },
                 ).prepareSelected(selectedIds)
             },
+            prepareSelectedCatalogWithSkipped = { selectedIds, skippedIds, eventPort ->
+                ArtifactCatalogSessionAdapter(
+                    catalogLoader = catalogLoader,
+                    eventPort = eventPort,
+                    selectedCatalogLoaderWithSkipped = { ids, skipped, onProgress ->
+                        folderCatalogAdapter.prepareSelected(
+                            selectedIds = ids,
+                            onProgress = onProgress,
+                            skippedIds = skipped,
+                        )
+                    },
+                ).prepareSelected(selectedIds, skippedIds)
+            },
             prepareArtifactsWithResult = { manifests, eventPort ->
                 ArtifactPreparationCoordinator(
                     sourcePolicy = sourcePolicy,
@@ -174,9 +187,13 @@ object ProductionInstallerRuntimeFactory {
                     }
                 }
             },
-            executeDeviceInstallation = { connection, artifacts, eventPort ->
+            executeDeviceInstallationWithStrategy = { connection, artifacts, strategy, eventPort ->
                 try {
-                    DeviceInstallationCoordinator(eventPort).execute(connection, artifacts)
+                    DeviceInstallationCoordinator(eventPort).execute(
+                        connection = connection,
+                        artifacts = artifacts,
+                        strategy = strategy,
+                    )
                 } finally {
                     // Every install attempt, including a partial failure, ends
                     // with disposal of private transfer and extraction files.

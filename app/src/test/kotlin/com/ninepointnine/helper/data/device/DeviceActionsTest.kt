@@ -3,6 +3,7 @@ package com.ninepointnine.helper.data.device
 import com.ninepointnine.helper.application.artifact.PreparedArtifact
 import com.ninepointnine.helper.application.device.DeviceInstallationCoordinator
 import com.ninepointnine.helper.application.session.InstallationSessionEventPort
+import com.ninepointnine.helper.data.artifact.ApkMetadata
 import com.ninepointnine.helper.domain.artifact.ArtifactManifest
 import com.ninepointnine.helper.domain.artifact.ArtifactSource
 import com.ninepointnine.helper.domain.artifact.ArtifactSourceKind
@@ -31,8 +32,14 @@ import com.ninepointnine.helper.domain.device.DeviceShortcutFailureStage
 import com.ninepointnine.helper.domain.device.DeviceShortcutResult
 import com.ninepointnine.helper.domain.device.InstalledArtifactEvidence
 import com.ninepointnine.helper.domain.session.InstallationSessionEvent
+import com.ninepointnine.helper.domain.session.InstallationStrategy
 import dadb.AdbShellResponse
+import dadb.Dadb
+import java.lang.reflect.Proxy
 import java.nio.file.Files
+import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -288,6 +295,164 @@ class DeviceActionsTest {
     }
 
     @Test
+    fun `missing-only gateway strategy skips installed package but reinstall strategy writes both`() {
+        val root = Files.createTempDirectory("gateway-install-strategy").toFile()
+        val desktopApk = root.resolve("desktop.apk").apply { writeBytes(byteArrayOf(1, 2, 3)) }
+        val lyricsApk = root.resolve("lyrics.apk").apply { writeBytes(byteArrayOf(4, 5, 6)) }
+        val desktop = prepared("desktop", "com.tcrrry.desktop", desktopApk)
+        val lyrics = prepared("lyrics", "com.tcrrry.desktoplyrics", lyricsApk)
+        val metadata = mapOf(
+            desktopApk.absolutePath to ApkMetadata(
+                packageName = desktop.manifest.packageName,
+                version = desktop.manifest.apkVersion,
+                certificateSha256s = setOf(desktop.manifest.certificateSha256),
+            ),
+            lyricsApk.absolutePath to ApkMetadata(
+                packageName = lyrics.manifest.packageName,
+                version = lyrics.manifest.apkVersion,
+                certificateSha256s = setOf(lyrics.manifest.certificateSha256),
+            ),
+        )
+        val metadataReader = com.ninepointnine.helper.data.artifact.ApkMetadataReader { apk ->
+            metadata[apk.absolutePath] ?: ApkMetadata(
+                packageName = if (apk.name.contains("desktop")) desktop.manifest.packageName else lyrics.manifest.packageName,
+                version = if (apk.name.contains("desktop")) desktop.manifest.apkVersion else lyrics.manifest.apkVersion,
+                certificateSha256s = setOf(if (apk.name.contains("desktop")) desktop.manifest.certificateSha256 else lyrics.manifest.certificateSha256),
+            )
+        }
+
+        fun gatewayFixture(inventoryFailure: Boolean = false): Pair<DadbCommandGateway, MutableList<String>> {
+            val writes = mutableListOf<String>()
+            val fakeDadb = Proxy.newProxyInstance(
+                Dadb::class.java.classLoader,
+                arrayOf(Dadb::class.java),
+            ) { _, method, args ->
+                when (method.name) {
+                    "shell" -> {
+                        val command = args?.firstOrNull()?.toString().orEmpty()
+                        when {
+                            command == "pm list packages --show-versioncode" ->
+                                if (inventoryFailure) {
+                                    AdbShellResponse("", "inventory_failed", 1)
+                                } else {
+                                    AdbShellResponse("package:com.tcrrry.desktop versionCode:1\n", "", 0)
+                                }
+
+                            command == "pm list packages" && inventoryFailure ->
+                                AdbShellResponse("not-a-package-row\n", "", 0)
+
+                            command == "pm path com.tcrrry.desktop" ->
+                                AdbShellResponse("package:/data/app/com.tcrrry.desktop/base.apk\n", "", 0)
+
+                            command == "pm path com.tcrrry.desktoplyrics" ->
+                                AdbShellResponse("package:/data/app/com.tcrrry.desktoplyrics/base.apk\n", "", 0)
+
+                            command.startsWith("pm install -r ") -> {
+                                writes += command
+                                AdbShellResponse("Success\n", "", 0)
+                            }
+
+                            command.startsWith("rm -f ") -> AdbShellResponse("", "", 0)
+                            else -> AdbShellResponse("", "", 0)
+                        }
+                    }
+
+                    "push" -> {
+                        writes += "push:${args?.getOrNull(1)}"
+                        null
+                    }
+
+                    "pull" -> {
+                        (args?.getOrNull(0) as? java.io.File)?.writeBytes(byteArrayOf(9, 8, 7))
+                        null
+                    }
+
+                    "supportsFeature" -> false
+                    "close" -> null
+                    else -> throw UnsupportedOperationException(method.name)
+                }
+            } as Dadb
+            return DadbCommandGateway(
+                adb = fakeDadb,
+                closed = AtomicBoolean(false),
+                ioMutex = Mutex(),
+                installedApkCacheDirectory = root.resolve("verification"),
+                installedApkMetadataReader = metadataReader,
+            ) to writes
+        }
+
+        val (missingOnlyGateway, missingOnlyWrites) = gatewayFixture()
+        val missingOnlyResult = runBlocking {
+            missingOnlyGateway.install(
+                listOf(
+                    com.ninepointnine.helper.domain.device.InstallableArtifact(
+                        desktop.manifest,
+                        desktop.finalApk,
+                        desktop.declarations,
+                    ),
+                    com.ninepointnine.helper.domain.device.InstallableArtifact(
+                        lyrics.manifest,
+                        lyrics.finalApk,
+                        lyrics.declarations,
+                    ),
+                ),
+                InstallationStrategy.INSTALL_MISSING_ONLY,
+            )
+        }
+        assertTrue(missingOnlyResult is DeviceInstallResult.Installed)
+        assertEquals(1, missingOnlyWrites.count { it.startsWith("push:") })
+        assertEquals(1, missingOnlyWrites.count { it.startsWith("pm install -r ") })
+
+        val (outdatedGateway, outdatedWrites) = gatewayFixture()
+        val outdatedDesktop = desktop.manifest.copy(
+            version = ArtifactVersion("2.0.0", 2),
+            apkVersion = ArtifactVersion("2.0.0", 2),
+        )
+        val outdatedResult = runBlocking {
+            outdatedGateway.install(
+                listOf(
+                    com.ninepointnine.helper.domain.device.InstallableArtifact(
+                        outdatedDesktop,
+                        desktop.finalApk,
+                    ),
+                ),
+                InstallationStrategy.INSTALL_MISSING_ONLY,
+            )
+        }
+        assertTrue(outdatedResult is DeviceInstallResult.Installed)
+        assertEquals(1, outdatedWrites.count { it.startsWith("push:") })
+        assertEquals(1, outdatedWrites.count { it.startsWith("pm install -r ") })
+
+        val (inventoryFailureGateway, inventoryFailureWrites) = gatewayFixture(inventoryFailure = true)
+        val inventoryFailureResult = runBlocking {
+            inventoryFailureGateway.install(
+                listOf(
+                    com.ninepointnine.helper.domain.device.InstallableArtifact(desktop.manifest, desktop.finalApk),
+                    com.ninepointnine.helper.domain.device.InstallableArtifact(lyrics.manifest, lyrics.finalApk),
+                ),
+                InstallationStrategy.INSTALL_MISSING_ONLY,
+            )
+        }
+        assertTrue(inventoryFailureResult is DeviceInstallResult.Failed)
+        assertEquals("installation_package_inventory_failed", (inventoryFailureResult as DeviceInstallResult.Failed).failure.reasonCode)
+        assertTrue(inventoryFailureWrites.isEmpty())
+
+        val (reinstallGateway, reinstallWrites) = gatewayFixture()
+        val reinstallResult = runBlocking {
+            reinstallGateway.install(
+                listOf(
+                    com.ninepointnine.helper.domain.device.InstallableArtifact(desktop.manifest, desktop.finalApk),
+                    com.ninepointnine.helper.domain.device.InstallableArtifact(lyrics.manifest, lyrics.finalApk),
+                ),
+                InstallationStrategy.REINSTALL_SELECTED,
+            )
+        }
+        assertTrue(reinstallResult is DeviceInstallResult.Installed)
+        assertEquals(2, reinstallWrites.count { it.startsWith("push:") })
+        assertEquals(2, reinstallWrites.count { it.startsWith("pm install -r ") })
+    }
+
+    @Test
     fun `uninstall accepts success with framework diagnostics but rejects failure markers`() {
         assertTrue(
             isUninstallAccepted(
@@ -365,10 +530,19 @@ class DeviceActionsTest {
             prepared("desktop", "com.tcrrry.desktop", desktopFile),
         )
         val commandSelections = mutableListOf<Set<String>>()
+        val installStrategies = mutableListOf<InstallationStrategy>()
         val events = mutableListOf<InstallationSessionEvent>()
         val gateway = object : AdbCommandGateway {
             override suspend fun install(artifacts: List<com.ninepointnine.helper.domain.device.InstallableArtifact>): DeviceInstallResult =
                 DeviceInstallResult.Installed(artifacts.map(::installedEvidence))
+
+            override suspend fun install(
+                artifacts: List<com.ninepointnine.helper.domain.device.InstallableArtifact>,
+                strategy: InstallationStrategy,
+            ): DeviceInstallResult {
+                installStrategies += strategy
+                return DeviceInstallResult.Installed(artifacts.map(::installedEvidence))
+            }
 
             override suspend fun runShortcut(
                 shortcut: DeviceShortcut,
@@ -403,6 +577,10 @@ class DeviceActionsTest {
         }
 
         assertEquals(com.ninepointnine.helper.application.device.DeviceInstallationExecutionResult.Completed, result)
+        assertEquals(
+            listOf(InstallationStrategy.INSTALL_MISSING_ONLY, InstallationStrategy.INSTALL_MISSING_ONLY),
+            installStrategies,
+        )
         assertEquals(listOf(setOf("desktop"), setOf("desktop", "lyrics")), commandSelections)
         assertEquals(
             listOf(

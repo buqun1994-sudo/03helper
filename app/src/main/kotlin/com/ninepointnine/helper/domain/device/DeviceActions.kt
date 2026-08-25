@@ -4,6 +4,7 @@ import com.ninepointnine.helper.domain.artifact.ArtifactManifest
 import com.ninepointnine.helper.domain.artifact.ArtifactVersion
 import com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
 import com.ninepointnine.helper.domain.session.MaintenanceApplicationActionId
+import com.ninepointnine.helper.domain.session.InstallationStrategy
 import java.io.File
 import java.util.LinkedHashSet
 
@@ -21,6 +22,15 @@ interface DeviceActionConnectionLease : DeviceConnectionLease {
 
 interface AdbCommandGateway {
     suspend fun install(artifacts: List<InstallableArtifact>): DeviceInstallResult
+
+    /**
+     * Installs a verified batch according to the session's explicit intent.
+     * Existing gateways remain source-compatible through the legacy overload.
+     */
+    suspend fun install(
+        artifacts: List<InstallableArtifact>,
+        strategy: InstallationStrategy,
+    ): DeviceInstallResult = install(artifacts)
 
     /**
      * Runs the one versioned authorization plan for the selected components.
@@ -196,7 +206,8 @@ data class ApkServiceDeclaration(
 
 data class InstallableArtifact(
     val manifest: ArtifactManifest,
-    val apkFile: File,
+    /** Null only when the device inventory already contains this exact package. */
+    val apkFile: File?,
     val declarations: ApkDeclarationMetadata? = null,
 )
 

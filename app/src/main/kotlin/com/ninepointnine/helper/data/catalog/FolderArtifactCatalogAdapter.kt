@@ -152,6 +152,7 @@ class FolderArtifactCatalogAdapter(
     suspend fun prepareSelected(
         selectedIds: Set<String>,
         onProgress: (CatalogPreparationProgress) -> Unit = {},
+        skippedIds: Set<String> = emptySet(),
     ): CatalogLoadResult {
         val baseContext = selectionContext ?: when (val result = loadSelection()) {
             is CatalogLoadResult.Success -> selectionContext
@@ -167,9 +168,13 @@ class FolderArtifactCatalogAdapter(
             selectionContext = null
             return CatalogLoadResult.Failure("distribution_config_expired", retryable = true)
         }
+        if (!skippedIds.all { it in selectedIds }) {
+            return CatalogLoadResult.Failure("distribution_selected_skip_mismatch", retryable = false)
+        }
         if (!selectedIds.contains(DESKTOP_APP_ID)) {
             return CatalogLoadResult.Failure("distribution_desktop_unavailable", retryable = false)
         }
+        val effectiveSelectedIds = selectedIds - skippedIds
         if (!workingDirectory.mkdirs() && !workingDirectory.isDirectory) {
             return CatalogLoadResult.Failure("distribution_catalog_cache_unavailable", retryable = true)
         }
@@ -178,7 +183,7 @@ class FolderArtifactCatalogAdapter(
         var committed = false
         return try {
             val selectedComponents = context.config.declaredApps()
-                .filter { it.enabled && it.componentId in selectedIds }
+                .filter { it.enabled && it.componentId in effectiveSelectedIds }
                 .sortedWith(compareBy<InstallerComponentSource> { it.sortOrder }.thenBy { it.componentId })
             // One scan is the source decision for this complete user action.
             // Every component sees the same immutable candidate list.

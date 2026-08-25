@@ -3,6 +3,7 @@ package com.ninepointnine.helper.domain.session
 import com.ninepointnine.helper.domain.artifact.ArchiveDownloadEvidence
 import com.ninepointnine.helper.domain.artifact.ArchiveVerificationEvidence
 import com.ninepointnine.helper.domain.artifact.ApkExtractionEvidence
+import com.ninepointnine.helper.domain.artifact.ArtifactManifest
 import com.ninepointnine.helper.domain.artifact.ArtifactManifestValidator
 import com.ninepointnine.helper.domain.artifact.ArtifactSourceKind
 import com.ninepointnine.helper.domain.artifact.ArtifactVerification
@@ -53,6 +54,46 @@ class InstallationSession(
 
     fun currentSnapshot(): InstallationSessionSnapshot = _snapshot.value
 
+    /**
+     * Resolves the installed components that this session may reuse for the
+     * current batch. The decision is intentionally owned by the domain
+     * session so the runtime and device adapters cannot drift into different
+     * definitions of "already installed".
+     */
+    fun reusableInstalledComponentIds(snapshot: InstallationSessionSnapshot = currentSnapshot()): Set<String> =
+        if (
+            snapshot.installationStrategy != InstallationStrategy.INSTALL_MISSING_ONLY ||
+            snapshot.maintenance.managedApplicationsState != MaintenanceInventoryState.READY
+        ) {
+            emptySet()
+        } else {
+            snapshot.maintenance.managedApplications
+                .asSequence()
+                .filter { it.installed }
+                .filter { application ->
+                    val manifest = installedIdentityManifest(snapshot, application.componentId)
+                        ?: return@filter false
+                    application.packageName == manifest.packageName &&
+                        application.versionCode == manifest.apkVersion.code
+                }
+                .map { it.componentId }
+                .toSet()
+        }
+
+    /** Returns the last trusted manifest for a component that is being reused. */
+    fun installedIdentityManifest(
+        snapshot: InstallationSessionSnapshot,
+        componentId: String,
+    ): ArtifactManifest? = snapshot.maintenance.installedManifests.firstOrNull {
+        it.componentId == componentId
+    } ?: snapshot.maintenance.availableManifests.firstOrNull {
+        it.componentId == componentId
+    } ?: if (snapshot.artifactCatalogStage == ArtifactCatalogStage.PREPARED) {
+        snapshot.artifactManifests.firstOrNull { it.componentId == componentId }
+    } else {
+        null
+    }
+
     /** Applies one command synchronously and returns the resulting immutable snapshot. */
     fun dispatch(command: InstallationSessionCommand): InstallationSessionSnapshot = synchronized(lock) {
         if (closed) {
@@ -77,6 +118,9 @@ class InstallationSession(
             -> resumeFromCheckpoint()
 
             InstallationSessionCommand.ReturnToSelection -> returnToSelection()
+
+            InstallationSessionCommand.ReturnToMaintenanceInstallationSelection ->
+                returnToMaintenanceInstallationSelection()
 
             InstallationSessionCommand.RestartFromCheckpoint -> restartFromCheckpoint()
 
@@ -133,6 +177,12 @@ class InstallationSession(
             return
         }
         val maintenanceReconnect = current.state == InstallationSessionState.MAINTENANCE
+        // Some offline callers resolve a signed catalog before starting the
+        // discovery handshake. Keep that immutable catalog; only a fresh
+        // session without one starts at NOT_LOADED.
+        val preserveResolvedCatalog = !maintenanceReconnect &&
+            current.state == InstallationSessionState.IDLE &&
+            current.artifactCatalogStage != ArtifactCatalogStage.NOT_LOADED
         val maintenanceDevice = if (maintenanceReconnect) {
             current.device?.copy(connectionStatus = DeviceConnectionStatus.DISCONNECTED)
         } else {
@@ -177,6 +227,16 @@ class InstallationSession(
                 archiveDownloads = if (maintenanceReconnect) current.archiveDownloads else emptyMap(),
                 archiveVerifications = if (maintenanceReconnect) current.archiveVerifications else emptyMap(),
                 apkExtractions = if (maintenanceReconnect) current.apkExtractions else emptyMap(),
+                artifactManifests = if (maintenanceReconnect || preserveResolvedCatalog) {
+                    current.artifactManifests
+                } else {
+                    emptyList()
+                },
+                artifactCatalogStage = if (maintenanceReconnect || preserveResolvedCatalog) {
+                    current.artifactCatalogStage
+                } else {
+                    ArtifactCatalogStage.NOT_LOADED
+                },
                 maintenance = maintenance,
                 maintenanceReconnectPending = maintenanceReconnect,
                 installationReconnectPending = false,
@@ -474,6 +534,8 @@ class InstallationSession(
         val selected = selectedComponents(current)
         val next = current.copy(
             state = InstallationSessionState.SELECTION_CONFIRMED,
+            installationStrategy = InstallationStrategy.INSTALL_MISSING_ONLY,
+            installationFlow = InstallationFlow.INITIAL_INSTALL,
             currentComponentName = selected.firstOrNull()?.displayName,
             progress = SessionProgress(
                 completedCount = 0,
@@ -501,7 +563,7 @@ class InstallationSession(
             return
         }
         val validationFailure = validateSelection(current)
-        if (validationFailure != null && current.artifactManifests.isNotEmpty()) {
+        if (validationFailure != null) {
             fail(
                 category = FailureCategory.VERIFICATION,
                 reasonCode = validationFailure,
@@ -541,8 +603,18 @@ class InstallationSession(
         val current = _snapshot.value
         if (current.state == InstallationSessionState.CONNECTED && current.failure != null) {
             // Catalog retry has no installation checkpoint. Clear the stale
-            // preparation error so the UI can show the new load in progress.
-            publish(current.copy(failure = null))
+            // preparation error and invalidate the old batch before asking
+            // the runtime to load a fresh signed control-plane snapshot.
+            publish(
+                current.copy(
+                    components = emptyList(),
+                    selectedOptionalComponentIds = emptySet(),
+                    artifactManifests = emptyList(),
+                    artifactCatalogStage = ArtifactCatalogStage.NOT_LOADED,
+                    failure = null,
+                    checkpoint = null,
+                ),
+            )
             return
         }
         if (current.state != InstallationSessionState.PAUSED && current.state != InstallationSessionState.FAILED) {
@@ -567,6 +639,9 @@ class InstallationSession(
         val restored = current.copy(
             state = checkpoint.state,
             selectedOptionalComponentIds = checkpoint.selectedOptionalComponentIds,
+            installationStrategy = checkpoint.installationStrategy,
+            installationFlow = checkpoint.installationFlow,
+            artifactCatalogStage = checkpoint.artifactCatalogStage,
             currentComponentName = checkpoint.currentComponentName,
             progress = checkpoint.progress,
             componentProgress = checkpoint.componentProgress,
@@ -622,12 +697,79 @@ class InstallationSession(
                 evidence = SessionEvidence(),
                 componentResults = emptyList(),
                 artifactManifests = emptyList(),
+                artifactCatalogStage = ArtifactCatalogStage.NOT_LOADED,
                 selectedSources = emptyMap(),
                 sourceFailures = emptyList(),
                 archiveDownloads = emptyMap(),
                 archiveVerifications = emptyMap(),
                 apkExtractions = emptyMap(),
                 installationReconnectPending = false,
+            ),
+        )
+    }
+
+    /**
+     * Restores the maintenance application-selection page after a failed
+     * maintenance batch. The selection is retained while the batch is active
+     * so this transition does not need to reconstruct UI state from results.
+     */
+    private fun returnToMaintenanceInstallationSelection() {
+        val current = _snapshot.value
+        if (
+            current.installationFlow != InstallationFlow.MAINTENANCE_INSTALL ||
+            current.state !in setOf(
+                InstallationSessionState.COMPLETED_WITH_ERRORS,
+                InstallationSessionState.FAILED,
+            )
+        ) {
+            return
+        }
+        val reasonCode = current.failure?.reasonCode
+            ?: current.componentResults.firstNotNullOfOrNull { it.failureReason }
+            ?: "maintenance_install_failed"
+        val actionId = current.maintenance.installationSelection?.actionId
+            ?: MaintenanceActionId.INSTALL_FILE_MANAGER
+        val resetComponents = current.components.map { component ->
+            val resetStatus = when (component.status) {
+                ComponentStatus.ZIP_VALIDATION_FAILED,
+                ComponentStatus.APK_SIGNATURE_MISMATCH,
+                ComponentStatus.TEMPORARILY_UNAVAILABLE,
+                -> ComponentStatus.READING
+
+                else -> component.status
+            }
+            component.copy(status = resetStatus, errorReason = null)
+        }
+        startNewGeneration(
+            current.copy(
+                state = InstallationSessionState.MAINTENANCE,
+                components = resetComponents,
+                currentComponentName = null,
+                progress = null,
+                componentProgress = emptyMap(),
+                failedComponentIds = emptySet(),
+                failure = null,
+                checkpoint = null,
+                evidence = current.evidence,
+                componentResults = emptyList(),
+                artifactManifests = emptyList(),
+                artifactCatalogStage = ArtifactCatalogStage.NOT_LOADED,
+                selectedSources = emptyMap(),
+                sourceFailures = emptyList(),
+                archiveDownloads = emptyMap(),
+                archiveVerifications = emptyMap(),
+                apkExtractions = emptyMap(),
+                maintenanceReconnectPending = false,
+                installationReconnectPending = false,
+                maintenance = current.maintenance.copy(
+                    activeAction = null,
+                    lastAction = MaintenanceActionRecord(
+                        actionId = actionId,
+                        status = MaintenanceActionStatus.FAILED,
+                        reasonCode = reasonCode,
+                        retryable = true,
+                    ),
+                ),
             ),
         )
     }
@@ -685,11 +827,20 @@ class InstallationSession(
             )
             return
         }
+        val installedBaseline = current.artifactManifests
+            .filter { it.componentId in current.evidence.installed }
+        val retainedBaseline = buildList {
+            addAll(current.maintenance.installedManifests)
+            installedBaseline.forEach { next ->
+                removeAll { it.componentId == next.componentId }
+                add(next)
+            }
+        }
         publish(
             current.copy(
                 state = InstallationSessionState.MAINTENANCE,
                 checkpoint = null,
-                maintenance = MaintenanceSnapshot(),
+                maintenance = MaintenanceSnapshot(installedManifests = retainedBaseline),
                 maintenanceReconnectPending = false,
                 installationReconnectPending = false,
             ),
@@ -906,7 +1057,12 @@ class InstallationSession(
         selectedOptionalOverride: Set<String>? = null,
     ) {
         val current = _snapshot.value
-        val selectedOptional = selectedOptionalOverride ?: when (actionId) {
+        val strategy = when (actionId) {
+            MaintenanceActionId.REINSTALL -> InstallationStrategy.REINSTALL_SELECTED
+            MaintenanceActionId.INSTALL_FILE_MANAGER -> InstallationStrategy.INSTALL_MISSING_ONLY
+            else -> return
+        }
+        val requestedOptional = selectedOptionalOverride ?: when (actionId) {
             MaintenanceActionId.REINSTALL -> current.maintenance.updateStatuses
                 .filter {
                     !it.isSelf && it.state in setOf(
@@ -923,28 +1079,59 @@ class InstallationSession(
 
             else -> return
         }
-        val candidateManifests = (current.maintenance.availableManifests.takeIf { it.isNotEmpty() }
-            ?: current.artifactManifests).filterNot {
+        // The maintenance catalog is the only source for a new maintenance
+        // batch. The current batch manifests are not a catalog cache and must
+        // never silently repopulate a newer control-plane selection.
+        val candidateManifests = current.maintenance.availableManifests.filterNot {
                 InstallerSelfIdentity.isSelfComponentId(it.componentId)
             }
         val controlPlaneOnly = current.maintenance.catalogControlPlaneOnly
         val effectiveCandidateManifests = if (controlPlaneOnly) emptyList() else candidateManifests
+        val candidateCatalogStage = when {
+            effectiveCandidateManifests.isNotEmpty() -> ArtifactCatalogStage.PREPARED
+            controlPlaneOnly -> ArtifactCatalogStage.CONTROL_PLANE_READY
+            else -> ArtifactCatalogStage.NOT_LOADED
+        }
         val configuredComponents = current.maintenance.availableComponents
             .ifEmpty { current.components }
         val candidateComponents = effectiveCandidateManifests.map { it.toComponentDescriptor(current.device?.androidSdk) }
             .takeIf { it.isNotEmpty() }
             ?.let { mergeComponentDescriptors(configuredComponents, it) }
             ?: configuredComponents
-        val candidate = current.copy(
+        val candidateBase = current.copy(
             components = candidateComponents,
             artifactManifests = effectiveCandidateManifests,
+            artifactCatalogStage = candidateCatalogStage,
+            installationStrategy = strategy,
+            installationFlow = InstallationFlow.MAINTENANCE_INSTALL,
             catalogVersion = current.maintenance.availableCatalogVersion ?: current.catalogVersion,
             catalogKeyId = current.maintenance.availableCatalogKeyId ?: current.catalogKeyId,
             catalogSignatureAlgorithm = current.maintenance.availableCatalogSignatureAlgorithm
                 ?: current.catalogSignatureAlgorithm,
-            selectedOptionalComponentIds = selectedOptional,
-            maintenance = current.maintenance.copy(installationSelection = null),
+            selectedOptionalComponentIds = requestedOptional,
+            maintenance = current.maintenance,
         )
+        // An installed row is intentionally not selectable in the UI. If its
+        // version is unavailable, however, presence alone is not enough to
+        // reuse it safely. Keep that component in the internal batch so the
+        // selected-catalog path can prepare a verified APK; exact identity
+        // matches are still removed later by [reusableInstalledComponentIds].
+        val unverifiedInstalledOptionalIds = if (strategy == InstallationStrategy.INSTALL_MISSING_ONLY) {
+            val availableIds = candidateBase.components
+                .filterNot { it.status == ComponentStatus.UNLISTED }
+                .map { it.id }
+                .toSet()
+            current.maintenance.managedApplications
+                .asSequence()
+                .filter { it.installed }
+                .map { it.componentId }
+                .filter { it != AuthorizationPlanFactory.DESKTOP_COMPONENT_ID && it in availableIds }
+                .toSet() - reusableInstalledComponentIds(candidateBase)
+        } else {
+            emptySet()
+        }
+        val selectedOptional = requestedOptional + unverifiedInstalledOptionalIds
+        val candidate = candidateBase.copy(selectedOptionalComponentIds = selectedOptional)
         val validationFailure = validateSelection(candidate)
         if (validationFailure != null) {
             publish(
@@ -963,6 +1150,19 @@ class InstallationSession(
             return
         }
         val selected = selectedComponents(candidate)
+        val reusableIds = reusableInstalledComponentIds(candidate)
+        val baselineEvidence = current.evidence.copy(
+            artifactsVerified = current.evidence.artifactsVerified intersect reusableIds,
+            artifactVerifications = current.evidence.artifactVerifications.filterKeys { it in reusableIds },
+            installed = current.evidence.installed intersect reusableIds,
+            installation = current.evidence.installation.filterKeys { it in reusableIds },
+            configured = current.evidence.configured intersect reusableIds,
+            available = current.evidence.available intersect reusableIds,
+            authorizationActions = current.evidence.authorizationActions.filter {
+                it.componentId in reusableIds
+            },
+            availability = current.evidence.availability.filterKeys { it in reusableIds },
+        )
         val next = candidate.copy(
             state = InstallationSessionState.SELECTION_CONFIRMED,
             currentComponentName = selected.firstOrNull()?.displayName,
@@ -980,24 +1180,23 @@ class InstallationSession(
             },
             failedComponentIds = emptySet(),
             failure = null,
-            evidence = SessionEvidence(),
-            componentResults = buildComponentResults(SessionEvidence(), candidate),
-            maintenance = current.maintenance.copy(installationSelection = null),
+            evidence = baselineEvidence,
+            componentResults = buildComponentResults(baselineEvidence, candidate),
+            maintenance = candidate.maintenance,
         )
         publish(withCheckpoint(next))
     }
 
     private fun beginMaintenanceInstallationSelection(actionId: MaintenanceActionId) {
         val current = _snapshot.value
-        val manifests = (if (current.maintenance.catalogControlPlaneOnly) {
-            emptyList()
-        } else {
-            current.maintenance.availableManifests.takeIf { it.isNotEmpty() } ?: current.artifactManifests
-        }).filterNot {
+        val manifests = current.maintenance.availableManifests.filterNot {
                 InstallerSelfIdentity.isSelfComponentId(it.componentId)
             }
-        val existingInstalled = current.maintenance.managedApplications
-            .filter { it.installed }
+        val existingInstalled = if (current.maintenance.managedApplicationsState == MaintenanceInventoryState.READY) {
+            current.maintenance.managedApplications.filter { it.installed }
+        } else {
+            emptyList()
+        }
             .map { it.componentId }
         val configuredComponents = current.maintenance.availableComponents
             .ifEmpty { current.components }
@@ -1028,7 +1227,10 @@ class InstallationSession(
                 )
             }
         }
-        val selected = options.filter { it.installed || it.required }.map { it.componentId }.toSet()
+        // Installed rows are informational in this flow. Only missing required
+        // applications enter the default install selection; users can opt into
+        // missing optional applications explicitly below.
+        val selected = options.filter { !it.installed && it.required }.map { it.componentId }.toSet()
         publish(
             current.copy(
                 maintenance = current.maintenance.copy(
@@ -1052,8 +1254,8 @@ class InstallationSession(
         val current = _snapshot.value
         val selection = current.maintenance.installationSelection ?: return
         val option = selection.options.firstOrNull { it.componentId == command.componentId } ?: return
-        // Installed components are informational in this flow. They remain
-        // selected and cannot be removed from the next batch.
+        // Installed components are informational in this flow and never enter
+        // the next install batch.
         if (option.installed || (!command.selected && option.required)) return
         val selected = selection.selectedComponentIds.toMutableSet().apply {
             if (command.selected) add(command.componentId) else remove(command.componentId)
@@ -1070,7 +1272,12 @@ class InstallationSession(
     private fun startSelectedMaintenanceInstallation() {
         val current = _snapshot.value
         val selection = current.maintenance.installationSelection ?: return
-        if (selection.selectedComponentIds.none { it == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID }) {
+        val desktop = selection.options.firstOrNull {
+            it.componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
+        }
+        val desktopSelected = AuthorizationPlanFactory.DESKTOP_COMPONENT_ID in selection.selectedComponentIds
+        val desktopAlreadyInstalled = desktop?.installed == true
+        if (!desktopSelected && !desktopAlreadyInstalled) {
             publish(
                 current.copy(
                     maintenance = current.maintenance.copy(
@@ -1088,6 +1295,9 @@ class InstallationSession(
         }
         val selectedOptional = selection.selectedComponentIds
             .filterNot { it == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID }
+            .filter { componentId ->
+                selection.options.firstOrNull { it.componentId == componentId }?.installed != true
+            }
             .toSet()
         startMaintenanceInstallation(
             actionId = selection.actionId,
@@ -1389,10 +1599,20 @@ class InstallationSession(
         val apps = event.apps.filterNot {
             InstallerSelfIdentity.isSelfComponentId(it.id)
         }
-        val appFailures = event.appFailures.filterKeys {
+        val rawAppFailures = event.appFailures.filterKeys {
             !InstallerSelfIdentity.isSelfComponentId(it)
         }
         val current = _snapshot.value
+        // A selected-catalog response may report a missing remote entry for an
+        // already-installed prerequisite (for example when the folder only
+        // contains the newly requested APK). That remote failure is irrelevant
+        // to this batch and must not turn the installed row into a failed item.
+        val reusableIds = if (allowSelectionConfirmed) {
+            reusableInstalledComponentIds(current)
+        } else {
+            emptySet()
+        }
+        val appFailures = rawAppFailures.filterKeys { it !in reusableIds }
         if (current.state !in CATALOG_ACCEPTING_STATES &&
             !(allowSelectionConfirmed && current.state == InstallationSessionState.SELECTION_CONFIRMED)
         ) {
@@ -1442,13 +1662,25 @@ class InstallationSession(
             apps.map { app ->
                 val manifest = manifestDescriptors.firstOrNull { it.id == app.id }
                 val failure = appFailures[app.id]
-                app.copy(
+                val base = if (app.id in reusableIds) {
+                    // The signed config mapper can carry a folder-missing
+                    // status for an installed prerequisite. Keep that row
+                    // informational for this batch; its live package proof is
+                    // collected later by the device coordinator.
+                    app.copy(
+                        status = ComponentStatus.INSTALLED_LATEST,
+                        errorReason = null,
+                    )
+                } else {
+                    app
+                }
+                base.copy(
                     versionLabel = manifest?.versionLabel ?: app.versionLabel,
                     sizeLabel = manifest?.sizeLabel ?: app.sizeLabel,
                     compatibilityLabel = manifest?.compatibilityLabel ?: app.compatibilityLabel,
                     compatibilityState = manifest?.compatibilityState ?: app.compatibilityState,
-                    status = failure?.let(::catalogFailureStatus) ?: app.status,
-                    errorReason = failure ?: app.errorReason,
+                    status = failure?.let(::catalogFailureStatus) ?: base.status,
+                    errorReason = failure ?: base.errorReason,
                 )
             }
         }
@@ -1484,7 +1716,8 @@ class InstallationSession(
         val selectedBeforePreparation = selectedComponentIds(current)
         val failedDuringPreparation = if (preservingSelection) {
             selectedBeforePreparation.filterTo(mutableSetOf()) { componentId ->
-                componentId !in manifestIds || componentId in appFailures
+                (componentId !in manifestIds && !isAlreadyInstalledMaintenanceComponent(current, componentId)) ||
+                    (componentId in appFailures && componentId !in reusableIds)
             }
         } else {
             emptySet()
@@ -1499,6 +1732,7 @@ class InstallationSession(
         val next = current.copy(
             components = components,
             artifactManifests = manifests,
+            artifactCatalogStage = ArtifactCatalogStage.PREPARED,
             catalogVersion = event.catalogVersion,
             catalogRevision = event.catalogRevision.coerceAtLeast(current.catalogRevision),
             catalogKeyId = event.keyId,
@@ -1573,6 +1807,8 @@ class InstallationSession(
             // Clear the connected checkpoint so this cannot be presented as resumable installation work.
             publish(
                 current.copy(
+                    artifactManifests = emptyList(),
+                    artifactCatalogStage = ArtifactCatalogStage.NOT_LOADED,
                     failure = SessionFailure(
                         category = FailureCategory.VERIFICATION,
                         retryable = false,
@@ -1622,6 +1858,7 @@ class InstallationSession(
             current.copy(
                 components = components,
                 artifactManifests = emptyList(),
+                artifactCatalogStage = ArtifactCatalogStage.CONTROL_PLANE_READY,
                 catalogVersion = event.configVersion,
                 catalogRevision = event.catalogRevision.coerceAtLeast(current.catalogRevision),
                 catalogKeyId = event.keyId,
@@ -1825,7 +2062,8 @@ class InstallationSession(
         }
         val current = _snapshot.value
         val selections = normalizeSourceSelections(event)
-        if (current.artifactManifests.isNotEmpty() && !validateSourceSelections(selections, current)) {
+        val preparationIds = preparationComponentIds(current)
+        if (hasTrustedManifests(current, preparationIds) && !validateSourceSelections(selections, current)) {
             fail(FailureCategory.DOWNLOAD, reasonCode = "source_evidence_invalid")
             return
         }
@@ -1845,11 +2083,15 @@ class InstallationSession(
         if (!requireState(InstallationSessionState.DOWNLOADING_ARCHIVE, "archive_event_out_of_order")) return
         val current = _snapshot.value
         val archives = normalizeArchiveDownloads(event)
-        if (current.artifactManifests.isNotEmpty() && !validateArchiveDownloads(archives, current)) {
+        val preparationIds = preparationComponentIds(current)
+        if (hasTrustedManifests(current, preparationIds) && !validateArchiveDownloads(archives, current)) {
             fail(FailureCategory.DOWNLOAD, reasonCode = "archive_identity_invalid")
             return
         }
-        if (current.artifactManifests.isEmpty() && (event.sizeBytes <= 0L || event.sha256.isBlank())) {
+        if (!hasTrustedManifests(current, preparationIds) &&
+            preparationIds.isNotEmpty() &&
+            (event.sizeBytes <= 0L || event.sha256.isBlank())
+        ) {
             fail(FailureCategory.DOWNLOAD, reasonCode = "archive_identity_missing")
             return
         }
@@ -1869,7 +2111,8 @@ class InstallationSession(
         }
         val current = _snapshot.value
         val verifications = normalizeArchiveVerifications(event)
-        if (current.artifactManifests.isNotEmpty() && !validateArchiveVerifications(verifications, current)) {
+        val preparationIds = preparationComponentIds(current)
+        if (hasTrustedManifests(current, preparationIds) && !validateArchiveVerifications(verifications, current)) {
             fail(FailureCategory.ARCHIVE, reasonCode = "archive_verification_evidence_invalid")
             return
         }
@@ -1889,12 +2132,13 @@ class InstallationSession(
         if (!requireState(InstallationSessionState.EXTRACTING_APK, "apk_event_out_of_order")) return
         val current = _snapshot.value
         val extractions = normalizeApkExtractions(event)
-        if (current.artifactManifests.isNotEmpty() && !validateApkExtractions(extractions, current)) {
+        val preparationIds = preparationComponentIds(current)
+        if (hasTrustedManifests(current, preparationIds) && !validateApkExtractions(extractions, current)) {
             fail(FailureCategory.ARCHIVE, reasonCode = "apk_extraction_evidence_invalid")
             return
         }
-        if (current.artifactManifests.isEmpty() &&
-            successfulComponentIds(current).isNotEmpty() &&
+        if (!hasTrustedManifests(current, preparationIds) &&
+            preparationIds.isNotEmpty() &&
             !isValidLegacyApkExtraction(event)
         ) {
             fail(FailureCategory.ARCHIVE, reasonCode = "apk_identity_missing")
@@ -1911,13 +2155,14 @@ class InstallationSession(
     private fun handleArtifactsVerified(event: InstallationSessionEvent.ArtifactsVerified) {
         if (!requireState(InstallationSessionState.VERIFYING_ARTIFACTS, "artifact_event_out_of_order")) return
         val current = _snapshot.value
-        val verified = validateChecks(event.checks, successfulComponentIds(current))
+        val preparationIds = preparationComponentIds(current)
+        val verified = validateChecks(event.checks, preparationIds)
         if (verified == null) {
             fail(FailureCategory.VERIFICATION, reasonCode = "artifact_verification_failed")
             return
         }
         val verifications = event.verifications
-        if (current.artifactManifests.isNotEmpty() && !validateArtifactVerifications(verifications, current)) {
+        if (hasTrustedManifests(current, preparationIds) && !validateArtifactVerifications(verifications, current)) {
             fail(FailureCategory.VERIFICATION, reasonCode = "artifact_verification_evidence_invalid")
             return
         }
@@ -1942,12 +2187,15 @@ class InstallationSession(
         if (!requireState(InstallationSessionState.VERIFYING_ARTIFACTS, "installation_start_out_of_order")) return
         val current = _snapshot.value
         val expected = successfulComponentIds(current)
+        val preparationIds = preparationComponentIds(current)
         val requested = componentIds.toSet().ifEmpty { expected }
-        if (requested != expected || current.evidence.artifactsVerified != expected) {
+        if (requested != expected || !preparationIds.all { it in current.evidence.artifactsVerified }) {
             fail(FailureCategory.VERIFICATION, reasonCode = "artifact_evidence_incomplete")
             return
         }
-        if (current.artifactManifests.isNotEmpty() && current.evidence.artifactVerifications.keys != expected) {
+        if (hasTrustedManifests(current, preparationIds) &&
+            current.evidence.artifactVerifications.keys != preparationIds
+        ) {
             fail(FailureCategory.VERIFICATION, reasonCode = "artifact_identity_evidence_missing")
             return
         }
@@ -2021,10 +2269,10 @@ class InstallationSession(
         selections: List<SourceSelectionEvidence>,
         snapshot: InstallationSessionSnapshot,
     ): Boolean {
-        val expected = successfulComponentIds(snapshot)
+        val expected = preparationComponentIds(snapshot)
         if (selections.size != selections.map { it.componentId }.toSet().size) return false
         if (selections.map { it.componentId }.toSet() != expected) return false
-        val manifests = snapshot.artifactManifests.associateBy { it.componentId }
+        val manifests = trustedManifests(snapshot)
         return selections.all { selection ->
             manifests[selection.componentId]?.sources?.any { it.kind == selection.sourceKind } == true
         }
@@ -2034,12 +2282,12 @@ class InstallationSession(
         downloads: List<ArchiveDownloadEvidence>,
         snapshot: InstallationSessionSnapshot,
     ): Boolean {
-        val expected = successfulComponentIds(snapshot).filterTo(mutableSetOf()) { id ->
-            snapshot.artifactManifests.firstOrNull { it.componentId == id }?.localOnly != true
+        val manifests = trustedManifests(snapshot)
+        val expected = preparationComponentIds(snapshot).filterTo(mutableSetOf()) { id ->
+            manifests[id]?.localOnly != true
         }
         if (downloads.size != downloads.map { it.componentId }.toSet().size) return false
         if (downloads.map { it.componentId }.toSet() != expected) return false
-        val manifests = snapshot.artifactManifests.associateBy { it.componentId }
         return downloads.all { download ->
             val manifest = manifests[download.componentId] ?: return@all false
             download.sizeBytes == manifest.archiveSizeBytes &&
@@ -2051,12 +2299,12 @@ class InstallationSession(
         verifications: List<ArchiveVerificationEvidence>,
         snapshot: InstallationSessionSnapshot,
     ): Boolean {
-        val expected = successfulComponentIds(snapshot).filterTo(mutableSetOf()) { id ->
-            snapshot.artifactManifests.firstOrNull { it.componentId == id }?.localOnly != true
+        val manifests = trustedManifests(snapshot)
+        val expected = preparationComponentIds(snapshot).filterTo(mutableSetOf()) { id ->
+            manifests[id]?.localOnly != true
         }
         if (verifications.size != verifications.map { it.componentId }.toSet().size) return false
         if (verifications.map { it.componentId }.toSet() != expected) return false
-        val manifests = snapshot.artifactManifests.associateBy { it.componentId }
         return verifications.all { verification ->
             val manifest = manifests[verification.componentId] ?: return@all false
             val downloaded = snapshot.archiveDownloads[verification.componentId] ?: return@all false
@@ -2071,12 +2319,12 @@ class InstallationSession(
         extractions: List<ApkExtractionEvidence>,
         snapshot: InstallationSessionSnapshot,
     ): Boolean {
-        val expected = successfulComponentIds(snapshot).filterTo(mutableSetOf()) { id ->
-            snapshot.artifactManifests.firstOrNull { it.componentId == id }?.localOnly != true
+        val manifests = trustedManifests(snapshot)
+        val expected = preparationComponentIds(snapshot).filterTo(mutableSetOf()) { id ->
+            manifests[id]?.localOnly != true
         }
         if (extractions.size != extractions.map { it.componentId }.toSet().size) return false
         if (extractions.map { it.componentId }.toSet() != expected) return false
-        val manifests = snapshot.artifactManifests.associateBy { it.componentId }
         return extractions.all { extraction ->
             val manifest = manifests[extraction.componentId] ?: return@all false
             extraction.entryName == manifest.apkEntryName &&
@@ -2090,10 +2338,10 @@ class InstallationSession(
         verifications: List<ArtifactVerification>,
         snapshot: InstallationSessionSnapshot,
     ): Boolean {
-        val expected = successfulComponentIds(snapshot)
+        val expected = preparationComponentIds(snapshot)
         if (verifications.size != verifications.map { it.componentId }.toSet().size) return false
         if (verifications.map { it.componentId }.toSet() != expected) return false
-        val manifests = snapshot.artifactManifests.associateBy { it.componentId }
+        val manifests = trustedManifests(snapshot)
         return verifications.all { verification ->
             val manifest = manifests[verification.componentId] ?: return@all false
             verification.archiveDeleted &&
@@ -2121,7 +2369,7 @@ class InstallationSession(
         expectedIds: Set<String> = snapshot.evidence.installed - snapshot.failedComponentIds,
     ): Boolean {
         if (expectedIds.isEmpty()) return evidence.isEmpty()
-        val manifests = snapshot.artifactManifests.filter { it.componentId in expectedIds }
+        val manifests = trustedManifests(snapshot).values.filter { it.componentId in expectedIds }
         if (manifests.size != expectedIds.size) return false
         val plan = when (val result = AuthorizationPlanFactory.createForManifests(manifests)) {
             is AuthorizationPlanBuildResult.Ready -> result.plan
@@ -2138,7 +2386,7 @@ class InstallationSession(
         if (evidence.size != expectedIds.size || evidence.map { it.componentId }.toSet() != expectedIds) {
             return false
         }
-        val manifests = snapshot.artifactManifests.associateBy { it.componentId }
+        val manifests = trustedManifests(snapshot)
         return evidence.all { item ->
             val manifest = manifests[item.componentId] ?: return@all false
             val isLaunchTarget = item.componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
@@ -2194,17 +2442,22 @@ class InstallationSession(
     private fun handleInstallationCompleted(event: InstallationSessionEvent.InstallationCompleted) {
         if (!requireState(InstallationSessionState.INSTALLING, "installation_event_out_of_order")) return
         val current = _snapshot.value
-        val installed = validateChecks(event.checks, successfulComponentIds(current))
+        val successfulIds = successfulComponentIds(current)
+        val installed = validateChecks(event.checks, successfulIds)
         if (installed == null) {
             fail(FailureCategory.INSTALLATION, reasonCode = "installation_evidence_missing")
             return
         }
-        if (current.artifactManifests.isNotEmpty() && !validateInstallationEvidence(event.evidence, current, successfulComponentIds(current))) {
+        if (hasTrustedManifests(current, successfulIds) &&
+            !validateInstallationEvidence(event.evidence, current, successfulIds)
+        ) {
             fail(FailureCategory.INSTALLATION, reasonCode = "installation_detail_invalid")
             return
         }
+        val reusedProof = reusableInstalledComponentIds(current) intersect installed
         val evidence = current.evidence.copy(
             installed = current.evidence.installed + installed,
+            artifactsVerified = current.evidence.artifactsVerified + reusedProof,
             installation = current.evidence.installation + event.evidence.associateBy { it.componentId },
         )
         transition(
@@ -2223,7 +2476,7 @@ class InstallationSession(
         expectedIds: Set<String> = successfulComponentIds(snapshot),
     ): Boolean {
         if (evidence.size != expectedIds.size || evidence.map { it.componentId }.toSet() != expectedIds) return false
-        val manifests = snapshot.artifactManifests.associateBy { it.componentId }
+        val manifests = trustedManifests(snapshot)
         return evidence.all { item ->
             val manifest = manifests[item.componentId] ?: return@all false
             item.packageName == manifest.packageName &&
@@ -2239,7 +2492,7 @@ class InstallationSession(
             fail(FailureCategory.CONFIGURATION, reasonCode = "configuration_evidence_missing")
             return
         }
-        if (current.artifactManifests.isNotEmpty() && !validateAuthorizationEvidence(event.evidence, current, configured)) {
+        if (hasTrustedManifests(current, configured) && !validateAuthorizationEvidence(event.evidence, current, configured)) {
             fail(FailureCategory.CONFIGURATION, reasonCode = "authorization_action_evidence_invalid")
             return
         }
@@ -2265,7 +2518,7 @@ class InstallationSession(
             fail(FailureCategory.VERIFICATION, reasonCode = "availability_evidence_missing")
             return
         }
-        if (current.artifactManifests.isNotEmpty() && !validateAvailabilityEvidence(event.evidence, current, available)) {
+        if (hasTrustedManifests(current, available) && !validateAvailabilityEvidence(event.evidence, current, available)) {
             fail(FailureCategory.VERIFICATION, reasonCode = "availability_detail_invalid")
             return
         }
@@ -2459,6 +2712,11 @@ class InstallationSession(
                         } else {
                             current.maintenance.managedApplications
                         },
+                    installedManifests = if (event.actionId == MaintenanceApplicationActionId.UNINSTALL) {
+                        current.maintenance.installedManifests.filterNot { it.componentId == event.componentId }
+                    } else {
+                        current.maintenance.installedManifests
+                    },
                     managedApplicationsState = if (event.refreshedApplications != null) {
                         MaintenanceInventoryState.READY
                     } else if (event.inventoryRefreshFailureReason != null) {
@@ -2631,6 +2889,7 @@ class InstallationSession(
         val knownIds = buildSet {
             addAll(current.components.map { it.id })
             addAll(current.artifactManifests.map { it.componentId })
+            addAll(current.maintenance.installedManifests.map { it.componentId })
             addAll(current.maintenance.availableManifests.map { it.componentId })
             addAll(current.maintenance.managedApplications.map { it.componentId })
             addAll(com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry.ids())
@@ -2661,6 +2920,9 @@ class InstallationSession(
             current.copy(
                 maintenance = current.maintenance.copy(
                     managedApplications = normalizedApplications,
+                    installedManifests = current.maintenance.installedManifests.filter { baseline ->
+                        normalizedApplications.any { it.componentId == baseline.componentId }
+                    },
                     managedApplicationsState = MaintenanceInventoryState.READY,
                     managedApplicationsFailureReason = null,
                     managedApplicationsFailureRetryable = false,
@@ -2678,7 +2940,16 @@ class InstallationSession(
         componentId: String,
         packageName: String,
     ): Boolean {
-        val manifestPackage = (snapshot.artifactManifests + snapshot.maintenance.availableManifests)
+        val batchManifests = if (snapshot.artifactCatalogStage == ArtifactCatalogStage.PREPARED) {
+            snapshot.artifactManifests
+        } else {
+            emptyList()
+        }
+        val manifestPackage = (
+            batchManifests +
+                snapshot.maintenance.installedManifests +
+                snapshot.maintenance.availableManifests
+            )
             .firstOrNull { it.componentId == componentId }
             ?.packageName
         if (manifestPackage == packageName) return true
@@ -2742,14 +3013,17 @@ class InstallationSession(
         val installableManifests = event.manifests.filterNot {
             InstallerSelfIdentity.isSelfComponentId(it.componentId)
         }
+        val previousCatalogManifests = (
+            current.maintenance.installedManifests + current.maintenance.availableManifests
+            ).distinctBy { it.componentId }
         val manifestDescriptors = installableManifests.map { manifest ->
             val descriptor = manifest.toComponentDescriptor(current.device?.androidSdk)
             when {
                 descriptor.compatibilityState == ComponentCompatibility.UNSUPPORTED ->
                     descriptor.copy(status = ComponentStatus.CLIENT_CAPABILITY_INSUFFICIENT, errorReason = "component_incompatible")
-                current.artifactManifests.none { it.componentId == manifest.componentId } ->
+                previousCatalogManifests.none { it.componentId == manifest.componentId } ->
                     descriptor.copy(status = ComponentStatus.NEW)
-                current.artifactManifests.firstOrNull { it.componentId == manifest.componentId }?.let { old ->
+                previousCatalogManifests.firstOrNull { it.componentId == manifest.componentId }?.let { old ->
                     old.version != manifest.version ||
                         !old.apkSha256.equals(manifest.apkSha256, ignoreCase = true)
                 } == true -> descriptor.copy(status = ComponentStatus.UPDATE_AVAILABLE)
@@ -2792,12 +3066,6 @@ class InstallationSession(
         val installedIds = current.maintenance.managedApplications
             .filter { it.installed }
             .map { it.componentId }
-        val retainedCurrentManifests = current.artifactManifests.filterNot {
-            InstallerSelfIdentity.isSelfComponentId(it.componentId)
-        }.filter {
-            it.componentId in availableIds || it.componentId in installedIds
-        }
-        val currentIds = retainedCurrentManifests.map { it.componentId }.toSet()
         val retainedUnlistedIds = current.components
             .filter { it.id !in availableIds && it.id in installedIds }
             .map { it.id }
@@ -2822,22 +3090,15 @@ class InstallationSession(
                 }
         }.distinctBy { it.id }
         val mergedComponents = components + unlisted
-        val retainedAvailableManifests = if (event.controlPlaneOnly && event.manifests.isEmpty()) {
-            current.maintenance.availableManifests.ifEmpty { current.artifactManifests }
-        } else {
-            event.manifests
-        }
-        val nextArtifactManifests = if (event.controlPlaneOnly) {
-            current.artifactManifests
-        } else if (currentIds.isEmpty()) {
-            installableManifests
-        } else {
-            retainedCurrentManifests
-        }
+        // A maintenance refresh starts a new catalog decision. It must not
+        // leave a previous installation batch looking prepared for the next
+        // click. Full manifests live in the maintenance catalog; the batch is
+        // populated only after the user confirms a selection.
+        val availableManifests = if (event.controlPlaneOnly) emptyList() else installableManifests
         publish(
             current.copy(
                 maintenance = current.maintenance.copy(
-                    availableManifests = retainedAvailableManifests,
+                    availableManifests = availableManifests,
                     availableComponents = components,
                     availableCatalogVersion = event.catalogVersion,
                     availableCatalogRevision = event.catalogRevision,
@@ -2847,11 +3108,16 @@ class InstallationSession(
                     catalogControlPlaneOnly = event.controlPlaneOnly,
                 ),
                 components = mergedComponents,
-                artifactManifests = nextArtifactManifests,
-                catalogVersion = if (currentIds.isEmpty() || event.controlPlaneOnly) event.catalogVersion else current.catalogVersion,
-                catalogRevision = if (currentIds.isEmpty() || event.controlPlaneOnly) event.catalogRevision else current.catalogRevision,
-                catalogKeyId = if (currentIds.isEmpty() || event.controlPlaneOnly) event.keyId else current.catalogKeyId,
-                catalogSignatureAlgorithm = if (currentIds.isEmpty() || event.controlPlaneOnly) event.signatureAlgorithm else current.catalogSignatureAlgorithm,
+                artifactManifests = emptyList(),
+                artifactCatalogStage = if (event.controlPlaneOnly) {
+                    ArtifactCatalogStage.CONTROL_PLANE_READY
+                } else {
+                    ArtifactCatalogStage.NOT_LOADED
+                },
+                catalogVersion = event.catalogVersion,
+                catalogRevision = event.catalogRevision,
+                catalogKeyId = event.keyId,
+                catalogSignatureAlgorithm = event.signatureAlgorithm,
                 selectedOptionalComponentIds = current.selectedOptionalComponentIds.filterTo(mutableSetOf()) {
                     it in selectableIds
                 },
@@ -3127,12 +3393,13 @@ class InstallationSession(
             return "device_not_confirmed"
         }
         if (components.isEmpty()) return "component_catalog_missing"
-        if (snapshot.artifactManifests.isNotEmpty()) {
-            when (val validation = ArtifactManifestValidator.validateCatalog(snapshot.artifactManifests)) {
+        val trusted = trustedManifests(snapshot)
+        if (snapshot.artifactCatalogStage == ArtifactCatalogStage.PREPARED && trusted.isNotEmpty()) {
+            when (val validation = ArtifactManifestValidator.validateCatalog(trusted.values.toList())) {
                 is ManifestValidation.Invalid -> return validation.reasonCode
                 ManifestValidation.Valid -> Unit
             }
-            val manifestIds = snapshot.artifactManifests.map { it.componentId }.toSet()
+            val manifestIds = trusted.keys
             val componentIds = components.map { it.id }.toSet()
             if (!manifestIds.all { it in componentIds }) {
                 return "catalog_component_mapping_invalid"
@@ -3149,7 +3416,7 @@ class InstallationSession(
             val selectedIds = selectedComponents(snapshot).map { it.id }.toSet()
             val successfulSelectedIds = selectedIds - snapshot.failedComponentIds
             if (!successfulSelectedIds.all { it in manifestIds }) return "component_unavailable"
-            val incompatible = snapshot.artifactManifests.any { manifest ->
+            val incompatible = trusted.values.any { manifest ->
                 manifest.componentId in successfulSelectedIds &&
                     (androidSdk < manifest.compatibility.minAndroidSdk ||
                         manifest.compatibility.maxAndroidSdk?.let { androidSdk > it } == true)
@@ -3170,8 +3437,27 @@ class InstallationSession(
 
         val selected = selectedComponents(snapshot)
         if (selected.isEmpty()) return "required_components_missing"
-        if (snapshot.artifactManifests.isEmpty()) {
-            if (selected.any { component -> !isSelectable(component) }) {
+        if (snapshot.state == InstallationSessionState.SELECTION_CONFIRMED &&
+            snapshot.artifactCatalogStage == ArtifactCatalogStage.CONTROL_PLANE_READY
+        ) {
+            return "artifact_catalog_not_prepared"
+        }
+        if (snapshot.state == InstallationSessionState.SELECTION_CONFIRMED) {
+            val reusableSelected = reusableInstalledComponentIds(snapshot) intersect selected.map { it.id }.toSet()
+            if (reusableSelected.any { it !in trusted }) {
+                return "installed_component_manifest_unavailable"
+            }
+            if (snapshot.artifactCatalogStage == ArtifactCatalogStage.PREPARED) {
+                val unresolved = selected.map { it.id }
+                    .filterNot { it in snapshot.failedComponentIds }
+                    .filterNot { it in trusted }
+                if (unresolved.isNotEmpty()) return "component_unavailable"
+            }
+        }
+        if (snapshot.artifactCatalogStage != ArtifactCatalogStage.PREPARED) {
+            if (selected.any { component ->
+                    !isSelectable(component) && !isAlreadyInstalledMaintenanceComponent(snapshot, component.id)
+                }) {
                 return "component_unavailable"
             }
         } else if (selected.any { component ->
@@ -3204,6 +3490,44 @@ class InstallationSession(
 
     private fun selectedComponents(snapshot: InstallationSessionSnapshot): List<ComponentDescriptor> =
         snapshot.components.filter { isMandatory(it) || it.id in snapshot.selectedOptionalComponentIds }
+
+    /**
+     * A missing-only maintenance batch can reuse only packages confirmed by the
+     * same live inventory that built the selection page. The rule intentionally
+     * does not depend on the transient session state: after selection is
+     * confirmed the state becomes SELECTION_CONFIRMED while the inventory is
+     * still the authoritative source for the batch.
+     */
+    /**
+     * Returns only identities valid for this batch. Prepared manifests belong
+     * to the current batch; maintenance manifests may be used only for a
+     * live-inventory-confirmed component that is explicitly being skipped.
+     */
+    private fun trustedManifests(snapshot: InstallationSessionSnapshot): Map<String, ArtifactManifest> {
+        val byId = linkedMapOf<String, ArtifactManifest>()
+        if (snapshot.artifactCatalogStage == ArtifactCatalogStage.PREPARED) {
+            snapshot.artifactManifests.forEach { manifest ->
+                byId[manifest.componentId] = manifest
+            }
+        }
+        val reusableIds = reusableInstalledComponentIds(snapshot)
+        reusableIds.forEach { componentId ->
+            installedIdentityManifest(snapshot, componentId)?.let { manifest ->
+                byId[componentId] = manifest
+            }
+        }
+        return byId
+    }
+
+    private fun hasTrustedManifests(
+        snapshot: InstallationSessionSnapshot,
+        componentIds: Set<String>,
+    ): Boolean = snapshot.artifactCatalogStage == ArtifactCatalogStage.PREPARED &&
+        componentIds.all { it in trustedManifests(snapshot) }
+
+    /** Components whose APK/source evidence must be produced in this attempt. */
+    private fun preparationComponentIds(snapshot: InstallationSessionSnapshot): Set<String> =
+        successfulComponentIds(snapshot) - reusableInstalledComponentIds(snapshot)
 
     /**
      * Merges a partial preparation/refresh result into the retained full
@@ -3255,6 +3579,15 @@ class InstallationSession(
         // may still be satisfied by a verified APK in public Download.
         ComponentStatus.DIRECTORY_MISSING,
     ) && component.compatibilityState != ComponentCompatibility.UNSUPPORTED
+
+    private fun isAlreadyInstalledMaintenanceComponent(
+        snapshot: InstallationSessionSnapshot,
+        componentId: String,
+    ): Boolean = snapshot.installationStrategy == InstallationStrategy.INSTALL_MISSING_ONLY &&
+        snapshot.maintenance.managedApplicationsState == MaintenanceInventoryState.READY &&
+        snapshot.maintenance.managedApplications.any {
+            it.componentId == componentId && it.installed
+        }
 
     private fun catalogFailureStatus(reasonCode: String): ComponentStatus = when {
         reasonCode.contains("missing") -> ComponentStatus.DIRECTORY_MISSING
@@ -3324,15 +3657,18 @@ class InstallationSession(
         val installationForExpected = evidence.installation.filterKeys { it in expected }
         val authorizationForExpected = evidence.authorizationActions.filter { it.componentId in expected }
         val availabilityForExpected = evidence.availability.filterKeys { it in expected }
-        val detailedEvidenceValid = snapshot.artifactManifests.isEmpty() || (
-            installationForExpected.keys == expected &&
+        val detailedEvidenceValid = trustedManifests(snapshot).isEmpty() || (
+                installationForExpected.keys == expected &&
                 authorizationForExpected.isNotEmpty() &&
                 availabilityForExpected.keys == expected &&
                 validateAuthorizationEvidence(authorizationForExpected, snapshot, expected) &&
                 validateAvailabilityEvidence(availabilityForExpected.values.toList(), snapshot, expected)
             )
+        val artifactProofIds = evidence.artifactsVerified + (
+            reusableInstalledComponentIds(snapshot) intersect evidence.installed
+            )
         return expected.isNotEmpty() &&
-            expected.all { it in evidence.artifactsVerified } &&
+            expected.all { it in artifactProofIds } &&
             expected.all { it in evidence.installed } &&
             expected.all { it in evidence.configured } &&
             expected.all { it in evidence.available } &&
@@ -3344,6 +3680,9 @@ class InstallationSession(
         state = snapshot.state,
         deviceId = snapshot.device?.id,
         selectedOptionalComponentIds = snapshot.selectedOptionalComponentIds,
+        installationStrategy = snapshot.installationStrategy,
+        installationFlow = snapshot.installationFlow,
+        artifactCatalogStage = snapshot.artifactCatalogStage,
         currentComponentName = snapshot.currentComponentName,
         progress = snapshot.progress,
         componentProgress = snapshot.componentProgress,

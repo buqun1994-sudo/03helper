@@ -35,6 +35,8 @@ data class InstallationSessionSnapshot(
     val checkpoint: SessionCheckpoint? = null,
     val evidence: SessionEvidence = SessionEvidence(),
     val artifactManifests: List<ArtifactManifest> = emptyList(),
+    /** Stage of the current installation batch's artifact catalog. */
+    val artifactCatalogStage: ArtifactCatalogStage = ArtifactCatalogStage.NOT_LOADED,
     val catalogVersion: String? = null,
     val catalogRevision: Long = 0L,
     val catalogKeyId: String? = null,
@@ -49,6 +51,10 @@ data class InstallationSessionSnapshot(
     val maintenanceReconnectPending: Boolean = false,
     /** True only while discovery is restoring an interrupted installation lease. */
     val installationReconnectPending: Boolean = false,
+    /** Explicit install intent retained across a resumable batch. */
+    val installationStrategy: InstallationStrategy = InstallationStrategy.INSTALL_MISSING_ONLY,
+    /** Explicit business flow retained across a resumable batch. */
+    val installationFlow: InstallationFlow = InstallationFlow.INITIAL_INSTALL,
 )
 
 data class DeviceSummary(
@@ -164,6 +170,8 @@ data class MaintenanceSnapshot(
     val managedApplications: List<ManagedApplicationStatus> = emptyList(),
     /** Full signed/configured component set used by maintenance installation. */
     val availableComponents: List<ComponentDescriptor> = emptyList(),
+    /** Last verified APK identities for applications currently installed on the car. */
+    val installedManifests: List<ArtifactManifest> = emptyList(),
     val availableManifests: List<ArtifactManifest> = emptyList(),
     val availableCatalogVersion: String? = null,
     val availableCatalogRevision: Long = 0L,
@@ -314,4 +322,7 @@ data class SessionCheckpoint(
     val archiveDownloads: Map<String, ArchiveDownloadEvidence> = emptyMap(),
     val archiveVerifications: Map<String, ArchiveVerificationEvidence> = emptyMap(),
     val apkExtractions: Map<String, ApkExtractionEvidence> = emptyMap(),
+    val installationStrategy: InstallationStrategy = InstallationStrategy.INSTALL_MISSING_ONLY,
+    val artifactCatalogStage: ArtifactCatalogStage = ArtifactCatalogStage.NOT_LOADED,
+    val installationFlow: InstallationFlow = InstallationFlow.INITIAL_INSTALL,
 )

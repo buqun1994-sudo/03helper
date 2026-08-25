@@ -32,6 +32,8 @@ sealed interface InstallUiState {
         val canStart: Boolean,
         /** True while the connected session is still building the remote catalog. */
         val preparing: Boolean = false,
+        /** User-facing reason when the connected catalog or preparation failed. */
+        val failureReason: String? = null,
     ) : InstallUiState {
         override val screen: InstallScreen = InstallScreen.SELECTION
     }
@@ -214,6 +216,7 @@ data class MaintenanceInstallationSelectionUi(
     val actionId: MaintenanceActionId,
     val options: List<MaintenanceInstallationOptionRow>,
     val selectedComponentIds: Set<String>,
+    val feedback: MaintenanceFeedback? = null,
 )
 
 data class MaintenanceInstallationOptionRow(
@@ -240,6 +243,8 @@ sealed interface InstallUiIntent {
     data object RetryInstallation : InstallUiIntent
     /** Leaves a terminal install result and returns to the existing selection. */
     data object ReturnToSelection : InstallUiIntent
+    /** Leaves a failed maintenance install and returns to its application-selection page. */
+    data object ReturnToMaintenanceInstallationSelection : InstallUiIntent
     data object Reconfigure : InstallUiIntent
     data object EnterMaintenance : InstallUiIntent
     data object LeaveMaintenanceAction : InstallUiIntent

@@ -27,7 +27,9 @@ import androidx.compose.ui.unit.dp
 import com.ninepointnine.helper.data.artifact.ApkIconRepository
 import com.ninepointnine.helper.data.artifact.ApkIconRequest
 import com.ninepointnine.helper.domain.artifact.InstallerSelfIdentity
+import com.ninepointnine.helper.domain.artifact.ArtifactManifest
 import com.ninepointnine.helper.domain.session.InstallationSessionSnapshot
+import com.ninepointnine.helper.domain.session.ArtifactCatalogStage
 import com.ninepointnine.helper.ui.screens.FirstInstallScreen
 import com.ninepointnine.helper.ui.screens.MaintenanceActionFlowPage
 import com.ninepointnine.helper.ui.screens.MaintenanceHome
@@ -51,9 +53,12 @@ fun InstallApp(
     var maintenanceAction by remember { mutableStateOf<MaintenanceActionId?>(null) }
     val renderTarget = InstallRenderTarget(uiState = uiState, maintenanceAction = maintenanceAction)
     val density = LocalDensity.current
-    val iconManifests = remember(snapshot.artifactManifests, snapshot.maintenance.availableManifests) {
-        (snapshot.artifactManifests + snapshot.maintenance.availableManifests)
-            .distinctBy { it.componentId }
+    val iconManifests = remember(
+        snapshot.artifactManifests,
+        snapshot.maintenance.availableManifests,
+        snapshot.artifactCatalogStage,
+    ) {
+        iconManifests(snapshot)
     }
     val iconRequests = remember(snapshot.components, iconManifests, snapshot.maintenance) {
         buildIconRequests(snapshot)
@@ -165,13 +170,12 @@ fun InstallApp(
 }
 
 private fun buildIconRequests(snapshot: InstallationSessionSnapshot): List<ApkIconRequest> {
-    val manifests = (snapshot.artifactManifests + snapshot.maintenance.availableManifests)
-        .distinctBy { it.componentId }
-        .associateBy { it.componentId }
+    val manifests = iconManifests(snapshot).associateBy { it.componentId }
     val installedApplications = snapshot.maintenance.managedApplications.associateBy { it.componentId }
     val ids = buildSet {
         addAll(snapshot.components.map { it.id })
         addAll(snapshot.maintenance.managedApplications.map { it.componentId })
+        addAll(snapshot.maintenance.installedManifests.map { it.componentId })
         addAll(snapshot.maintenance.availableManifests.map { it.componentId })
         addAll(snapshot.maintenance.installationSelection?.options.orEmpty().map { it.componentId })
         addAll(snapshot.maintenance.updateStatuses.map { it.componentId })
@@ -210,6 +214,17 @@ private fun buildIconRequests(snapshot: InstallationSessionSnapshot): List<ApkIc
             )
         }
     }.sortedBy { it.componentId }
+}
+
+/** The icon resolver sees the current prepared batch first, then the signed maintenance catalog. */
+private fun iconManifests(snapshot: InstallationSessionSnapshot): List<ArtifactManifest> {
+    val byId = linkedMapOf<String, ArtifactManifest>()
+    snapshot.maintenance.availableManifests.forEach { manifest -> byId[manifest.componentId] = manifest }
+    snapshot.maintenance.installedManifests.forEach { manifest -> byId[manifest.componentId] = manifest }
+    if (snapshot.artifactCatalogStage == ArtifactCatalogStage.PREPARED) {
+        snapshot.artifactManifests.forEach { manifest -> byId[manifest.componentId] = manifest }
+    }
+    return byId.values.toList()
 }
 
 private data class InstallRenderTarget(

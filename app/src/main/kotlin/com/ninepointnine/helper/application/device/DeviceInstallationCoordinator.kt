@@ -19,6 +19,7 @@ import com.ninepointnine.helper.domain.session.ComponentProgressStatus
 import com.ninepointnine.helper.domain.session.FailureCategory
 import com.ninepointnine.helper.domain.session.InstallPhase
 import com.ninepointnine.helper.domain.session.InstallationSessionEvent
+import com.ninepointnine.helper.domain.session.InstallationStrategy
 import kotlinx.coroutines.CancellationException
 
 sealed interface DeviceInstallationExecutionResult {
@@ -37,6 +38,7 @@ class DeviceInstallationCoordinator(
     suspend fun execute(
         connection: DeviceConnectionLease,
         artifacts: List<PreparedArtifact>,
+        strategy: InstallationStrategy = InstallationStrategy.INSTALL_MISSING_ONLY,
     ): DeviceInstallationExecutionResult {
         val actionConnection = connection as? DeviceActionConnectionLease
             ?: return failed(
@@ -70,9 +72,11 @@ class DeviceInstallationCoordinator(
         val installedArtifacts = mutableListOf<InstallableArtifact>()
         val installationEvidence = mutableListOf<com.ninepointnine.helper.domain.device.InstalledArtifactEvidence>()
         installable.forEach { artifact ->
-            emitProgress(artifact.manifest.componentId, InstallPhase.SEND, ComponentProgressStatus.RUNNING)
+            if (artifact.apkFile != null) {
+                emitProgress(artifact.manifest.componentId, InstallPhase.SEND, ComponentProgressStatus.RUNNING)
+            }
             val result = try {
-                gateway.install(listOf(artifact))
+                gateway.install(listOf(artifact), strategy)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
@@ -84,7 +88,14 @@ class DeviceInstallationCoordinator(
                 is DeviceInstallResult.Failed -> recordFailure(artifact, InstallPhase.SEND, result.failure)
                 is DeviceInstallResult.Installed -> {
                     if (validateInstallationEvidence(listOf(artifact), result.evidence)) {
-                        installedArtifacts += artifact
+                        // A reused package has no local APK. Its declaration
+                        // receipt comes from the live APK readback and is
+                        // required by the same authorization gate as a fresh
+                        // package.
+                        val liveEvidence = result.evidence.single()
+                        installedArtifacts += artifact.copy(
+                            declarations = artifact.declarations ?: liveEvidence.declarations,
+                        )
                         installationEvidence += result.evidence
                         emitProgress(artifact.manifest.componentId, InstallPhase.SEND, ComponentProgressStatus.COMPLETED)
                     } else {
@@ -171,6 +182,7 @@ class DeviceInstallationCoordinator(
         )
 
         val availableEvidence = mutableListOf<DeviceAvailabilityEvidence>()
+        val installationEvidenceByComponent = installationEvidence.associateBy { it.componentId }
         val configuredIds = configuredArtifacts.map { it.manifest.componentId }.toSet()
         if (desktopRuntime != null && AuthorizationPlanFactory.DESKTOP_COMPONENT_ID in configuredIds) {
             val desktopManifest = desktop.manifest
@@ -178,7 +190,8 @@ class DeviceInstallationCoordinator(
             availableEvidence += DeviceAvailabilityEvidence(
                 componentId = desktopManifest.componentId,
                 packageName = desktopManifest.packageName,
-                version = desktopManifest.apkVersion,
+                version = installationEvidenceByComponent[desktopManifest.componentId]?.version
+                    ?: desktopManifest.apkVersion,
                 installedArchiveVerified = true,
                 launchAttempted = runtime.launchAttempted,
                 launcherResolved = runtime.launcherResolved,
@@ -191,7 +204,8 @@ class DeviceInstallationCoordinator(
                 availableEvidence += DeviceAvailabilityEvidence(
                     componentId = artifact.manifest.componentId,
                     packageName = artifact.manifest.packageName,
-                    version = artifact.manifest.apkVersion,
+                    version = installationEvidenceByComponent[artifact.manifest.componentId]?.version
+                        ?: artifact.manifest.apkVersion,
                     installedArchiveVerified = true,
                     launchAttempted = false,
                     launcherResolved = false,

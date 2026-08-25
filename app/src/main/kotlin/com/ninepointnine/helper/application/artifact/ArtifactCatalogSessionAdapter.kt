@@ -19,6 +19,7 @@ class ArtifactCatalogSessionAdapter(
     private val eventPort: ArtifactSessionEventPort,
     private val selectionLoader: (suspend () -> CatalogLoadResult)? = null,
     private val selectedCatalogLoader: (suspend (Set<String>, (CatalogPreparationProgress) -> Unit) -> CatalogLoadResult)? = null,
+    private val selectedCatalogLoaderWithSkipped: (suspend (Set<String>, Set<String>, (CatalogPreparationProgress) -> Unit) -> CatalogLoadResult)? = null,
 ) {
     suspend fun load(): CatalogLoadResult {
         val result = catalogLoader.load()
@@ -61,21 +62,32 @@ class ArtifactCatalogSessionAdapter(
         return result
     }
 
-    suspend fun prepareSelected(selectedIds: Set<String>): CatalogLoadResult {
-        val loader = selectedCatalogLoader ?: return CatalogLoadResult.Failure(
-            "selected_catalog_preparer_unavailable",
-            retryable = false,
-        )
-        val result = loader.invoke(selectedIds) { progress ->
+    suspend fun prepareSelected(
+        selectedIds: Set<String>,
+        skippedIds: Set<String> = emptySet(),
+    ): CatalogLoadResult {
+        val progress: (CatalogPreparationProgress) -> Unit = { update ->
             eventPort.emit(
                 InstallationSessionEvent.ComponentProgressUpdated(
-                    componentId = progress.componentId,
-                    phase = progress.phase,
-                    status = progress.status,
-                    bytesWritten = progress.bytesWritten,
-                    totalBytes = progress.totalBytes,
-                    indeterminate = progress.indeterminate,
+                    componentId = update.componentId,
+                    phase = update.phase,
+                    status = update.status,
+                    bytesWritten = update.bytesWritten,
+                    totalBytes = update.totalBytes,
+                    indeterminate = update.indeterminate,
                 ),
+            )
+        }
+        val result = when {
+            selectedCatalogLoaderWithSkipped != null ->
+                selectedCatalogLoaderWithSkipped.invoke(selectedIds, skippedIds, progress)
+
+            selectedCatalogLoader != null && skippedIds.isEmpty() ->
+                selectedCatalogLoader.invoke(selectedIds, progress)
+
+            else -> return CatalogLoadResult.Failure(
+                "selected_catalog_preparer_unavailable",
+                retryable = false,
             )
         }
         when (result) {

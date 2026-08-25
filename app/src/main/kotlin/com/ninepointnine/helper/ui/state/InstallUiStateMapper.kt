@@ -12,6 +12,7 @@ import com.ninepointnine.helper.domain.session.MaintenanceApplicationActionId
 import com.ninepointnine.helper.domain.session.MaintenanceActionId
 import com.ninepointnine.helper.domain.session.MaintenanceActionStatus
 import com.ninepointnine.helper.domain.session.MaintenanceInventoryState
+import com.ninepointnine.helper.domain.session.ArtifactCatalogStage
 import com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
 
 object InstallUiStateMapper {
@@ -178,6 +179,17 @@ object InstallUiStateMapper {
                         )
                     },
                     selectedComponentIds = selection.selectedComponentIds,
+                    feedback = snapshot.maintenance.lastAction
+                        ?.takeIf { it.actionId == selection.actionId }
+                        ?.let { action ->
+                            MaintenanceFeedback(
+                                actionId = action.actionId,
+                                status = action.status,
+                                resultCode = action.resultCode,
+                                reasonCode = action.reasonCode,
+                                retryable = action.retryable,
+                            )
+                        },
                 )
             },
         )
@@ -219,7 +231,8 @@ object InstallUiStateMapper {
             components = rows,
             summaryCount = selected,
             summarySizeLabel = sizeLabel,
-            canStart = snapshot.device?.connectionStatus == DeviceConnectionStatus.CONFIRMED &&
+            canStart = snapshot.failure == null &&
+                snapshot.device?.connectionStatus == DeviceConnectionStatus.CONFIRMED &&
                 selectedRows.isNotEmpty() &&
                 selectedRows.all {
                     it.status in setOf(
@@ -233,14 +246,16 @@ object InstallUiStateMapper {
                     ) &&
                         (it.status != com.ninepointnine.helper.domain.session.ComponentStatus.DIRECTORY_MISSING ||
                             (!it.versionLabel.isNullOrBlank() && !it.sizeLabel.isNullOrBlank())) &&
-                        (snapshot.artifactManifests.isEmpty() &&
+                        (snapshot.artifactCatalogStage != ArtifactCatalogStage.PREPARED &&
                             it.compatibilityState != ComponentCompatibility.UNSUPPORTED ||
-                            snapshot.artifactManifests.isNotEmpty() && (
+                            snapshot.artifactCatalogStage == ArtifactCatalogStage.PREPARED && (
                                 !it.compatibilityLabel.isNullOrBlank() &&
                                 it.compatibilityState == ComponentCompatibility.SUPPORTED
                             ))
                 },
-            preparing = snapshot.components.isEmpty() && snapshot.failure == null,
+            preparing = snapshot.artifactCatalogStage == ArtifactCatalogStage.NOT_LOADED &&
+                snapshot.components.isEmpty() && snapshot.failure == null,
+            failureReason = snapshot.failure?.reasonCode?.toUserMessage(),
         )
     }
 
@@ -321,6 +336,8 @@ object InstallUiStateMapper {
     private fun ComponentRow.isMandatory(): Boolean = id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
 
 private fun String.toUserMessage(): String = when {
+    contains("catalog_android_profile") || contains("catalog_load") || contains("distribution_config") ->
+        "暂时无法读取安装配置，请重试"
     contains("desktop_prerequisite") -> "03桌面未完成，无法继续授权此应用"
     contains("local_download") || contains("public_download") || contains("distribution_app_missing") ->
         "下载目录中没有可用的安装包"

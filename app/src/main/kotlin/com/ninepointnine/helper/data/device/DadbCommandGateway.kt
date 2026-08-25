@@ -33,6 +33,7 @@ import com.ninepointnine.helper.domain.device.MaintenanceCommandGateway
 import com.ninepointnine.helper.domain.device.MaintenanceDeviceResult
 import com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
 import com.ninepointnine.helper.domain.session.MaintenanceApplicationActionId
+import com.ninepointnine.helper.domain.session.InstallationStrategy
 import android.util.Log
 import dadb.AdbShellResponse
 import dadb.Dadb
@@ -60,7 +61,13 @@ internal class DadbCommandGateway(
     /** Cached per lease so older Android package-manager builds are probed once. */
     private var versionedPackageInventorySupported: Boolean? = null
 
-    override suspend fun install(artifacts: List<InstallableArtifact>): DeviceInstallResult = withLease(
+    override suspend fun install(artifacts: List<InstallableArtifact>): DeviceInstallResult =
+        install(artifacts, InstallationStrategy.REINSTALL_SELECTED)
+
+    override suspend fun install(
+        artifacts: List<InstallableArtifact>,
+        strategy: InstallationStrategy,
+    ): DeviceInstallResult = withLease(
         whenClosed = DeviceInstallResult.Failed(
             DeviceActionFailure("adb_connection_closed", retryable = true),
         ),
@@ -84,28 +91,87 @@ internal class DadbCommandGateway(
             )
         }
 
-        // Validate the complete batch before touching the device. This keeps a
-        // bad local artifact from starting a partially authorized session.
+        // A missing-only batch must establish a trustworthy package inventory
+        // before the first device write. This prevents an unknown inventory
+        // from silently falling through to a destructive reinstall.
+        val installedInventory = if (strategy == InstallationStrategy.INSTALL_MISSING_ONLY) {
+            readPackageInventory()?.associate { it.packageName to it.versionCode }
+                ?: return@withLease DeviceInstallResult.Failed(
+                    DeviceActionFailure("installation_package_inventory_failed", retryable = true),
+                )
+        } else {
+            emptyMap()
+        }
+
+        // Validate every artifact that may be written. An already-installed
+        // package does not need a local APK at all: its live APK is pulled and
+        // verified below, so a stale or absent local cache cannot block a
+        // missing-only batch.
         artifacts.forEach { artifact ->
-            validateInstallableArtifact(artifact)?.let { failure ->
-                return@withLease DeviceInstallResult.Failed(failure)
+            val packagePresent = artifact.manifest.packageName in installedInventory
+            // The domain session only marks an application reusable when the
+            // live inventory contains the exact catalog version. Keep that
+            // invariant at the device boundary too: an older (or unknown)
+            // version must receive the verified APK instead of being silently
+            // treated as a no-op.
+            val alreadyInstalled = packagePresent &&
+                installedInventory[artifact.manifest.packageName] == artifact.manifest.apkVersion.code
+            if (!alreadyInstalled || strategy == InstallationStrategy.REINSTALL_SELECTED) {
+                validateInstallableArtifact(artifact)?.let { failure ->
+                    return@withLease DeviceInstallResult.Failed(failure)
+                }
+            } else if (ArtifactManifestValidator.validate(artifact.manifest) !is ManifestValidation.Valid) {
+                return@withLease DeviceInstallResult.Failed(
+                    DeviceActionFailure("install_manifest_invalid", artifact.manifest.componentId, retryable = false),
+                )
+            }
+        }
+
+        // A recognized staging/production alias without the exact manifest
+        // package is an identity conflict, not a missing package. Refuse to
+        // write anything rather than install beside or over an unknown app.
+        if (strategy == InstallationStrategy.INSTALL_MISSING_ONLY) {
+            artifacts.firstOrNull { artifact ->
+                val aliases = (InstallerComponentTrustRegistry.allowedPackageNames(artifact.manifest.componentId) +
+                    artifact.manifest.packageName).toSet()
+                artifact.manifest.packageName !in installedInventory &&
+                    aliases.any { it != artifact.manifest.packageName && it in installedInventory }
+            }?.let { conflict ->
+                return@withLease DeviceInstallResult.Failed(
+                    DeviceActionFailure(
+                        "installation_installed_identity_conflict",
+                        conflict.manifest.componentId,
+                        retryable = false,
+                    ),
+                )
             }
         }
 
         // Installation never launches an application. The only launch occurs
         // during the versioned authorization plan after every package has been installed.
         artifacts.forEach { artifact ->
+            if (strategy == InstallationStrategy.INSTALL_MISSING_ONLY &&
+                installedInventory[artifact.manifest.packageName] == artifact.manifest.apkVersion.code
+            ) {
+                // The package is already present. The identity readback below
+                // remains mandatory; presence alone is never accepted as proof.
+                return@forEach
+            }
             val remotePath = remoteApkPath(artifact)
                 ?: return@withLease DeviceInstallResult.Failed(
                     DeviceActionFailure("remote_staging_path_invalid", artifact.manifest.componentId, retryable = false),
                 )
+            val apkFile = artifact.apkFile
+                ?: return@withLease DeviceInstallResult.Failed(
+                    DeviceActionFailure("install_apk_file_invalid", artifact.manifest.componentId, retryable = false),
+                )
             var failure: DeviceActionFailure? = null
             try {
                 adb.push(
-                    artifact.apkFile,
+                    apkFile,
                     remotePath,
                     REMOTE_FILE_MODE,
-                    artifact.apkFile.lastModified().coerceAtLeast(1L),
+                    apkFile.lastModified().coerceAtLeast(1L),
                 )
                 val installResponse = adb.shell("pm install -r $remotePath")
                 if (!isSuccessful(installResponse) || !installResponse.output.trim().startsWith("Success")) {
@@ -863,13 +929,15 @@ internal class DadbCommandGateway(
         if (ArtifactManifestValidator.validate(artifact.manifest) !is ManifestValidation.Valid) {
             return DeviceActionFailure("install_manifest_invalid", artifact.manifest.componentId, retryable = false)
         }
-        if (!artifact.apkFile.isFile) {
+        val apkFile = artifact.apkFile
+            ?: return DeviceActionFailure("install_apk_file_invalid", artifact.manifest.componentId, retryable = false)
+        if (!apkFile.isFile) {
             return DeviceActionFailure("install_apk_file_invalid", artifact.manifest.componentId, retryable = false)
         }
         val metadataReader = installedApkMetadataReader
             ?: return DeviceActionFailure("install_apk_verifier_unavailable", artifact.manifest.componentId, retryable = false)
         val metadata = try {
-            metadataReader.read(artifact.apkFile)
+            metadataReader.read(apkFile)
         } catch (_: Exception) {
             null
         } ?: return DeviceActionFailure("install_apk_metadata_unreadable", artifact.manifest.componentId, retryable = false)

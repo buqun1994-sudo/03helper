@@ -430,6 +430,89 @@ class FolderArtifactCatalogAdapterTest {
     }
 
     @Test
+    fun `selected preparation skips installed component before local or remote artifact work`() = runBlocking {
+        val config = config()
+        val lyrics = config.apps.single { it.componentId == "lyrics" }
+        val root = java.nio.file.Files.createTempDirectory("03helper-skipped-component").toFile()
+        val remoteAttempts = AtomicInteger(0)
+        val observedFolderEntries = mutableListOf<String>()
+        try {
+            val sourcePolicy = ReleaseSourcePolicy(mode = ReleaseSourceMode.FOLDER_CONFIG)
+            val adapter = FolderArtifactCatalogAdapter(
+                configAdapter = configAdapter(config),
+                folderSourceAdapter = LanzouFolderSourceAdapter(
+                    hostFactory = LanzouFolderWebViewHostFactory {
+                        object : LanzouFolderWebViewHost {
+                            override fun startFolder(
+                                folderUrl: String,
+                                password: String,
+                                onEntries: (List<LanzouFolderEntry>) -> Unit,
+                                onFailure: (com.ninepointnine.helper.domain.artifact.ArtifactFailure) -> Unit,
+                            ) {
+                                observedFolderEntries += lyrics.archiveFileName
+                                onEntries(listOf(LanzouFolderEntry("ilyrics", lyrics.archiveFileName)))
+                            }
+
+                            override fun stopAndDestroy() = Unit
+                        }
+                    },
+                    sourcePolicy = sourcePolicy,
+                ),
+                lanzouSourceAdapter = LanzouWebSourceAdapter(
+                    hostFactory = LanzouWebViewHostFactory {
+                        DownloadHost {
+                            remoteAttempts.incrementAndGet()
+                            ResolvedDownloadRequest(
+                                sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                                url = "https://zip1.webgetstore.com/lyrics",
+                                userAgent = "03helper-test",
+                            )
+                        }
+                    },
+                    sourcePolicy = sourcePolicy,
+                ),
+                downloader = DynamicArtifactDownloader(
+                    transport = ArtifactTransport { _, _ ->
+                        val bytes = zip(lyrics.apkEntryName, "lyrics-apk".toByteArray())
+                        ArtifactTransportResponse(
+                            statusCode = 200,
+                            contentLength = bytes.size.toLong(),
+                            contentType = "application/zip",
+                            body = ByteArrayInputStream(bytes),
+                        )
+                    },
+                    sourcePolicy = sourcePolicy,
+                ),
+                metadataReader = ApkMetadataReader {
+                    ApkMetadata(
+                        packageName = lyrics.packageName,
+                        version = ArtifactVersion(lyrics.versionName, lyrics.versionCode),
+                        certificateSha256s = setOf(lyrics.certificateSha256),
+                    )
+                },
+                sourcePolicy = sourcePolicy,
+                artifactCache = ArtifactCache(root.resolve("cache"), root.resolve("Download")),
+                workingDirectory = root.resolve("working"),
+            )
+
+            val result = adapter.prepareSelected(
+                selectedIds = setOf("desktop", "lyrics"),
+                skippedIds = setOf("desktop"),
+            ) as CatalogLoadResult.Success
+
+            assertEquals(
+                "failures=${result.catalog.appFailures}, folder=$observedFolderEntries, remote=${remoteAttempts.get()}",
+                listOf("lyrics"),
+                result.catalog.manifests.map { it.componentId },
+            )
+            assertEquals(1, remoteAttempts.get())
+            assertEquals(listOf(lyrics.archiveFileName), observedFolderEntries)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun `stale public Download identity is ignored and the declared remote archive is used`() = runBlocking {
         val config = config()
         val root = java.nio.file.Files.createTempDirectory("03helper-stale-download").toFile()

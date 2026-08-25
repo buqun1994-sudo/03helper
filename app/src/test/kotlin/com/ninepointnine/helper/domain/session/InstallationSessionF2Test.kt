@@ -294,6 +294,7 @@ class InstallationSessionF2Test {
             failure = SessionFailure(FailureCategory.INSTALLATION, reasonCode = "install_failed"),
             componentResults = listOf(ComponentResult("Lyrics", installed = false, configured = false, available = false, componentId = "lyrics")),
             artifactManifests = listOf(manifest(), desktopManifest()),
+            artifactCatalogStage = ArtifactCatalogStage.PREPARED,
         )
         val session = InstallationSession(snapshot)
 

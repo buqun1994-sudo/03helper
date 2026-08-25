@@ -886,6 +886,7 @@ private fun MaintenanceInstallationSelectionPage(
     val allInstalled = selection.options.isEmpty() || selection.options.all { it.installed }
     val installedOptions = selection.options.filter { it.installed }
     val notInstalledOptions = selection.options.filterNot { it.installed }
+    val failed = selection.feedback?.status == MaintenanceActionStatus.FAILED
     BackHandler(enabled = true, onBack = onBack)
     Column(
         modifier = Modifier
@@ -899,6 +900,14 @@ private fun MaintenanceInstallationSelectionPage(
             onBack = onBack,
         )
         LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(InstallerDimensions.ListSpacing)) {
+            if (failed) {
+                item {
+                    MaintenanceFeedbackBlock(
+                        feedback = checkNotNull(selection.feedback),
+                        applications = emptyList(),
+                    )
+                }
+            }
             if (selection.options.isEmpty()) {
                 item { MaintenanceEmptyState(stringResource(R.string.maintenance_no_installable_apps)) }
             }
@@ -928,7 +937,13 @@ private fun MaintenanceInstallationSelectionPage(
             }
         }
         PrimaryActionButton(
-            text = stringResource(if (allInstalled) R.string.maintenance_install_done else R.string.maintenance_install_start),
+            text = stringResource(
+                when {
+                    allInstalled -> R.string.maintenance_install_done
+                    failed -> R.string.maintenance_retry
+                    else -> R.string.maintenance_install_start
+                },
+            ),
             onClick = {
                 if (allInstalled) onBack()
                 else onIntent(InstallUiIntent.StartMaintenanceInstallation)
@@ -976,13 +991,27 @@ private fun MaintenanceInstallationOptionItem(
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
-            Checkbox(
-                checked = option.componentId in selection.selectedComponentIds,
-                onCheckedChange = { checked ->
-                    onIntent(InstallUiIntent.ToggleMaintenanceInstallationComponent(option.componentId, checked))
-                },
-                enabled = !option.required && !option.installed,
-            )
+            Box(
+                modifier = Modifier.size(48.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                if (option.installed) {
+                    StatusIcon(
+                        name = "circle_check",
+                        contentDescription = stringResource(R.string.maintenance_app_installed),
+                        tint = InstallerColors.Success,
+                        size = 22.dp,
+                    )
+                } else {
+                    Checkbox(
+                        checked = option.componentId in selection.selectedComponentIds,
+                        onCheckedChange = { checked ->
+                            onIntent(InstallUiIntent.ToggleMaintenanceInstallationComponent(option.componentId, checked))
+                        },
+                        enabled = !option.required,
+                    )
+                }
+            }
         }
     }
 }
@@ -1075,6 +1104,7 @@ fun MaintenanceActionFlowPage(
                 state = state,
                 onIntent = onIntent,
                 onBack = onBack,
+                actionId = action,
             )
 
             else -> MaintenanceActionWaiting()
@@ -1214,7 +1244,13 @@ private fun MaintenanceInstallResult(
     state: InstallUiState.Result,
     onIntent: (InstallUiIntent) -> Unit,
     onBack: () -> Unit,
+    actionId: MaintenanceActionId,
 ) {
+    val retryIntent = if (actionId == MaintenanceActionId.INSTALL_FILE_MANAGER) {
+        InstallUiIntent.ReturnToMaintenanceInstallationSelection
+    } else {
+        InstallUiIntent.ReturnToSelection
+    }
     val (title, description, icon, tint, actionText, action) = when (state.kind) {
         ResultKind.SUCCESS -> ResultFlowCopy(
             R.string.result_success_title,
@@ -1230,7 +1266,7 @@ private fun MaintenanceInstallResult(
             "triangle_alert",
             InstallerColors.Warning,
             if (state.canEnterMaintenance) R.string.result_enter_maintenance else R.string.result_retry,
-            if (state.canEnterMaintenance) InstallUiIntent.EnterMaintenance else InstallUiIntent.ReturnToSelection,
+            if (state.canEnterMaintenance) InstallUiIntent.EnterMaintenance else retryIntent,
         )
         ResultKind.PAUSED -> ResultFlowCopy(
             R.string.result_paused_title,
@@ -1246,7 +1282,7 @@ private fun MaintenanceInstallResult(
             "cloud_off",
             InstallerColors.Error,
             R.string.result_retry,
-            InstallUiIntent.ReturnToSelection,
+            retryIntent,
         )
         ResultKind.INSTALLATION_FAILED -> ResultFlowCopy(
             R.string.result_failure_title,
@@ -1254,7 +1290,7 @@ private fun MaintenanceInstallResult(
             "triangle_alert",
             InstallerColors.Error,
             R.string.result_retry,
-            InstallUiIntent.ReturnToSelection,
+            retryIntent,
         )
         ResultKind.CONFIGURATION_FAILED -> ResultFlowCopy(
             R.string.result_failure_title,
@@ -1262,7 +1298,7 @@ private fun MaintenanceInstallResult(
             "settings_2",
             InstallerColors.Warning,
             R.string.result_retry,
-            InstallUiIntent.ReturnToSelection,
+            retryIntent,
         )
     }
     Column(
@@ -1822,7 +1858,12 @@ private fun maintenanceFeedbackDescription(feedback: MaintenanceFeedback): Int? 
             "device_disconnected",
         ) -> R.string.maintenance_failure_disconnected
 
-        feedback.reasonCode?.startsWith("catalog_") == true -> R.string.maintenance_failure_catalog
+        feedback.reasonCode?.startsWith("catalog_") == true ||
+            feedback.reasonCode in setOf(
+                "artifact_catalog_not_prepared",
+                "installed_component_manifest_unavailable",
+                "selected_catalog_preparer_strategy_unavailable",
+            ) -> R.string.maintenance_failure_catalog
         feedback.reasonCode?.contains("identity") == true -> R.string.maintenance_failure_identity
         else -> R.string.maintenance_failure_generic
     }

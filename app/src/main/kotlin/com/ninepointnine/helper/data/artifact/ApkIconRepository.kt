@@ -70,9 +70,9 @@ class ApkIconRepository(
 
     /** Resolves one icon without allowing a stale cache entry to outrank a newer APK. */
     private fun loadRequestIcon(request: ApkIconRequest, files: List<File>): Pair<String, Bitmap>? {
-        if (request.preferPersisted) {
-            loadPersistedIcon(request)?.let { return request.componentId to it }
-        }
+        // A verified current APK is the strongest visual source. Persisted
+        // bytes are consulted only after that exact candidate is absent, so a
+        // previous version can never mask a newly extracted logo.
         val candidate = findCandidate(request, files)
         if (candidate != null) {
             // A file can be replaced in place without changing its length or
@@ -117,7 +117,7 @@ class ApkIconRepository(
     /** Persists icons from APKs whose manifest identity has already been verified. */
     suspend fun persistIcons(artifacts: List<InstallableArtifact>) = withContext(Dispatchers.IO) {
         artifacts.forEach { artifact ->
-            val file = artifact.apkFile
+            val file = artifact.apkFile ?: return@forEach
             if (!file.isFile) return@forEach
             val metadata = runCatching { metadataReader.read(file) }.getOrNull() ?: return@forEach
             if (metadata.packageName != artifact.manifest.packageName ||
@@ -278,6 +278,21 @@ class ApkIconRepository(
     }
 
     private fun loadPersistedIcon(request: ApkIconRequest): Bitmap? {
+        // A persisted icon is a proof-bound cache, not a generic component
+        // fallback. Without the complete APK identity, a previous version's
+        // bytes could be shown for a currently unknown installed package.
+        if (
+            request.packageName.isNullOrBlank() ||
+            request.certificateSha256.isNullOrBlank() ||
+            request.versionCode == null ||
+            request.apkSha256.isNullOrBlank()
+        ) {
+            return null
+        }
+        val expectedPackageName = checkNotNull(request.packageName)
+        val expectedCertificate = checkNotNull(request.certificateSha256)
+        val expectedVersionCode = checkNotNull(request.versionCode)
+        val expectedApkSha256 = checkNotNull(request.apkSha256)
         val entries = persistentRoot.listFiles { file -> file.extension == "meta" }.orEmpty()
             .mapNotNull { metaFile ->
                 val properties = runCatching { Properties().also { metaFile.inputStream().use(it::load) } }.getOrNull()
@@ -291,12 +306,10 @@ class ApkIconRepository(
                 )
                 val iconSha256 = properties.getProperty("iconSha256").orEmpty()
                 if (identity.componentId != request.componentId ||
-                    request.packageName != null && identity.packageName != request.packageName ||
-                    request.certificateSha256 != null &&
-                    !identity.certificateSha256.equals(request.certificateSha256, ignoreCase = true) ||
-                    request.versionCode != null && identity.versionCode != request.versionCode ||
-                    request.apkSha256 != null &&
-                    !identity.apkSha256.equals(request.apkSha256, ignoreCase = true) ||
+                    identity.packageName != expectedPackageName ||
+                    !identity.certificateSha256.equals(expectedCertificate, ignoreCase = true) ||
+                    identity.versionCode != expectedVersionCode ||
+                    !identity.apkSha256.equals(expectedApkSha256, ignoreCase = true) ||
                     !isDigest(identity.certificateSha256) || !isDigest(identity.apkSha256) ||
                     !isDigest(iconSha256)
                 ) return@mapNotNull null

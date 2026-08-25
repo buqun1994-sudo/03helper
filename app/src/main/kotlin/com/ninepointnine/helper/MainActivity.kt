@@ -86,6 +86,8 @@ internal fun InstallUiIntent.toInstallationSessionCommand(): InstallationSession
     InstallUiIntent.ContinueInstallation -> InstallationSessionCommand.ContinueInstallation
     InstallUiIntent.RetryInstallation -> InstallationSessionCommand.RetryInstallation
     InstallUiIntent.ReturnToSelection -> InstallationSessionCommand.ReturnToSelection
+    InstallUiIntent.ReturnToMaintenanceInstallationSelection ->
+        InstallationSessionCommand.ReturnToMaintenanceInstallationSelection
     InstallUiIntent.Reconfigure -> InstallationSessionCommand.ReconfigureInstallation
     InstallUiIntent.EnterMaintenance -> InstallationSessionCommand.EnterMaintenance
     InstallUiIntent.LeaveMaintenanceAction -> InstallationSessionCommand.LeaveMaintenanceAction

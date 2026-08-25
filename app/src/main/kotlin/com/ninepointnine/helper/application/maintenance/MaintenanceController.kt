@@ -20,6 +20,7 @@ import com.ninepointnine.helper.domain.artifact.ArtifactVersion
 import com.ninepointnine.helper.domain.artifact.InstallerSelfIdentity
 import com.ninepointnine.helper.domain.session.InstallationSessionEvent
 import com.ninepointnine.helper.domain.session.InstallationSessionSnapshot
+import com.ninepointnine.helper.domain.session.ArtifactCatalogStage
 import com.ninepointnine.helper.domain.session.MaintenanceActionId
 import com.ninepointnine.helper.domain.session.MaintenanceApplicationActionId
 import com.ninepointnine.helper.domain.session.ManagedApplicationStatus
@@ -405,8 +406,7 @@ class MaintenanceController(
             complete(actionId, "authorization_checked", eventPort)
             return
         }
-        val verifiedManifests = (snapshot.artifactManifests + snapshot.maintenance.availableManifests)
-            .distinctBy { it.componentId }
+        val verifiedManifests = maintenanceCatalogManifests(snapshot)
         val manifests = verifiedManifests.filter { it.componentId in installedById }
         if (manifests.map { it.componentId }.toSet() != installedById.keys) {
             fail(actionId, "maintenance_manifest_selection_mismatch", retryable = false, eventPort)
@@ -503,7 +503,7 @@ class MaintenanceController(
             fail(actionId, "device_action_gateway_unavailable", retryable = false, eventPort)
             return
         }
-        val manifest = snapshot.artifactManifests.firstOrNull { it.componentId == componentId }
+        val manifest = maintenanceCatalogManifests(snapshot).firstOrNull { it.componentId == componentId }
         val component = if (manifest != null) {
             ManagedComponent(
                 componentId = manifest.componentId,
@@ -566,10 +566,7 @@ class MaintenanceController(
                 byId.putIfAbsent(component.componentId, component)
             }
         }
-        snapshot.artifactManifests.forEach { manifest ->
-            add(ManagedComponent(manifest.componentId, manifest.packageName, manifest.deviceSetup, manifest.sortOrder))
-        }
-        snapshot.maintenance.availableManifests.forEach { manifest ->
+        maintenanceCatalogManifests(snapshot).forEach { manifest ->
             add(ManagedComponent(manifest.componentId, manifest.packageName, manifest.deviceSetup, manifest.sortOrder))
         }
         snapshot.maintenance.availableComponents.forEach { descriptor ->
@@ -625,7 +622,7 @@ class MaintenanceController(
             snapshot.evidence.installation.forEach { (componentId, evidence) ->
                 putIfAbsent(componentId, evidence.packageName)
             }
-            (snapshot.artifactManifests + snapshot.maintenance.availableManifests).forEach { manifest ->
+            maintenanceCatalogManifests(snapshot).forEach { manifest ->
                 putIfAbsent(manifest.componentId, manifest.packageName)
             }
         }
@@ -754,6 +751,29 @@ class MaintenanceController(
         installed.name.isNotBlank() && available.name.isNotBlank() && installed.name != available.name ->
             MaintenanceUpdateState.UPDATE_AVAILABLE
         else -> MaintenanceUpdateState.CURRENT
+    }
+
+    /**
+     * Explicit maintenance catalog projection. A current prepared batch wins
+     * over an older available entry with the same component id; when no batch
+     * exists, the signed maintenance catalog is the sole source.
+     */
+    private fun maintenanceCatalogManifests(
+        snapshot: InstallationSessionSnapshot,
+    ): List<com.ninepointnine.helper.domain.artifact.ArtifactManifest> {
+        val byId = linkedMapOf<String, com.ninepointnine.helper.domain.artifact.ArtifactManifest>()
+        snapshot.maintenance.availableManifests.forEach { manifest ->
+            byId[manifest.componentId] = manifest
+        }
+        snapshot.maintenance.installedManifests.forEach { manifest ->
+            byId[manifest.componentId] = manifest
+        }
+        if (snapshot.artifactCatalogStage == ArtifactCatalogStage.PREPARED) {
+            snapshot.artifactManifests.forEach { manifest ->
+                byId[manifest.componentId] = manifest
+            }
+        }
+        return byId.values.toList()
     }
 
 }

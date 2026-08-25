@@ -46,6 +46,31 @@ enum class InstallPhase {
     VERIFY,
 }
 
+/**
+ * Explicit lifecycle for artifact metadata. A non-empty manifest list is data,
+ * not a safe substitute for knowing which catalog stage produced it.
+ */
+enum class ArtifactCatalogStage {
+    NOT_LOADED,
+    CONTROL_PLANE_READY,
+    PREPARED,
+}
+
+/**
+ * Installation intent is part of the session contract so a resumed batch
+ * cannot accidentally turn a missing-app install into a reinstall.
+ */
+enum class InstallationStrategy {
+    INSTALL_MISSING_ONLY,
+    REINSTALL_SELECTED,
+}
+
+/** Identifies the business flow that owns the current installation batch. */
+enum class InstallationFlow {
+    INITIAL_INSTALL,
+    MAINTENANCE_INSTALL,
+}
+
 enum class ResultKind {
     SUCCESS,
     PARTIAL_FAILURE,

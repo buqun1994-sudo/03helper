@@ -297,7 +297,13 @@ private fun SelectionScreen(
         Text(text = stringResource(R.string.selection_description), style = MaterialTheme.typography.bodyLarge, color = InstallerColors.AuxiliaryWhite)
         Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
 
-        if (state.preparing) {
+        if (state.failureReason != null) {
+            SelectionFailure(
+                reason = state.failureReason,
+                onRetry = { onIntent(InstallUiIntent.RetryInstallation) },
+                modifier = Modifier.weight(1f),
+            )
+        } else if (state.preparing) {
             SelectionPreparing(modifier = Modifier.weight(1f))
         } else if (state.components.isEmpty()) {
             SelectionUnavailable(onIntent = onIntent, modifier = Modifier.weight(1f))
@@ -390,6 +396,43 @@ private fun SelectionUnavailable(
         PrimaryActionButton(
             text = stringResource(R.string.selection_refresh),
             onClick = { onIntent(InstallUiIntent.RetryInstallation) },
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
+@Composable
+private fun SelectionFailure(
+    reason: String,
+    onRetry: () -> Unit,
+    modifier: Modifier,
+) {
+    Column(
+        modifier = modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(InstallerDimensions.ContentSpacing),
+    ) {
+        StatusIcon(
+            name = "circle_alert",
+            contentDescription = reason,
+            tint = InstallerColors.Error,
+        )
+        Text(
+            text = stringResource(R.string.selection_prepare_failed_title),
+            style = MaterialTheme.typography.headlineSmall,
+            color = InstallerColors.White,
+            textAlign = TextAlign.Center,
+        )
+        Text(
+            text = reason,
+            style = MaterialTheme.typography.bodyLarge,
+            color = InstallerColors.AuxiliaryWhite,
+            textAlign = TextAlign.Center,
+        )
+        Spacer(modifier = Modifier.weight(1f))
+        PrimaryActionButton(
+            text = stringResource(R.string.selection_refresh),
+            onClick = onRetry,
             modifier = Modifier.fillMaxWidth(),
         )
     }

@@ -18,6 +18,7 @@ import com.ninepointnine.helper.domain.session.DeviceConnectionStatus
 import com.ninepointnine.helper.domain.session.DeviceSummary
 import com.ninepointnine.helper.domain.session.InstallationSessionSnapshot
 import com.ninepointnine.helper.domain.session.InstallationSessionState
+import com.ninepointnine.helper.domain.session.ArtifactCatalogStage
 import com.ninepointnine.helper.domain.session.MaintenanceActionId
 import com.ninepointnine.helper.domain.session.MaintenanceActionRecord
 import com.ninepointnine.helper.domain.session.MaintenanceActionStatus
@@ -121,6 +122,7 @@ private data class StoredMaintenanceState(
     val components: List<StoredComponent>,
     val selectedOptionalComponentIds: Set<String>,
     val artifactManifests: List<StoredManifest>,
+    val installedManifests: List<StoredManifest> = emptyList(),
     val availableManifests: List<StoredManifest>,
     val catalogVersion: String?,
     val catalogRevision: Long = 0L,
@@ -141,6 +143,7 @@ private data class StoredMaintenanceState(
     val managedApplicationsFailureReason: String? = null,
     val managedApplicationsFailureRetryable: Boolean = false,
     val availableComponents: List<StoredComponent> = emptyList(),
+    val artifactCatalogStage: String = ArtifactCatalogStage.NOT_LOADED.name,
 ) {
     companion object {
         fun from(snapshot: InstallationSessionSnapshot): StoredMaintenanceState = StoredMaintenanceState(
@@ -156,6 +159,9 @@ private data class StoredMaintenanceState(
                 .map(StoredComponent::from),
             selectedOptionalComponentIds = snapshot.selectedOptionalComponentIds,
             artifactManifests = snapshot.artifactManifests.map(StoredManifest::from),
+            installedManifests = (snapshot.maintenance.installedManifests.ifEmpty {
+                snapshot.artifactManifests.filter { it.componentId in snapshot.evidence.installed }
+            }).map(StoredManifest::from),
             availableManifests = snapshot.maintenance.availableManifests.map(StoredManifest::from),
             catalogVersion = snapshot.catalogVersion,
             catalogRevision = snapshot.catalogRevision,
@@ -181,6 +187,7 @@ private data class StoredMaintenanceState(
                     }
                 })
                 .map(StoredComponent::from),
+            artifactCatalogStage = snapshot.artifactCatalogStage.name,
         )
     }
 
@@ -207,12 +214,17 @@ private data class StoredMaintenanceState(
         if (parsedAvailableComponents.size != availableComponents.size) return null
         val manifests = artifactManifests.mapNotNull { it.toDomainOrNull() }
         if (manifests.size != artifactManifests.size) return null
-        if (manifests.isNotEmpty() && !validateManifests(manifests, sourcePolicy)) {
+        if (manifests.isNotEmpty() && !validateBatchManifests(manifests, sourcePolicy)) {
             return null
         }
         val parsedAvailableManifests = availableManifests.mapNotNull { it.toDomainOrNull() }
         if (parsedAvailableManifests.size != availableManifests.size) return null
         if (parsedAvailableManifests.isNotEmpty() && !validateManifests(parsedAvailableManifests, sourcePolicy)) {
+            return null
+        }
+        val parsedInstalledManifests = installedManifests.mapNotNull { it.toDomainOrNull() }
+        if (parsedInstalledManifests.size != installedManifests.size) return null
+        if (parsedInstalledManifests.isNotEmpty() && !validateManifestEntries(parsedInstalledManifests, sourcePolicy)) {
             return null
         }
         val componentIds = parsedComponents.map { it.id }.toSet()
@@ -251,6 +263,15 @@ private data class StoredMaintenanceState(
             parsedAvailableManifests.isNotEmpty() &&
             (parsedAvailableManifests.any { it.componentId.isBlank() } ||
                 !parsedAvailableManifests.map { it.componentId }.toSet().all {
+                    it in componentIds || InstallerSelfIdentity.isSelfComponentId(it)
+                })
+        ) {
+            return null
+        }
+        if (
+            parsedInstalledManifests.isNotEmpty() &&
+            (parsedInstalledManifests.any { it.componentId.isBlank() } ||
+                !parsedInstalledManifests.map { it.componentId }.toSet().all {
                     it in componentIds || InstallerSelfIdentity.isSelfComponentId(it)
                 })
         ) {
@@ -296,10 +317,22 @@ private data class StoredMaintenanceState(
         } else {
             parsedInventoryState
         }
-        if (manifests.isNotEmpty() &&
-            AuthorizationPlanFactory.createForManifests(manifests) !is
-                com.ninepointnine.helper.domain.device.AuthorizationPlanBuildResult.Ready
-        ) {
+        val parsedArtifactCatalogStage = try {
+            ArtifactCatalogStage.valueOf(artifactCatalogStage)
+        } catch (_: Exception) {
+            return null
+        }
+        val effectiveArtifactCatalogStage = when {
+            parsedArtifactCatalogStage != ArtifactCatalogStage.NOT_LOADED -> parsedArtifactCatalogStage
+            catalogControlPlaneOnly -> ArtifactCatalogStage.CONTROL_PLANE_READY
+            manifests.isNotEmpty() -> ArtifactCatalogStage.PREPARED
+            else -> ArtifactCatalogStage.NOT_LOADED
+        }
+        val effectiveInstalledManifests = parsedInstalledManifests.ifEmpty {
+            val installedIds = installed + applications.map(ManagedApplicationStatus::componentId)
+            manifests.filter { it.componentId in installedIds }
+        }
+        if (manifests.isNotEmpty() && !validateBatchAuthorization(manifests)) {
             return null
         }
         if (parsedAvailableManifests.isNotEmpty() &&
@@ -335,6 +368,7 @@ private data class StoredMaintenanceState(
             },
             selectedOptionalComponentIds = selectedOptionalComponentIds,
             artifactManifests = manifests,
+            artifactCatalogStage = effectiveArtifactCatalogStage,
             catalogVersion = catalogVersion,
             catalogRevision = catalogRevision,
             catalogKeyId = catalogKeyId,
@@ -350,6 +384,7 @@ private data class StoredMaintenanceState(
                 managedApplicationsFailureReason = managedApplicationsFailureReason,
                 managedApplicationsFailureRetryable = managedApplicationsFailureRetryable,
                 managedApplications = applications,
+                installedManifests = effectiveInstalledManifests,
                 availableComponents = parsedAvailableComponents.ifEmpty {
                     parsedComponents.filter {
                         !InstallerSelfIdentity.isSelfComponentId(it.id) && it.status != ComponentStatus.UNLISTED
@@ -380,6 +415,32 @@ private data class StoredMaintenanceState(
         return manifests.all { manifest ->
             sourcePolicy.plan(manifest) is SourcePlan.Accepted
         }
+    }
+
+    private fun validateManifestEntries(
+        manifests: List<ArtifactManifest>,
+        sourcePolicy: ReleaseSourcePolicy,
+    ): Boolean = manifests.all { manifest ->
+        ArtifactManifestValidator.validate(manifest) is ManifestValidation.Valid &&
+            sourcePolicy.plan(manifest) is SourcePlan.Accepted
+    }
+
+    /** A resumable batch may contain only the newly selected components. */
+    private fun validateBatchManifests(
+        manifests: List<ArtifactManifest>,
+        sourcePolicy: ReleaseSourcePolicy,
+    ): Boolean = validateManifestEntries(manifests, sourcePolicy)
+
+    /** Validate each typed component without imposing the full-catalog desktop invariant. */
+    private fun validateBatchAuthorization(manifests: List<ArtifactManifest>): Boolean = manifests.all { manifest ->
+        AuthorizationPlanFactory.validateComponent(
+            com.ninepointnine.helper.domain.device.ManagedComponent(
+                componentId = manifest.componentId,
+                packageName = manifest.packageName,
+                setup = manifest.deviceSetup,
+                order = manifest.sortOrder,
+            ),
+        )
     }
 
     private fun validCatalogMetadata(

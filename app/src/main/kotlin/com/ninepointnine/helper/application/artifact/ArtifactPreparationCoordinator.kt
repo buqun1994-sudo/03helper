@@ -39,8 +39,9 @@ import kotlinx.coroutines.CancellationException
 
 data class PreparedArtifact(
     val manifest: ArtifactManifest,
-    val sourceKind: ArtifactSourceKind,
-    val finalApk: File,
+    /** Null only for an already-installed device prerequisite. */
+    val sourceKind: ArtifactSourceKind? = null,
+    val finalApk: File? = null,
     val declarations: ApkDeclarationMetadata? = null,
 )
 

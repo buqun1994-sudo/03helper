@@ -32,6 +32,8 @@ sealed interface InstallationSessionCommand {
     data object RetryInstallation : InstallationSessionCommand
     /** Clears the failed attempt while retaining the connected device and choices. */
     data object ReturnToSelection : InstallationSessionCommand
+    /** Returns a failed maintenance install to its own application-selection page. */
+    data object ReturnToMaintenanceInstallationSelection : InstallationSessionCommand
     data object ReconfigureInstallation : InstallationSessionCommand
     /** Internal recovery command: restart from the saved selection after an uncertain write stage. */
     data object RestartFromCheckpoint : InstallationSessionCommand

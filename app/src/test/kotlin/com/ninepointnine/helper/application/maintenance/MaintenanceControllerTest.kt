@@ -25,6 +25,7 @@ import com.ninepointnine.helper.domain.device.MaintenanceCommandGateway
 import com.ninepointnine.helper.domain.device.MaintenanceDeviceResult
 import com.ninepointnine.helper.domain.device.InstallableArtifact
 import com.ninepointnine.helper.domain.session.ComponentDescriptor
+import com.ninepointnine.helper.domain.session.ArtifactCatalogStage
 import com.ninepointnine.helper.domain.session.DeviceConnectionStatus
 import com.ninepointnine.helper.domain.session.InstallationSessionEvent
 import com.ninepointnine.helper.domain.session.InstallationSessionSnapshot
@@ -445,6 +446,7 @@ class MaintenanceControllerTest {
             components = components,
             selectedOptionalComponentIds = selected,
             artifactManifests = manifests,
+            artifactCatalogStage = if (manifests.isEmpty()) ArtifactCatalogStage.NOT_LOADED else ArtifactCatalogStage.PREPARED,
             evidence = SessionEvidence(installed = installed),
         )
     }
