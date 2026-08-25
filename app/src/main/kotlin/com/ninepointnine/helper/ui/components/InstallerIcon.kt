@@ -87,7 +87,7 @@ fun ComponentLogo(
 
 /** Stable product artwork is available synchronously before any cloud request. */
 private fun bundledLogo(iconKey: String): Int = when (iconKey) {
-    "03helper", "helper" -> LucideR.drawable.lucide_ic_package
+    "03helper", "helper" -> R.drawable.helper_logo
     "desktop" -> R.drawable.desktop_logo
     "lyrics" -> R.drawable.lyrics_logo
     "cast" -> R.drawable.cast_logo

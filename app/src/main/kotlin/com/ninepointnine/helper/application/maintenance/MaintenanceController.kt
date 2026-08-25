@@ -38,6 +38,8 @@ class MaintenanceController(
     private val loadCatalog: (suspend () -> CatalogLoadResult)? = null,
     private val loadDistributionConfig: (suspend () -> DistributionConfigLoadResult)? = null,
     private val selfVersion: ArtifactVersion = ArtifactVersion("0.1.0", 1L),
+    /** Lightweight signed config + folder listing used by the maintenance install page. */
+    private val loadDistributionSelection: (suspend () -> CatalogLoadResult)? = null,
 ) {
     suspend fun execute(
         actionId: MaintenanceActionId,
@@ -58,7 +60,7 @@ class MaintenanceController(
                 MaintenanceActionId.REPAIR_CONFIGURATION -> repairConfiguration(actionId, snapshot, connection, eventPort)
                 MaintenanceActionId.MANAGE_APPS -> inspectApplications(actionId, snapshot, connection, eventPort)
                 MaintenanceActionId.INSTALL_FILE_MANAGER ->
-                    inspectApplications(actionId, snapshot, connection, eventPort, completeAction = false)
+                    prepareMaintenanceInstallation(actionId, snapshot, connection, eventPort)
                 MaintenanceActionId.LAUNCH_LYRICS -> launch(actionId, "lyrics", snapshot, connection, eventPort)
                 MaintenanceActionId.LAUNCH_DESKTOP -> launch(actionId, "desktop", snapshot, connection, eventPort)
                 MaintenanceActionId.CLEANUP -> {
@@ -116,8 +118,9 @@ class MaintenanceController(
             )
             return
         }
-        if (actionId == MaintenanceApplicationActionId.DETAILS) {
-            when (val result = gateway.inspectManagedApplicationDetails(component)) {
+        try {
+            if (actionId == MaintenanceApplicationActionId.DETAILS) {
+                when (val result = gateway.inspectManagedApplicationDetails(component)) {
                 is ManagedApplicationDetailsProbeResult.Failed -> eventPort.emit(
                     InstallationSessionEvent.MaintenanceApplicationActionFailed(
                         componentId = componentId,
@@ -147,24 +150,65 @@ class MaintenanceController(
                         ),
                     )
                 }
+                }
+                return
             }
-            return
-        }
-        when (val result = gateway.performApplicationAction(component, actionId)) {
-            is MaintenanceDeviceResult.Completed -> eventPort.emit(
-                InstallationSessionEvent.MaintenanceApplicationActionCompleted(
-                    componentId = componentId,
-                    actionId = actionId,
-                    resultCode = result.resultCode,
-                ),
-            )
+            when (val result = gateway.performApplicationAction(component, actionId)) {
+                is MaintenanceDeviceResult.Completed -> {
+                    // The device action result is authoritative for the
+                    // destructive operation. Inventory refresh is a separate,
+                    // best-effort read and can never rewrite success as failure.
+                    var refreshedApplications: List<ManagedApplicationStatus>? = null
+                    var refreshFailureReason: String? = null
+                    var refreshFailureRetryable = true
+                    if (actionId == MaintenanceApplicationActionId.UNINSTALL) {
+                        try {
+                            when (val refreshed = gateway.inspectInstalledApplicationInventory(managedComponents(snapshot))) {
+                                is ManagedApplicationsResult.Completed -> {
+                                    refreshedApplications = refreshed.applications
+                                        .filter { it.installed }
+                                        .map { it.toSnapshotStatus() }
+                                }
 
-            is MaintenanceDeviceResult.Failed -> eventPort.emit(
+                                is ManagedApplicationsResult.Failed -> {
+                                    refreshFailureReason = refreshed.failure.reasonCode
+                                    refreshFailureRetryable = refreshed.failure.retryable
+                                }
+                            }
+                        } catch (_: Exception) {
+                            refreshFailureReason = "maintenance_inventory_refresh_failed"
+                        }
+                    }
+                    eventPort.emit(
+                        InstallationSessionEvent.MaintenanceApplicationActionCompleted(
+                            componentId = componentId,
+                            actionId = actionId,
+                            resultCode = result.resultCode,
+                            refreshedApplications = refreshedApplications,
+                            inventoryRefreshFailureReason = refreshFailureReason,
+                            inventoryRefreshRetryable = refreshFailureRetryable,
+                        ),
+                    )
+                }
+
+                is MaintenanceDeviceResult.Failed -> eventPort.emit(
+                    InstallationSessionEvent.MaintenanceApplicationActionFailed(
+                        componentId = componentId,
+                        actionId = actionId,
+                        reasonCode = result.failure.reasonCode,
+                        retryable = result.failure.retryable,
+                    ),
+                )
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            eventPort.emit(
                 InstallationSessionEvent.MaintenanceApplicationActionFailed(
                     componentId = componentId,
                     actionId = actionId,
-                    reasonCode = result.failure.reasonCode,
-                    retryable = result.failure.retryable,
+                    reasonCode = "maintenance_application_action_failed",
+                    retryable = true,
                 ),
             )
         }
@@ -380,15 +424,18 @@ class MaintenanceController(
         connection: com.ninepointnine.helper.domain.device.DeviceConnectionLease?,
         eventPort: InstallationSessionEventPort,
         completeAction: Boolean = true,
-    ) {
+    ): Boolean {
         val gateway = maintenanceGateway(connection)
         if (gateway == null) {
             fail(actionId, "device_action_gateway_unavailable", retryable = false, eventPort)
-            return
+            return false
         }
         val components = managedComponents(snapshot)
         when (val result = gateway.inspectManagedApplications(components)) {
-            is ManagedApplicationsResult.Failed -> fail(actionId, result.failure.reasonCode, result.failure.retryable, eventPort)
+            is ManagedApplicationsResult.Failed -> {
+                fail(actionId, result.failure.reasonCode, result.failure.retryable, eventPort)
+                return false
+            }
             is ManagedApplicationsResult.Completed -> {
                 eventPort.emit(
                     InstallationSessionEvent.MaintenanceApplicationsResolved(
@@ -396,8 +443,52 @@ class MaintenanceController(
                     ),
                 )
                 if (completeAction) complete(actionId, "applications_checked", eventPort)
+                return true
             }
         }
+    }
+
+    private suspend fun prepareMaintenanceInstallation(
+        actionId: MaintenanceActionId,
+        snapshot: InstallationSessionSnapshot,
+        connection: com.ninepointnine.helper.domain.device.DeviceConnectionLease?,
+        eventPort: InstallationSessionEventPort,
+    ) {
+        // Resolve the complete signed configuration first. This operation only
+        // reads the config and folder index; ZIP/APK preparation still waits
+        // for the user's explicit selection.
+        val loader = loadDistributionSelection
+        var effectiveSnapshot = snapshot
+        if (loader != null) {
+            when (val result = loader()) {
+                is CatalogLoadResult.Failure -> {
+                    fail(actionId, result.reasonCode, result.retryable, eventPort)
+                    return
+                }
+
+                is CatalogLoadResult.Success -> {
+                    val descriptors = result.catalog.toComponentDescriptors(snapshot.device?.androidSdk)
+                    effectiveSnapshot = snapshot.copy(
+                        components = descriptors,
+                        maintenance = snapshot.maintenance.copy(availableComponents = descriptors),
+                    )
+                    eventPort.emit(
+                        InstallationSessionEvent.MaintenanceCatalogRefreshed(
+                        catalogVersion = result.catalog.catalogVersion,
+                        keyId = result.catalog.keyId,
+                        signatureAlgorithm = result.catalog.signatureAlgorithm,
+                        manifests = result.catalog.manifests,
+                        catalogRevision = result.catalog.catalogRevision,
+                        apps = descriptors,
+                        appFailures = result.catalog.appFailures.associate { it.componentId to it.reasonCode },
+                        updateStatuses = emptyList(),
+                        controlPlaneOnly = true,
+                        ),
+                    )
+                }
+            }
+        }
+        inspectApplications(actionId, effectiveSnapshot, connection, eventPort, completeAction = false)
     }
 
     private suspend fun launch(
@@ -480,6 +571,13 @@ class MaintenanceController(
         }
         snapshot.maintenance.availableManifests.forEach { manifest ->
             add(ManagedComponent(manifest.componentId, manifest.packageName, manifest.deviceSetup, manifest.sortOrder))
+        }
+        snapshot.maintenance.availableComponents.forEach { descriptor ->
+            val packageName = com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
+                .allowedPackageNames(descriptor.id)
+                .firstOrNull()
+                ?: return@forEach
+            add(ManagedComponent(descriptor.id, packageName, order = byId.size))
         }
         snapshot.evidence.installation.forEach { (componentId, evidence) ->
             val current = byId[componentId]

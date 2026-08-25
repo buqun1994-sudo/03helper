@@ -13,6 +13,7 @@ import com.ninepointnine.helper.domain.artifact.SourcePlan
 import com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
 import com.ninepointnine.helper.domain.device.DeviceCapability
 import com.ninepointnine.helper.domain.session.ComponentDescriptor
+import com.ninepointnine.helper.domain.session.ComponentCompatibility
 import com.ninepointnine.helper.domain.session.DeviceConnectionStatus
 import com.ninepointnine.helper.domain.session.DeviceSummary
 import com.ninepointnine.helper.domain.session.InstallationSessionSnapshot
@@ -20,6 +21,7 @@ import com.ninepointnine.helper.domain.session.InstallationSessionState
 import com.ninepointnine.helper.domain.session.MaintenanceActionId
 import com.ninepointnine.helper.domain.session.MaintenanceActionRecord
 import com.ninepointnine.helper.domain.session.MaintenanceActionStatus
+import com.ninepointnine.helper.domain.session.MaintenanceInventoryState
 import com.ninepointnine.helper.domain.session.MaintenanceSnapshot
 import com.ninepointnine.helper.domain.session.ManagedApplicationStatus
 import com.ninepointnine.helper.domain.session.ComponentStatus
@@ -134,6 +136,11 @@ private data class StoredMaintenanceState(
     val available: Set<String>,
     val managedApplications: List<StoredApplication>,
     val lastAction: StoredMaintenanceAction? = null,
+    /** Added with defaults so schema-1 records written by older builds remain readable. */
+    val managedApplicationsState: String = MaintenanceInventoryState.NOT_STARTED.name,
+    val managedApplicationsFailureReason: String? = null,
+    val managedApplicationsFailureRetryable: Boolean = false,
+    val availableComponents: List<StoredComponent> = emptyList(),
 ) {
     companion object {
         fun from(snapshot: InstallationSessionSnapshot): StoredMaintenanceState = StoredMaintenanceState(
@@ -144,31 +151,9 @@ private data class StoredMaintenanceState(
                 androidSdk = snapshot.device?.androidSdk,
                 capabilities = snapshot.device?.capabilities.orEmpty().map { it.name },
             ),
-            components = snapshot.components.map { component ->
-                StoredComponent(
-                    id = component.id,
-                    displayName = component.displayName,
-                    required = component.required,
-                    versionLabel = component.versionLabel,
-                    sizeLabel = component.sizeLabel,
-                    compatibilityLabel = component.compatibilityLabel,
-                    description = component.description,
-                    status = component.status.name,
-                    errorReason = component.errorReason,
-                    icon = component.iconAsset?.let { asset ->
-                        InstallerAppIconDocument(
-                            assetId = asset.assetId,
-                            assetVersion = asset.assetVersion,
-                            url = asset.url,
-                            mimeType = asset.mimeType,
-                            width = asset.width,
-                            height = asset.height,
-                            sizeBytes = asset.sizeBytes,
-                            sha256 = asset.sha256,
-                        )
-                    },
-                )
-            },
+            components = (snapshot.components + snapshot.maintenance.availableComponents)
+                .distinctBy { it.id }
+                .map(StoredComponent::from),
             selectedOptionalComponentIds = snapshot.selectedOptionalComponentIds,
             artifactManifests = snapshot.artifactManifests.map(StoredManifest::from),
             availableManifests = snapshot.maintenance.availableManifests.map(StoredManifest::from),
@@ -186,6 +171,16 @@ private data class StoredMaintenanceState(
             available = snapshot.evidence.available,
             managedApplications = snapshot.maintenance.managedApplications.map(StoredApplication::from),
             lastAction = snapshot.maintenance.lastAction?.let(StoredMaintenanceAction::from),
+            managedApplicationsState = snapshot.maintenance.managedApplicationsState.name,
+            managedApplicationsFailureReason = snapshot.maintenance.managedApplicationsFailureReason,
+            managedApplicationsFailureRetryable = snapshot.maintenance.managedApplicationsFailureRetryable,
+            availableComponents = (snapshot.maintenance.availableComponents
+                .ifEmpty {
+                    snapshot.components.filter {
+                        !InstallerSelfIdentity.isSelfComponentId(it.id) && it.status != ComponentStatus.UNLISTED
+                    }
+                })
+                .map(StoredComponent::from),
         )
     }
 
@@ -208,6 +203,8 @@ private data class StoredMaintenanceState(
         }
         val parsedComponents = components.mapNotNull { it.toDomainOrNull() }
         if (parsedComponents.size != components.size) return null
+        val parsedAvailableComponents = availableComponents.mapNotNull { it.toDomainOrNull() }
+        if (parsedAvailableComponents.size != availableComponents.size) return null
         val manifests = artifactManifests.mapNotNull { it.toDomainOrNull() }
         if (manifests.size != artifactManifests.size) return null
         if (manifests.isNotEmpty() && !validateManifests(manifests, sourcePolicy)) {
@@ -228,6 +225,12 @@ private data class StoredMaintenanceState(
             selectedOptionalComponentIds.any {
                 it !in componentIds || it == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
             }
+        ) {
+            return null
+        }
+        if (
+            parsedAvailableComponents.map { it.id }.toSet().size != parsedAvailableComponents.size ||
+            parsedAvailableComponents.any { it.id !in componentIds }
         ) {
             return null
         }
@@ -275,7 +278,24 @@ private data class StoredMaintenanceState(
         ) {
             return null
         }
+        val parsedInventoryState = try {
+            MaintenanceInventoryState.valueOf(managedApplicationsState)
+        } catch (_: Exception) {
+            return null
+        }
         val parsedLastAction = lastAction?.toDomainOrNull() ?: if (lastAction == null) null else return null
+        val effectiveInventoryState = if (
+            parsedInventoryState == MaintenanceInventoryState.NOT_STARTED &&
+            parsedLastAction?.actionId in INVENTORY_ACTIONS &&
+            parsedLastAction?.status == MaintenanceActionStatus.SUCCEEDED
+        ) {
+            // Older schema-1 records had no explicit inventory state. A
+            // successful inventory action, including an empty result, is a
+            // durable READY proof rather than an implicit loading state.
+            MaintenanceInventoryState.READY
+        } else {
+            parsedInventoryState
+        }
         if (manifests.isNotEmpty() &&
             AuthorizationPlanFactory.createForManifests(manifests) !is
                 com.ninepointnine.helper.domain.device.AuthorizationPlanBuildResult.Ready
@@ -326,7 +346,15 @@ private data class StoredMaintenanceState(
             ),
             maintenance = MaintenanceSnapshot(
                 lastAction = parsedLastAction,
+                managedApplicationsState = effectiveInventoryState,
+                managedApplicationsFailureReason = managedApplicationsFailureReason,
+                managedApplicationsFailureRetryable = managedApplicationsFailureRetryable,
                 managedApplications = applications,
+                availableComponents = parsedAvailableComponents.ifEmpty {
+                    parsedComponents.filter {
+                        !InstallerSelfIdentity.isSelfComponentId(it.id) && it.status != ComponentStatus.UNLISTED
+                    }
+                },
                 availableManifests = parsedAvailableManifests,
                 availableCatalogVersion = availableCatalogVersion,
                 availableCatalogRevision = availableCatalogRevision,
@@ -367,6 +395,12 @@ private data class StoredMaintenanceState(
 }
 
 private val SUPPORTED_SIGNATURE_ALGORITHMS = setOf("SHA256withECDSA", "Ed25519")
+
+private val INVENTORY_ACTIONS = setOf(
+    MaintenanceActionId.MANAGE_APPS,
+    MaintenanceActionId.REPAIR_CONFIGURATION,
+    MaintenanceActionId.INSTALL_FILE_MANAGER,
+)
 
 @Serializable
 private data class StoredMaintenanceAction(
@@ -446,7 +480,37 @@ private data class StoredComponent(
     val errorReason: String? = null,
     /** Signed preview metadata retained so a cold maintenance page is stable. */
     val icon: InstallerAppIconDocument? = null,
+    val compatibilityState: String = ComponentCompatibility.SUPPORTED.name,
+    val iconKey: String = "",
 ) {
+    companion object {
+        fun from(component: ComponentDescriptor): StoredComponent = StoredComponent(
+            id = component.id,
+            displayName = component.displayName,
+            required = component.required,
+            versionLabel = component.versionLabel,
+            sizeLabel = component.sizeLabel,
+            compatibilityLabel = component.compatibilityLabel,
+            description = component.description,
+            status = component.status.name,
+            errorReason = component.errorReason,
+            icon = component.iconAsset?.let { asset ->
+                InstallerAppIconDocument(
+                    assetId = asset.assetId,
+                    assetVersion = asset.assetVersion,
+                    url = asset.url,
+                    mimeType = asset.mimeType,
+                    width = asset.width,
+                    height = asset.height,
+                    sizeBytes = asset.sizeBytes,
+                    sha256 = asset.sha256,
+                )
+            },
+            compatibilityState = component.compatibilityState.name,
+            iconKey = component.iconKey,
+        )
+    }
+
     fun toDomainOrNull(): ComponentDescriptor? = runCatching {
         ComponentDescriptor(
             id = id,
@@ -455,6 +519,8 @@ private data class StoredComponent(
             versionLabel = versionLabel,
             sizeLabel = sizeLabel,
             compatibilityLabel = compatibilityLabel,
+            compatibilityState = ComponentCompatibility.valueOf(compatibilityState),
+            iconKey = iconKey.ifBlank { id },
             iconAsset = icon?.toDomain(),
             description = description,
             status = ComponentStatus.valueOf(status),

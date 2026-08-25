@@ -57,31 +57,61 @@ class ApkIconRepository(
         manifests: List<ArtifactManifest> = emptyList(),
     ): Map<String, Bitmap> = withContext(Dispatchers.IO) {
         if (requests.isEmpty()) return@withContext emptyMap()
-        val files = buildList {
-            addAll(artifactCache.publicApkCandidates())
-            manifests.forEach { manifest ->
-                artifactCache.paths(manifest).apk.takeIf(File::isFile)?.let(::add)
+        val files = artifactCache.withPublicApkCandidates {
+            buildList {
+                addAll(it)
+                manifests.forEach { manifest ->
+                    artifactCache.paths(manifest).apk.takeIf(File::isFile)?.let(::add)
+                }
             }
         }.distinctBy { runCatching { it.canonicalPath }.getOrDefault(it.absolutePath) }
-        requests.mapNotNull { request ->
-            val persisted = if (request.preferPersisted) {
-                loadPersistedIcon(request)?.let { request.componentId to it }
-            } else {
-                null
+        requests.mapNotNull { request -> loadRequestIcon(request, files) }.toMap()
+    }
+
+    /** Resolves one icon without allowing a stale cache entry to outrank a newer APK. */
+    private fun loadRequestIcon(request: ApkIconRequest, files: List<File>): Pair<String, Bitmap>? {
+        if (request.preferPersisted) {
+            loadPersistedIcon(request)?.let { return request.componentId to it }
+        }
+        val candidate = findCandidate(request, files)
+        if (candidate != null) {
+            // A file can be replaced in place without changing its length or
+            // timestamp. Include the bytes in the cache key so an APK icon
+            // can never survive a content replacement.
+            val digest = runCatching { sha256(candidate.file) }.getOrNull()
+            if (digest != null) {
+                val exactRequest = request.copy(
+                    packageName = candidate.metadata.packageName,
+                    certificateSha256 = candidate.identity.certificateSha256,
+                    apkSha256 = digest,
+                    versionCode = candidate.metadata.version.code,
+                    preferPersisted = true,
+                )
+                loadPersistedIcon(exactRequest)?.let { return request.componentId to it }
+                val key = cacheKey(request.componentId, candidate.file, candidate.metadata, digest)
+                val bitmap = bitmapCache[key] ?: loadBitmap(candidate.file)?.also { loaded ->
+                    bitmapCache[key] = loaded
+                }
+                if (bitmap != null) {
+                    // Preview APKs must establish the same durable cache as
+                    // APKs prepared for installation. The exact request above
+                    // makes this write a no-op on a same-version/same-digest hit.
+                    writePersistedIcon(
+                        CacheIdentity(
+                            componentId = request.componentId,
+                            packageName = candidate.metadata.packageName,
+                            certificateSha256 = candidate.identity.certificateSha256.lowercase(),
+                            versionCode = candidate.metadata.version.code,
+                            apkSha256 = digest.lowercase(),
+                        ),
+                        bitmap,
+                    )
+                    return request.componentId to bitmap
+                }
             }
-            persisted
-                ?: findCandidate(request, files)?.let { candidate ->
-                // A file can be replaced in place without changing its length or
-                // timestamp. Include the bytes in the cache key so an APK icon
-                // can never survive a content replacement.
-                val digest = runCatching { sha256(candidate.file) }.getOrNull()
-                val key = digest?.let { cacheKey(request.componentId, candidate.file, candidate.metadata, it) }
-                val bitmap = key?.let(bitmapCache::get)
-                    ?: loadBitmap(candidate.file)?.also { loaded -> key?.let { bitmapCache[it] = loaded } }
-                bitmap?.let { request.componentId to it }
-            } ?: loadPersistedIcon(request)?.let { bitmap -> request.componentId to bitmap }
-                ?: loadInstalledIcon(request)?.let { bitmap -> request.componentId to bitmap }
-        }.toMap()
+        }
+        loadPersistedIcon(request)?.let { return request.componentId to it }
+        return loadInstalledIcon(request)?.let { request.componentId to it }
     }
 
     /** Persists icons from APKs whose manifest identity has already been verified. */
@@ -92,6 +122,7 @@ class ApkIconRepository(
             val metadata = runCatching { metadataReader.read(file) }.getOrNull() ?: return@forEach
             if (metadata.packageName != artifact.manifest.packageName ||
                 metadata.certificateSha256s.none { it.equals(artifact.manifest.certificateSha256, ignoreCase = true) } ||
+                metadata.version.code != artifact.manifest.apkVersion.code ||
                 runCatching { sha256(file) }.getOrNull()?.equals(artifact.manifest.apkSha256, ignoreCase = true) != true
             ) return@forEach
             val bitmap = loadBitmap(file) ?: return@forEach

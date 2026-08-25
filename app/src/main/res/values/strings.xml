@@ -109,6 +109,7 @@
     <string name="maintenance_update_apps_section">车机应用</string>
     <string name="maintenance_update_car_disconnected">车机未连接，仅显示助手自身版本</string>
     <string name="maintenance_update_unavailable">暂无可用版本信息</string>
+    <string name="maintenance_update_failed">暂时无法检查更新，请重试</string>
     <string name="maintenance_update_checking">正在检查更新，请稍候</string>
     <string name="maintenance_update_node_checking">正在检查%1$s</string>
     <string name="maintenance_update_all">全部更新</string>
@@ -118,8 +119,15 @@
     <string name="maintenance_version_unknown">版本信息暂不可用</string>
     <string name="maintenance_version_code_short">版本 %1$d</string>
     <string name="maintenance_authorization_disconnected">请先连接车机，再检查应用授权</string>
+    <string name="maintenance_inventory_loading">正在读取车机应用</string>
+    <string name="maintenance_inventory_failed">暂时无法读取车机应用，请重试</string>
+    <string name="maintenance_no_installed_apps">当前无已安装应用</string>
+    <string name="maintenance_no_installable_apps">当前没有可安装应用</string>
+    <string name="maintenance_installed_section">已安装</string>
+    <string name="maintenance_not_installed_section">未安装</string>
     <string name="maintenance_confirm">确认</string>
     <string name="maintenance_reauthorize">重新授权</string>
+    <string name="maintenance_retry">重新尝试</string>
     <string name="maintenance_authorization_check_complete">检查完成，所有应用授权正常</string>
     <string name="maintenance_authorization_complete">授权完成，所有应用授权正常</string>
     <string name="maintenance_start">启动应用</string>

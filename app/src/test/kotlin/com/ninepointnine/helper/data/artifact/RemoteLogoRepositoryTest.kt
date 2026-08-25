@@ -3,6 +3,8 @@ package com.ninepointnine.helper.data.artifact
 import com.ninepointnine.helper.domain.artifact.AppIconAsset
 import java.nio.file.Files
 import java.security.MessageDigest
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
@@ -14,19 +16,19 @@ class RemoteLogoRepositoryTest {
         val root = Files.createTempDirectory("remote-logo-cache").toFile()
         val body = byteArrayOf(1, 2, 3, 4)
         val digest = sha256(body)
-        val responses = ArrayDeque(
+        val responses = ConcurrentLinkedQueue(
             listOf(
                 LogoAssetResponse(statusCode = 200, contentType = null, body = body),
                 LogoAssetResponse(statusCode = 200, contentType = "image/jpeg", body = body),
                 LogoAssetResponse(statusCode = 200, contentType = "image/png", body = byteArrayOf(9, 8, 7, 6)),
             ),
         )
-        var calls = 0
+        val calls = AtomicInteger()
         val repository = RemoteLogoRepository(
             root = root,
             transport = LogoAssetTransport { _, _ ->
-                calls += 1
-                responses.removeFirst()
+                calls.incrementAndGet()
+                responses.remove() ?: error("logo test response missing")
             },
         )
         val requests = listOf(
@@ -36,7 +38,7 @@ class RemoteLogoRepositoryTest {
         )
 
         assertTrue(repository.loadIcons(requests).isEmpty())
-        assertEquals(3, calls)
+        assertEquals(3, calls.get())
         assertEquals(0, root.listFiles()?.size ?: 0)
     }
 

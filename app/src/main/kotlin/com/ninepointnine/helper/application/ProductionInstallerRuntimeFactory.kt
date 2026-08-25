@@ -5,18 +5,16 @@ import android.os.Environment
 import com.ninepointnine.helper.BuildConfig
 import com.ninepointnine.helper.application.artifact.ArtifactCatalogSessionAdapter
 import com.ninepointnine.helper.application.artifact.ArtifactPreparationCoordinator
+import com.ninepointnine.helper.application.artifact.ArtifactPreparationResult
 import com.ninepointnine.helper.application.artifact.InstallerCatalogLoader
 import com.ninepointnine.helper.application.device.DeviceConnectionSessionAdapter
 import com.ninepointnine.helper.application.device.DeviceDiscoverySessionAdapter
 import com.ninepointnine.helper.application.device.DeviceInstallationCoordinator
-import com.ninepointnine.helper.application.device.DeviceInstallationExecutionResult
 import com.ninepointnine.helper.application.maintenance.MaintenanceController
 import com.ninepointnine.helper.application.maintenance.MaintenanceDiagnosticStore
 import com.ninepointnine.helper.application.maintenance.MaintenanceSessionStore
 import com.ninepointnine.helper.data.artifact.AndroidApkMetadataReader
 import com.ninepointnine.helper.data.artifact.ApkIconRepository
-import com.ninepointnine.helper.data.artifact.RemoteLogoRepository
-import com.ninepointnine.helper.data.artifact.UrlConnectionLogoAssetTransport
 import com.ninepointnine.helper.data.artifact.ArchiveIdentityVerifier
 import com.ninepointnine.helper.data.artifact.ArtifactArchiveExtractor
 import com.ninepointnine.helper.data.artifact.ArtifactIdentityVerifier
@@ -161,16 +159,12 @@ object ProductionInstallerRuntimeFactory {
                     ),
                     cache = artifactCache,
                     eventPort = eventPort,
-                ).prepare(manifests)
-            },
-            executeDeviceInstallation = { connection, artifacts, eventPort ->
-                try {
-                    val result = DeviceInstallationCoordinator(eventPort).execute(connection, artifacts)
-                    // The APK has already passed manifest/package/signature and
-                    // digest verification at this point. Keep its icon in the
-                    // app-private cache before temporary files are removed.
-                    if (result is DeviceInstallationExecutionResult.Completed) {
-                        apkIconRepository.persistIcons(artifacts.map {
+                ).prepare(manifests).also { result ->
+                    // The APK identity gate has completed before the car write
+                    // starts. Persisting here makes a newly prepared version's
+                    // icon available even when a later device step is partial.
+                    if (result is ArtifactPreparationResult.Prepared) {
+                        apkIconRepository.persistIcons(result.artifacts.map {
                             com.ninepointnine.helper.domain.device.InstallableArtifact(
                                 manifest = it.manifest,
                                 apkFile = it.finalApk,
@@ -178,6 +172,11 @@ object ProductionInstallerRuntimeFactory {
                             )
                         })
                     }
+                }
+            },
+            executeDeviceInstallation = { connection, artifacts, eventPort ->
+                try {
+                    DeviceInstallationCoordinator(eventPort).execute(connection, artifacts)
                 } finally {
                     // Every install attempt, including a partial failure, ends
                     // with disposal of private transfer and extraction files.
@@ -192,6 +191,7 @@ object ProductionInstallerRuntimeFactory {
                 ),
                 loadCatalog = { catalogLoader.load() },
                 loadDistributionConfig = { folderCatalogAdapter.loadConfiguration() },
+                loadDistributionSelection = { folderCatalogAdapter.loadSelection() },
                 selfVersion = ArtifactVersion(BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE.toLong()),
             ),
             persistMaintenanceSnapshot = { snapshot ->
@@ -199,10 +199,6 @@ object ProductionInstallerRuntimeFactory {
             },
             coroutineContext = Dispatchers.Main.immediate,
             apkIconRepository = apkIconRepository,
-            remoteLogoRepository = RemoteLogoRepository(
-                root = File(applicationContext.filesDir, REMOTE_LOGO_CACHE_DIRECTORY),
-                transport = UrlConnectionLogoAssetTransport(),
-            ),
         )
     }
 
@@ -212,7 +208,6 @@ object ProductionInstallerRuntimeFactory {
     private const val DIAGNOSTIC_CACHE_DIRECTORY = "maintenance-diagnostics"
     private const val MAINTENANCE_SESSION_FILE = "maintenance-session.json"
     private const val CATALOG_REVISION_FILE = "android-catalog-revisions.properties"
-    private const val REMOTE_LOGO_CACHE_DIRECTORY = "03-app-logo-cache"
     private const val DISCOVERY_READ_TIMEOUT_MILLIS = 900
     private const val INSTALLATION_READ_TIMEOUT_MILLIS = 60_000
 

@@ -157,7 +157,13 @@ data class SessionEvidence(
 data class MaintenanceSnapshot(
     val activeAction: MaintenanceActionId? = null,
     val lastAction: MaintenanceActionRecord? = null,
+    /** Explicit inventory state; an empty list is a valid loaded result. */
+    val managedApplicationsState: MaintenanceInventoryState = MaintenanceInventoryState.NOT_STARTED,
+    val managedApplicationsFailureReason: String? = null,
+    val managedApplicationsFailureRetryable: Boolean = false,
     val managedApplications: List<ManagedApplicationStatus> = emptyList(),
+    /** Full signed/configured component set used by maintenance installation. */
+    val availableComponents: List<ComponentDescriptor> = emptyList(),
     val availableManifests: List<ArtifactManifest> = emptyList(),
     val availableCatalogVersion: String? = null,
     val availableCatalogRevision: Long = 0L,
@@ -172,6 +178,13 @@ data class MaintenanceSnapshot(
     val authorization: MaintenanceAuthorizationSnapshot = MaintenanceAuthorizationSnapshot(),
     val installationSelection: MaintenanceInstallationSelection? = null,
 )
+
+enum class MaintenanceInventoryState {
+    NOT_STARTED,
+    LOADING,
+    READY,
+    FAILED,
+}
 
 data class MaintenanceActionRecord(
     val actionId: MaintenanceActionId,

@@ -24,11 +24,8 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
-import com.ninepointnine.helper.BuildConfig
 import com.ninepointnine.helper.data.artifact.ApkIconRepository
 import com.ninepointnine.helper.data.artifact.ApkIconRequest
-import com.ninepointnine.helper.data.artifact.RemoteLogoRepository
-import com.ninepointnine.helper.data.artifact.RemoteLogoRequest
 import com.ninepointnine.helper.domain.artifact.InstallerSelfIdentity
 import com.ninepointnine.helper.domain.session.InstallationSessionSnapshot
 import com.ninepointnine.helper.ui.screens.FirstInstallScreen
@@ -49,7 +46,6 @@ fun InstallApp(
     onIntent: (InstallUiIntent) -> Unit,
     modifier: Modifier = Modifier,
     apkIconRepository: ApkIconRepository? = null,
-    remoteLogoRepository: RemoteLogoRepository? = null,
 ) {
     val uiState = InstallUiStateMapper.map(snapshot)
     var maintenanceAction by remember { mutableStateOf<MaintenanceActionId?>(null) }
@@ -62,53 +58,12 @@ fun InstallApp(
     val iconRequests = remember(snapshot.components, iconManifests, snapshot.maintenance) {
         buildIconRequests(snapshot)
     }
-    val remoteSuppressedComponentIds = remember(
-        iconRequests,
-        snapshot.maintenance.managedApplications,
-        snapshot.maintenance.activeAction,
-    ) {
-        buildRemoteIconSuppression(snapshot, iconRequests)
-    }
-    val remoteIconRequests = remember(
-        snapshot.components,
-        snapshot.catalogRevision,
-        snapshot.catalogVersion,
-        remoteSuppressedComponentIds,
-    ) {
-        buildRemoteIconRequests(snapshot, remoteSuppressedComponentIds)
-    }
     // Keep the request identity with each decoded bitmap. A component id by
     // itself is not enough: a new installed version or a new signed cloud
     // asset must invalidate the previous image immediately.
     var localApkIcons by remember { mutableStateOf<Map<ApkIconRequest, ImageBitmap>>(emptyMap()) }
-    var remoteIcons by remember { mutableStateOf<Map<RemoteLogoRequest, ImageBitmap>>(emptyMap()) }
     val localRequestsByComponent = iconRequests.associateBy { it.componentId }
-    val remoteRequestsByComponent = remoteIconRequests.associateBy { it.componentId }
-    LaunchedEffect(apkIconRepository, remoteLogoRepository, iconRequests, remoteIconRequests) {
-        // Read immutable remote cache entries before scanning local APK files.
-        // The latter may inspect several public Download files; it must not
-        // delay a logo that is already available locally on disk.
-        val remoteCachedResult = remoteLogoRepository
-            ?.loadCachedIcons(remoteIconRequests)
-            .orEmpty()
-        val remoteCached = remoteCachedResult.mapNotNull { (componentId, bitmap) ->
-            remoteRequestsByComponent[componentId]?.let { request ->
-                request to bitmap.asImageBitmap()
-            }
-        }.toMap()
-        val cachedLocalComponents = localApkIcons.keys.mapTo(mutableSetOf()) { it.componentId }
-        remoteIcons = remoteIcons
-            .filterKeys { request ->
-                remoteRequestsByComponent[request.componentId] == request &&
-                    request.componentId !in remoteSuppressedComponentIds &&
-                    request.componentId !in cachedLocalComponents
-            } + remoteCached.filterKeys { request ->
-            request.componentId !in remoteSuppressedComponentIds && request.componentId !in cachedLocalComponents
-        }
-
-        // A verified APK or a persisted APK icon always wins once its scan
-        // completes. The UI's visible-icon projection also enforces this
-        // precedence while both stages are in flight.
+    LaunchedEffect(apkIconRepository, iconRequests, iconManifests, snapshot.revision) {
         val localResult = apkIconRepository
             ?.loadIcons(iconRequests, iconManifests)
             .orEmpty()
@@ -120,45 +75,12 @@ fun InstallApp(
         val nextLocalIcons = localApkIcons
             .filterKeys { localRequestsByComponent[it.componentId] == it } + localResults
         localApkIcons = nextLocalIcons
-
-        val localComponents = nextLocalIcons.keys.mapTo(mutableSetOf()) { it.componentId }
-        remoteIcons = remoteIcons.filterKeys { request ->
-            remoteRequestsByComponent[request.componentId] == request &&
-                request.componentId !in remoteSuppressedComponentIds &&
-                request.componentId !in localComponents
-        }
-
-        val remoteResult = remoteLogoRepository
-            ?.loadIcons(remoteIconRequests.filterNot { remoteCached.containsKey(it) })
-            .orEmpty()
-        val remoteResults = remoteResult.mapNotNull { (componentId, bitmap) ->
-            remoteRequestsByComponent[componentId]?.let { request ->
-                request to bitmap.asImageBitmap()
-            }
-        }.toMap()
-        remoteIcons = remoteIcons + remoteResults.filterKeys { request ->
-            request.componentId !in remoteSuppressedComponentIds && request.componentId !in localComponents
-        }
     }
     val activeLocalIcons = localApkIcons.mapNotNull { (request, bitmap) ->
         (localRequestsByComponent[request.componentId] == request).takeIf { it }
             ?.let { request.componentId to bitmap }
     }.toMap()
-    val activeLocalComponents = activeLocalIcons.keys
-    val activeRemoteIcons = remoteIcons.mapNotNull { (request, bitmap) ->
-        if (remoteRequestsByComponent[request.componentId] == request &&
-            request.componentId !in remoteSuppressedComponentIds &&
-            request.componentId !in activeLocalComponents
-        ) {
-            request.componentId to bitmap
-        } else {
-            null
-        }
-    }.toMap()
-    val visibleIcons = buildMap {
-        putAll(activeLocalIcons)
-        putAll(activeRemoteIcons)
-    }
+    val visibleIcons = activeLocalIcons
     InstallerTheme {
         CompositionLocalProvider(LocalApkIcons provides visibleIcons) {
             Box(
@@ -289,48 +211,6 @@ private fun buildIconRequests(snapshot: InstallationSessionSnapshot): List<ApkIc
         }
     }.sortedBy { it.componentId }
 }
-
-private fun buildRemoteIconSuppression(
-    snapshot: InstallationSessionSnapshot,
-    iconRequests: List<ApkIconRequest>,
-): Set<String> = buildSet {
-    addAll(
-        snapshot.maintenance.managedApplications
-            .filter { it.installed }
-            .map { it.componentId },
-    )
-    if (snapshot.maintenance.activeAction in INVENTORY_REFRESH_ACTIONS) {
-        // While a fresh car inventory is being read, an old remote preview
-        // must not appear for a component whose installed state is unknown.
-        addAll(iconRequests.map { it.componentId })
-    }
-}
-
-private fun buildRemoteIconRequests(
-    snapshot: InstallationSessionSnapshot,
-    suppressedComponentIds: Set<String>,
-): List<RemoteLogoRequest> {
-    val environment = if (BuildConfig.DEBUG) "staging" else "production"
-    val channel = if (BuildConfig.DEBUG) "debug" else "release"
-    return snapshot.components.mapNotNull { component ->
-        if (component.id in suppressedComponentIds) return@mapNotNull null
-        component.iconAsset?.let { asset ->
-            RemoteLogoRequest(
-                componentId = component.id,
-                environment = environment,
-                channel = channel,
-                catalogRevision = snapshot.catalogRevision,
-                asset = asset,
-            )
-        }
-    }.distinctBy { it.componentId to it.asset.sha256 }
-}
-
-private val INVENTORY_REFRESH_ACTIONS = setOf(
-    MaintenanceActionId.MANAGE_APPS,
-    MaintenanceActionId.REPAIR_CONFIGURATION,
-    MaintenanceActionId.INSTALL_FILE_MANAGER,
-)
 
 private data class InstallRenderTarget(
     val uiState: InstallUiState,

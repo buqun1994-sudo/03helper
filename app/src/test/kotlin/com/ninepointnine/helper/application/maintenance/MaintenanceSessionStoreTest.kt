@@ -21,6 +21,7 @@ import com.ninepointnine.helper.domain.session.InstallationSessionState
 import com.ninepointnine.helper.domain.session.MaintenanceActionId
 import com.ninepointnine.helper.domain.session.MaintenanceActionRecord
 import com.ninepointnine.helper.domain.session.MaintenanceActionStatus
+import com.ninepointnine.helper.domain.session.MaintenanceInventoryState
 import com.ninepointnine.helper.domain.session.ManagedApplicationStatus
 import com.ninepointnine.helper.domain.session.MaintenanceSnapshot
 import com.ninepointnine.helper.domain.session.SessionEvidence
@@ -71,6 +72,34 @@ class MaintenanceSessionStoreTest {
         assertEquals(snapshot.maintenance.managedApplications, restored?.maintenance?.managedApplications)
         assertEquals(snapshot.maintenance.lastAction, restored?.maintenance?.lastAction)
         assertEquals(icon, restored?.components?.first { it.id == "desktop" }?.iconAsset)
+    }
+
+    @Test
+    fun `explicit empty inventory and full available configuration survive a cold start`() {
+        val file = Files.createTempDirectory("maintenance-store-empty-inventory").resolve("session.json").toFile()
+        val base = maintenanceSnapshot(manifests(1L), manifests(2L))
+        val snapshot = base.copy(
+            maintenance = base.maintenance.copy(
+                managedApplications = emptyList(),
+                managedApplicationsState = MaintenanceInventoryState.READY,
+                availableComponents = base.components.filterNot { it.id == "desktop" },
+            ),
+        )
+        val store = MaintenanceSessionStore(file)
+
+        assertTrue(store.save(snapshot))
+        val restored = store.load() ?: error("snapshot_not_restored")
+
+        assertEquals(MaintenanceInventoryState.READY, restored.maintenance.managedApplicationsState)
+        assertTrue(restored.maintenance.managedApplications.isEmpty())
+        assertEquals(
+            setOf("lyrics", "file-manager"),
+            restored.maintenance.availableComponents.map { it.id }.toSet(),
+        )
+        assertEquals(
+            setOf("desktop", "lyrics", "file-manager"),
+            restored.components.map { it.id }.toSet(),
+        )
     }
 
     @Test

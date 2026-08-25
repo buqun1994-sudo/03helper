@@ -227,6 +227,11 @@ sealed interface InstallationSessionEvent {
         val componentId: String,
         val actionId: MaintenanceApplicationActionId,
         val resultCode: String = "completed",
+        /** Fresh car inventory read after a destructive application action. */
+        val refreshedApplications: List<ManagedApplicationStatus>? = null,
+        /** Set when the action succeeded but the follow-up inventory read did not. */
+        val inventoryRefreshFailureReason: String? = null,
+        val inventoryRefreshRetryable: Boolean = true,
     ) : InstallationSessionEvent
 
     data class MaintenanceApplicationActionFailed(

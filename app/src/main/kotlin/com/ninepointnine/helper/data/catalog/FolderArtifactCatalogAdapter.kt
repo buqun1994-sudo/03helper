@@ -113,20 +113,19 @@ class FolderArtifactCatalogAdapter(
         }
     }
 
-    /** Reads only the signed config and one Lanzou root listing. No ZIP is downloaded here. */
+    /**
+     * Reads the signed config and snapshots the local APK inventory. The
+     * Lanzou folder is intentionally lazy: a completely local install must
+     * never open a remote page, and a remote page is only needed for the
+     * components that remain unresolved after the local comparison.
+     */
     suspend fun loadSelection(): CatalogLoadResult {
         val config = loadConfig() ?: return lastConfigFailure
-        val folder = when (val result = folderSourceAdapter.resolve(config)) {
-            is LanzouFolderResolutionResult.Failure -> {
-                selectionContext = null
-                return CatalogLoadResult.Failure(result.failure.reasonCode, result.failure.retryable)
-            }
-
-            is LanzouFolderResolutionResult.Success -> result
-        }
-        val context = SelectionContext(config, folder)
+        val context = SelectionContext(
+            config = config,
+            localCandidates = artifactCache.refreshPublicApkCandidates(),
+        )
         selectionContext = context
-        val listedAppsById = folder.artifacts.associateBy { it.component.componentId }
         return CatalogLoadResult.Success(
             TrustedArtifactCatalog(
                 catalogVersion = config.effectiveCatalogVersion(),
@@ -138,15 +137,12 @@ class FolderArtifactCatalogAdapter(
                     .filterNot { InstallerSelfIdentity.isSelfComponentId(it.componentId) }
                     .map { app ->
                         // catalogVersion is an internal revision identifier,
-                        // never a user-facing application version. A missing
-                        // hint remains unknown until a verified APK supplies it.
-                        listedAppsById[app.componentId]?.component ?: app
+                        // never a user-facing application version. Cloud's
+                        // signed release metadata is enough to render the
+                        // complete choice list before a remote page is needed.
+                        app
                     },
-                appFailures = folder.appFailures.filterNot {
-                    InstallerSelfIdentity.isSelfComponentId(it.componentId)
-                }.map {
-                    CatalogAppFailure(it.componentId, it.reasonCode, it.retryable)
-                },
+                appFailures = emptyList(),
                 catalogRevision = config.catalogRevision,
             ),
         )
@@ -157,11 +153,16 @@ class FolderArtifactCatalogAdapter(
         selectedIds: Set<String>,
         onProgress: (CatalogPreparationProgress) -> Unit = {},
     ): CatalogLoadResult {
-        val context = selectionContext ?: when (val result = loadSelection()) {
+        val baseContext = selectionContext ?: when (val result = loadSelection()) {
             is CatalogLoadResult.Success -> selectionContext
             is CatalogLoadResult.Failure -> return result
         }
         ?: return CatalogLoadResult.Failure("distribution_selection_context_missing", retryable = true)
+        // A new preparation attempt is a new inventory decision. Refresh once
+        // here so APKs added since the previous partial attempt are visible,
+        // then share this exact list across every selected component.
+        val context = baseContext.copy(localCandidates = artifactCache.refreshPublicApkCandidates())
+        selectionContext = context
         if (!context.config.expiresAt.isAfter(now())) {
             selectionContext = null
             return CatalogLoadResult.Failure("distribution_config_expired", retryable = true)
@@ -176,24 +177,71 @@ class FolderArtifactCatalogAdapter(
         val stagedManifests = mutableListOf<ArtifactManifest>()
         var committed = false
         return try {
-            val appFailures = context.folder.appFailures
-                .map { CatalogAppFailure(it.componentId, it.reasonCode, it.retryable) }
-                .toMutableList()
             val selectedComponents = context.config.declaredApps()
                 .filter { it.enabled && it.componentId in selectedIds }
                 .sortedWith(compareBy<InstallerComponentSource> { it.sortOrder }.thenBy { it.componentId })
-            val selectedArtifacts = selectedComponents.map { component ->
-                component to context.folder.artifacts.firstOrNull {
-                    it.component.componentId == component.componentId
+            // One scan is the source decision for this complete user action.
+            // Every component sees the same immutable candidate list.
+            val localCandidates = context.localCandidates
+            val localResults = coroutineScope {
+                selectedComponents.chunked(MAX_PREPARATION_CONCURRENCY).flatMap { batch ->
+                    batch.map { component ->
+                        async(Dispatchers.IO) {
+                            val result = try {
+                                prepareLocalArtifact(context.config, component, localCandidates, onProgress)
+                            } catch (cancelled: CancellationException) {
+                                throw cancelled
+                            } catch (_: Exception) {
+                                ManifestBuildResult.Failure(
+                                    reasonCode = "distribution_app_processing_failed",
+                                    retryable = true,
+                                )
+                            }
+                            component.componentId to result
+                        }
+                    }.awaitAll()
+                }.toMap()
+            }
+            val unresolved = selectedComponents.filter {
+                localResults[it.componentId] !is ManifestBuildResult.Success
+            }
+            var folder = context.folder
+            var folderFailure: LanzouFolderResolutionResult.Failure? = null
+            if (unresolved.isNotEmpty() && folder == null) {
+                when (val resolved = folderSourceAdapter.resolve(context.config)) {
+                    is LanzouFolderResolutionResult.Success -> {
+                        folder = resolved
+                        selectionContext = context.copy(folder = resolved)
+                    }
+
+                    is LanzouFolderResolutionResult.Failure -> folderFailure = resolved
+                }
+            }
+            val appFailures = folder?.appFailures
+                ?.map { CatalogAppFailure(it.componentId, it.reasonCode, it.retryable) }
+                ?.toMutableList()
+                ?: mutableListOf()
+            val remoteArtifacts = folder?.artifacts.orEmpty().associateBy { it.component.componentId }
+            unresolved.forEach { component ->
+                if (remoteArtifacts[component.componentId] == null &&
+                    appFailures.none { it.componentId == component.componentId }
+                ) {
+                    val failure = folderFailure?.failure
+                    appFailures += CatalogAppFailure(
+                        componentId = component.componentId,
+                        reasonCode = failure?.reasonCode ?: "distribution_app_missing_${component.componentId}",
+                        retryable = failure?.retryable ?: false,
+                    )
                 }
             }
             val results = coroutineScope {
-                selectedArtifacts.chunked(MAX_PREPARATION_CONCURRENCY).flatMap { batch ->
-                    batch.map { (component, artifact) ->
+                selectedComponents.chunked(MAX_PREPARATION_CONCURRENCY).flatMap { batch ->
+                    batch.map { component ->
                         async(Dispatchers.IO) {
                             val result = try {
-                                val local = prepareLocalArtifact(context.config, component, onProgress)
-                                local ?: artifact?.let {
+                                val local = localResults[component.componentId]
+                                    ?.takeIf { it is ManifestBuildResult.Success }
+                                local ?: remoteArtifacts[component.componentId]?.let {
                                     prepareSelectedArtifact(context.config, it, onProgress)
                                 } ?: ManifestBuildResult.Failure(
                                     reasonCode = appFailures.firstOrNull { failure ->
@@ -295,7 +343,11 @@ class FolderArtifactCatalogAdapter(
 
                 is LanzouFolderResolutionResult.Success -> result
             }
-            selectionContext = SelectionContext(config, folder)
+            selectionContext = SelectionContext(
+                config = config,
+                folder = folder,
+                localCandidates = artifactCache.refreshPublicApkCandidates(),
+            )
             val appFailures = folder.appFailures
                 .map { CatalogAppFailure(it.componentId, it.reasonCode, it.retryable) }
                 .toMutableList()
@@ -465,6 +517,7 @@ class FolderArtifactCatalogAdapter(
                 artifactCache.clearArtifact(manifest)
                 return ManifestBuildResult.Failure("public_download_publish_failed", retryable = true)
             }
+            artifactCache.retainVerifiedApk(manifest, inspection.apkFile)
             val cachePaths = artifactCache.paths(manifest)
             cachePaths.archivePart.parentFile?.mkdirs()
             Files.copy(
@@ -535,11 +588,12 @@ class FolderArtifactCatalogAdapter(
     private fun prepareLocalArtifact(
         config: InstallerDistributionConfig,
         component: InstallerComponentSource,
+        candidates: List<File>,
         onProgress: (CatalogPreparationProgress) -> Unit,
     ): ManifestBuildResult? {
         if (!artifactCache.publicDirectoryAvailable) return null
         onProgress(CatalogPreparationProgress(component.componentId, InstallPhase.FETCH, ComponentProgressStatus.RUNNING))
-        val candidate = artifactCache.publicApkCandidates()
+        val candidate = candidates
             .asSequence()
             .mapNotNull { file -> reusableCandidate(config, component, file) }
             .sortedWith(
@@ -602,6 +656,9 @@ class FolderArtifactCatalogAdapter(
                 indeterminate = false,
             ),
         )
+        // Keep the exact bytes available to the downstream preparation phase;
+        // this avoids a second MediaStore scan and a false remote fallback.
+        artifactCache.retainVerifiedApk(manifest, file)
         return ManifestBuildResult.Success(manifest)
     }
 
@@ -636,6 +693,10 @@ class FolderArtifactCatalogAdapter(
             packageName = metadata.packageName,
             certificateDigests = metadata.certificateSha256s,
         ) ?: return null
+        // Cloud's signed version code is the release selection key. A local
+        // APK from an older release is a miss and must continue to the remote
+        // source instead of silently reinstalling stale bytes.
+        if (component.versionCode > 0L && metadata.version.code != component.versionCode) return null
         return Candidate(file = file, metadata = metadata, identity = identity)
     }
 
@@ -715,7 +776,8 @@ class FolderArtifactCatalogAdapter(
 
     private data class SelectionContext(
         val config: InstallerDistributionConfig,
-        val folder: LanzouFolderResolutionResult.Success,
+        val folder: LanzouFolderResolutionResult.Success? = null,
+        val localCandidates: List<File> = emptyList(),
     )
 
     private sealed interface ManifestBuildResult {

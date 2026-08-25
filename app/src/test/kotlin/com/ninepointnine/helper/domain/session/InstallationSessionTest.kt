@@ -706,6 +706,106 @@ class InstallationSessionTest {
     }
 
     @Test
+    fun `empty maintenance inventory is a loaded state rather than an implicit loading state`() {
+        val session = maintenanceSession()
+        session.dispatch(InstallationSessionCommand.MaintenanceAction(MaintenanceActionId.MANAGE_APPS))
+        assertEquals(
+            MaintenanceInventoryState.LOADING,
+            session.currentSnapshot().maintenance.managedApplicationsState,
+        )
+
+        session.dispatchEvent(InstallationSessionEvent.MaintenanceApplicationsResolved(emptyList()))
+
+        assertEquals(
+            MaintenanceInventoryState.READY,
+            session.currentSnapshot().maintenance.managedApplicationsState,
+        )
+        assertTrue(session.currentSnapshot().maintenance.managedApplications.isEmpty())
+    }
+
+    @Test
+    fun `uninstall completion applies the refreshed car inventory before leaving the page`() {
+        val base = maintenanceSession().currentSnapshot().copy(
+            maintenance = maintenanceSession().currentSnapshot().maintenance.copy(
+                managedApplications = listOf(
+                    ManagedApplicationStatus(
+                        componentId = "desktop",
+                        packageName = AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME,
+                        installed = true,
+                    ),
+                    ManagedApplicationStatus(
+                        componentId = "lyrics",
+                        packageName = AuthorizationPlanFactory.LYRICS_PACKAGE_NAME,
+                        installed = true,
+                    ),
+                ),
+                managedApplicationsState = MaintenanceInventoryState.READY,
+            ),
+        )
+        val session = InstallationSession(initialSnapshot = base)
+        session.dispatch(
+            InstallationSessionCommand.MaintenanceApplicationAction(
+                componentId = "desktop",
+                actionId = MaintenanceApplicationActionId.UNINSTALL,
+            ),
+        )
+        session.dispatchEvent(
+            InstallationSessionEvent.MaintenanceApplicationActionCompleted(
+                componentId = "desktop",
+                actionId = MaintenanceApplicationActionId.UNINSTALL,
+                resultCode = "component_uninstalled",
+                refreshedApplications = listOf(
+                    ManagedApplicationStatus(
+                        componentId = "lyrics",
+                        packageName = AuthorizationPlanFactory.LYRICS_PACKAGE_NAME,
+                        installed = true,
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(
+            listOf("lyrics"),
+            session.currentSnapshot().maintenance.managedApplications.map { it.componentId },
+        )
+        assertEquals(
+            MaintenanceInventoryState.READY,
+            session.currentSnapshot().maintenance.managedApplicationsState,
+        )
+    }
+
+    @Test
+    fun `selected catalog preparation never shrinks the retained full component configuration`() {
+        val desktop = fullManifest("desktop", versionCode = 2)
+        val session = InstallationSession(
+            initialSnapshot = InstallationSessionSnapshot(
+                state = InstallationSessionState.SELECTION_CONFIRMED,
+                device = confirmedDevice.copy(
+                    androidSdk = 28,
+                    capabilities = setOf(DeviceCapability.ADB_TCP, DeviceCapability.IDENTITY_READ),
+                ),
+                components = components,
+                selectedOptionalComponentIds = setOf("lyrics", "file-manager"),
+            ),
+        )
+
+        session.dispatchEvent(
+            InstallationSessionEvent.SelectedCatalogResolved(
+                catalogVersion = "catalog-2",
+                keyId = "key-1",
+                signatureAlgorithm = "Ed25519",
+                manifests = listOf(desktop),
+                apps = emptyList(),
+            ),
+        )
+
+        assertEquals(
+            components.map { it.id }.toSet(),
+            session.currentSnapshot().components.map { it.id }.toSet(),
+        )
+    }
+
+    @Test
     fun `invalid managed application evidence fails closed instead of completing`() {
         val session = maintenanceSession()
         session.dispatch(InstallationSessionCommand.MaintenanceAction(MaintenanceActionId.MANAGE_APPS))
@@ -730,6 +830,26 @@ class InstallationSessionTest {
             ),
         )
         assertEquals(MaintenanceActionStatus.FAILED, session.currentSnapshot().maintenance.lastAction?.status)
+    }
+
+    @Test
+    fun `invalid inventory refresh leaves an explicit failed state instead of loading forever`() {
+        val session = maintenanceSession()
+        session.dispatch(InstallationSessionCommand.MaintenanceAction(MaintenanceActionId.MANAGE_APPS))
+        session.dispatchEvent(
+            InstallationSessionEvent.MaintenanceApplicationsResolved(
+                applications = listOf(
+                    ManagedApplicationStatus(
+                        componentId = AuthorizationPlanFactory.DESKTOP_COMPONENT_ID,
+                        packageName = "com.attacker.app",
+                        installed = true,
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(MaintenanceInventoryState.FAILED, session.currentSnapshot().maintenance.managedApplicationsState)
+        assertEquals("maintenance_applications_invalid", session.currentSnapshot().maintenance.managedApplicationsFailureReason)
     }
 
     @Test

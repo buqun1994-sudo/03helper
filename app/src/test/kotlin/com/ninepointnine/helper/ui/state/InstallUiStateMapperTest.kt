@@ -11,6 +11,7 @@ import com.ninepointnine.helper.domain.session.MaintenanceActionId
 import com.ninepointnine.helper.domain.session.MaintenanceActionRecord
 import com.ninepointnine.helper.domain.session.MaintenanceActionStatus
 import com.ninepointnine.helper.domain.session.MaintenanceSnapshot
+import com.ninepointnine.helper.domain.session.MaintenanceInventoryState
 import com.ninepointnine.helper.domain.session.ManagedApplicationStatus
 import com.ninepointnine.helper.domain.session.ResultKind
 import com.ninepointnine.helper.domain.session.SessionFailure
@@ -265,6 +266,23 @@ class InstallUiStateMapperTest {
         assertEquals(listOf("desktop", "lyrics"), state.applications.map { it.displayName })
         assertEquals(listOf(true, false), state.applications.map { it.installed })
         assertFalse(state.connected)
+    }
+
+    @Test
+    fun `maintenance mapper distinguishes loaded empty inventory from not started`() {
+        val state = InstallUiStateMapper.map(
+            InstallationSessionSnapshot(
+                state = InstallationSessionState.MAINTENANCE,
+                device = device,
+                maintenance = MaintenanceSnapshot(
+                    managedApplicationsState = MaintenanceInventoryState.READY,
+                    managedApplications = emptyList(),
+                ),
+            ),
+        ) as InstallUiState.Maintenance
+
+        assertEquals(MaintenanceInventoryState.READY, state.applicationsState)
+        assertTrue(state.applications.isEmpty())
     }
 
     private fun selectionSnapshot(

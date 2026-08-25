@@ -381,6 +381,7 @@ class ArtifactPreparationCoordinator(
                 ),
             )
         }
+        cache.retainVerifiedApk(manifest, verifiedApk.file)
         cache.clearArchive(manifest)
         emitProgress(
             manifest.componentId,
@@ -419,11 +420,16 @@ class ArtifactPreparationCoordinator(
         } else {
             manifest.sources.firstOrNull()?.kind ?: ArtifactSourceKind.LOCAL_DOWNLOAD
         }
-        cache.publicApkCandidates().forEach { candidate ->
+        val candidates = buildList {
+            cache.verifiedApkFor(manifest)?.let(::add)
+            cache.withPublicApkCandidates { addAll(it) }
+        }.distinctBy { runCatching { it.canonicalPath }.getOrDefault(it.absolutePath) }
+        candidates.forEach { candidate ->
             when (val result = identityVerifier.verifyExisting(manifest, sourceKind, candidate)) {
                 is ArtifactIdentityResult.Verified -> {
                     // A previously staged ZIP is no longer needed once the
-                    // public APK has passed identity verification.
+                    // exact APK identity has passed verification.
+                    cache.retainVerifiedApk(manifest, result.apk.file)
                     cache.clearArchive(manifest)
                     emitProgress(manifest.componentId, InstallPhase.FETCH, ComponentProgressStatus.COMPLETED, 1L, 1L, false)
                     emitProgress(manifest.componentId, InstallPhase.CHECK, ComponentProgressStatus.COMPLETED, 1L, 1L, false)

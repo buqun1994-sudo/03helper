@@ -422,9 +422,41 @@ F2 Debug APK 已按用户授权安装到指定手机。该段记录的是 F2 交
 
 ## 2026-08-25 Logo、维护实时库存与检查更新收口
 
-1. 本轮完成 Logo 与车机实时状态收口：已验证 APK / 持久化 APK Logo 优先于内置产品 Logo，内置 Logo 优先于远程 Logo；已确认安装状态的组件不再请求远程 Logo，维护页发起实时库存读取期间也不继续展示旧远程预览。远程 Logo 增加磁盘 / 内存缓存和有界并发，维护快照保留签名 Logo 元数据。
+1. 本轮完成 Logo 与车机实时状态收口：已验证 APK / 持久化 APK Logo 优先于内置产品 Logo；运行时不再请求远程 Logo，维护页发起实时库存读取期间也不继续展示旧远程预览。维护快照仍保留签名 Logo 元数据以兼容配置协议。
 2. 检查更新改为只刷新签名控制面配置，并以 `catalogVersion`、`catalogRevision`、展示元数据和车机实时 `versionCode` 交叉比较；不再打开蓝奏 WebView、枚举目录、下载 ZIP 或解压 APK。ADB 优先读取带版本号的包清单，旧系统回退普通包清单；检查开始和失败时清除旧结果。
 3. 授权页、管理已安装应用页和安装应用页均由同一受控组件集合及车机 ADB 实时包库存驱动，文件管理器没有页面特判。卸载动作以 `pm path` 回读确认包已消失，成功后同步移除会话库存；重新进入管理 / 安装流程会重新扫描车机，避免把旧缓存投影为已安装。
 4. 指定 JDK17 下 `:app:compileDebugKotlin`、`:app:compileDebugAndroidTestKotlin`、`:app:testDebugUnitTest`、`:app:lintDebug`、`:app:assembleDebug`、`:app:assembleDebugAndroidTest` 和 `:app:connectedDebugAndroidTest` 均通过；JVM 单测共 `160` 项（0 failures / 0 errors / 0 skipped），instrumentation smoke 为 `2/2`。
 5. 最新 Debug APK 已核对为 `com.ninepointnine.helper` / `versionName=0.1.0` / `versionCode=1` / `MainActivity`，v2 签名验证通过；已在显式测试手机上执行保留数据覆盖安装并启动，系统返回 `Success`，进程保持运行且未发现应用致命异常。车机当前未在线，真实车机授权、管理、安装、卸载和检查更新闭环仍待车机人工主测。
 6. `check-project-docs.mjs`、`check-skills.mjs`、`check-local-environment.mjs` 和 `git diff --check` 通过；`check-03app-repository.mjs --strict` 仅因登记快照 HEAD 与实际 HEAD 不一致而失败，未修改登记库或提交来掩盖该差异。本轮未提交、未推送、未发布。
+
+## 2026-08-25 维护空态、卸载回读与安装清单最终收口
+
+1. 维护库存改为显式 `NOT_STARTED / LOADING / READY / FAILED` 状态；管理已安装应用页和修复授权页在读取完成但车机没有受控应用时显示 `当前无已安装应用`，修复授权页不再显示 `重新授权`。安装应用页的空配置显示 `当前没有可安装应用`，用 `知道了` 结束，不留下无效的禁用安装按钮；所有空态文案统一居中并保留底部呼吸空间。
+2. 卸载链路接受带无害框架诊断的成功回执，并以 `pm path` 的有界回读作为成功后置条件；已不存在的目标按幂等成功处理。卸载完成后立即重新读取车机库存并更新当前会话，返回维护首页或再次进入管理页都不依赖旧缓存。
+3. 安装应用页以完整签名配置清单为基线，再与车机实时库存交叉分成“已安装 / 未安装”；部分安装、卸载或重连只更新对应结果，不会用本次选中的 APK 子集替换完整应用列表。完整配置、库存状态、失败原因和可重试信息均进入维护持久化，并兼容旧存档。
+4. 本轮验证通过：`:app:testDebugUnitTest` 共 `167` 项（0 failures / 0 errors / 0 skipped）、`:app:lintDebug`、`:app:assembleDebug`、`:app:assembleDebugAndroidTest`、`node scripts/check-project-docs.mjs`、`node scripts/check-skills.mjs`、`node scripts/check-local-environment.mjs` 和 `git diff --check`。无线调试恢复后，最新代码在显式测试手机上的 instrumentation smoke 为 `2/2`；随后已再次覆盖安装最终主包并启动核对。
+5. 最新 Debug APK 已构建并核对为 `com.ninepointnine.helper`、`versionName=0.1.0`、`versionCode=1`、入口 `.MainActivity`，SHA-256 为 `a78d4f6317c8b3896e98942983cb131660980d51718c4587de21977189171303`；测试手机安装返回 `Success`，`MainActivity` 处于 resumed。车机 `192.168.0.203:5555` 仍未在线，真实车机授权、卸载、检查更新和安装页交叉主测仍待目标车机人工执行。本轮未提交、未推送、未发布，也未对车机写入。
+
+## 2026-08-25 施工收尾复核（设备离线）
+
+1. 使用指定 JDK17 强制重跑 `:app:testDebugUnitTest --rerun-tasks`，167 项测试全部通过；随后强制重跑 `:app:lintDebug`、`:app:assembleDebug` 和 `:app:assembleDebugAndroidTest`，均构建成功。
+2. 最新 Debug APK 重新核对为 `com.ninepointnine.helper`、`versionName=0.1.0`、`versionCode=1`、入口 `.MainActivity`，SHA-256 为 `5bf1e2544ef5e68b548337f76d0eafd07b8856161e5751ffc296dbd6d8423d1e`；APK Signature Scheme v2 验证通过。未执行覆盖安装，因为显式测试手机与车机的 ADB 设备列表均为空。
+3. `check-project-docs.mjs`、`check-skills.mjs`、`check-local-environment.mjs` 与 `git diff --check` 通过。`check-03app-repository.mjs --strict` 仅报告登记快照 HEAD 与当前工作树 HEAD 不一致；未修改登记库、未提交、未推送、未发布。
+4. 本轮未把设备 smoke 写成通过；真实车机的维护空态、授权、实时库存、卸载回读和完整配置与车机库存交叉仍是用户接手后的最小人工主测范围。
+5. 同步修正 `docs/testing/验证矩阵.md` 中过时的“卸载不可用”表述，明确受控卸载、空库存和完整配置与车机库存交叉的现行验收口径。
+
+## 2026-08-25 施工后验证与 Logo 口径同步
+
+1. 修正并发 Logo 失败夹具的线程安全问题后，指定 JDK17 下 `:app:testDebugUnitTest --rerun-tasks` 共 `168` 项全部通过；`:app:lintDebug`、`:app:assembleDebug` 和 `:app:assembleDebugAndroidTest` 均通过。
+2. 最新 Debug APK 已核对为 `com.ninepointnine.helper`、`versionName=0.1.0`、`versionCode=1`、入口 `.MainActivity`；APK Signature Scheme v2 验证通过，主包 SHA-256 为 `bd3bf073e51689ff52a48bc0c7e0dab3f34298eb72c0cf0935fd201cc7118169`，AndroidTest 包 SHA-256 为 `e7d46eff4e1930d9e7a297398e50b63c5615eec303af2916deaae2ae34fc0f5d`。
+3. 同步修正协议、产品、安全、架构、计划和验证文档：v4 `icon` 仅保留配置兼容 / 发布校验，运行时不请求远程 Logo；初始化使用内置资源，匹配 APK 验签后按版本与 APK 摘要缓存 APK 内图标。
+4. 项目文档、Skill、本机环境检查和 `git diff --check` 均通过。`check-03app-repository.mjs --strict` 仍仅因登记快照 HEAD 与当前工作树 HEAD 不一致而失败，未修改登记库掩盖差异。
+5. 当前 `adb devices -l` 无在线设备，未执行覆盖安装或 instrumentation smoke；真实车机的维护空态、实时库存、卸载回读、授权和安装清单交叉仍是最小人工主测范围。本轮未提交、未推送、未发布。
+6. 追加收口两项边界：安装前从本地 APK 读取的 Logo 立即进入持久缓存；卸载命令只要 `exitCode=0` 且无失败标记就进入包消失后置条件回读，兼容无字面 `Success` 的 Android 9 回执。相关单测与 Debug 构建已重新通过。
+
+## 2026-08-25 无线调试恢复后的最终覆盖安装
+
+1. 使用显式测试手机 serial `adb-RFCX412AN1X-gWfMRD (2)._adb-tls-connect._tcp` 对最新 Debug APK 执行保留数据覆盖安装，系统返回 `Success`；未清数据、未卸载、未降级、未重启设备。
+2. 安装后核对包身份为 `com.ninepointnine.helper`、`versionName=0.1.0`、`versionCode=1`、入口 `.MainActivity`，v2 签名仍有效；随后启动返回 `Status: ok`，当前焦点为 `MainActivity`，界面已进入维护页并显示四个维护入口，最近日志未发现 `FATAL EXCEPTION`。
+3. `check-project-docs.mjs`、`check-skills.mjs`、`check-local-environment.mjs` 与 `git diff --check` 通过；`check-03app-repository.mjs --strict` 仅因登记快照 HEAD 与当前工作树 HEAD 不一致而失败，未修改登记库掩盖差异。
+4. 车机 `192.168.0.203:5555` 仍未在线；真实车机维护空态、实时库存、卸载回读、授权和完整配置交叉仍交由用户手测。本轮不提交、不推送、不发布。

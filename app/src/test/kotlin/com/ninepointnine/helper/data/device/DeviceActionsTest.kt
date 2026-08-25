@@ -288,6 +288,75 @@ class DeviceActionsTest {
     }
 
     @Test
+    fun `uninstall accepts success with framework diagnostics but rejects failure markers`() {
+        assertTrue(
+            isUninstallAccepted(
+                AdbShellResponse(
+                    output = "Success\n",
+                    errorOutput = "Warning: package manager is still settling",
+                    exitCode = 0,
+                ),
+            ),
+        )
+        assertFalse(
+            isUninstallAccepted(
+                AdbShellResponse(
+                    output = "Failure [not installed]",
+                    errorOutput = "",
+                    exitCode = 0,
+                ),
+            ),
+        )
+        assertTrue(
+            isUninstallAccepted(
+                AdbShellResponse(
+                    output = "Warning: package manager completed",
+                    errorOutput = "",
+                    exitCode = 0,
+                ),
+            ),
+        )
+        assertTrue(
+            isUninstallAccepted(
+                AdbShellResponse(
+                    output = "",
+                    errorOutput = "",
+                    exitCode = 0,
+                ),
+            ),
+        )
+        assertFalse(
+            isUninstallAccepted(
+                AdbShellResponse(
+                    output = "Error: package manager rejected request",
+                    errorOutput = "",
+                    exitCode = 0,
+                ),
+            ),
+        )
+    }
+
+    @Test
+    fun `package presence probe distinguishes empty, exact and malformed inventory`() {
+        assertEquals(
+            false,
+            parsePackagePresence("", "com.ninepointnine.desktop"),
+        )
+        assertEquals(
+            true,
+            parsePackagePresence("package:com.ninepointnine.desktop\n", "com.ninepointnine.desktop"),
+        )
+        assertEquals(
+            false,
+            parsePackagePresence("package:com.ninepointnine.desktoplyrics\n", "com.ninepointnine.desktop"),
+        )
+        assertEquals(
+            null,
+            parsePackagePresence("Warning: package manager busy", "com.ninepointnine.desktop"),
+        )
+    }
+
+    @Test
     fun `coordinator installs the batch then invokes the versioned authorization plan once and launches only desktop`() {
         val lyricsFile = Files.createTempFile("lyrics", ".apk").toFile().apply { writeBytes(byteArrayOf(1)) }
         val desktopFile = Files.createTempFile("desktop", ".apk").toFile().apply { writeBytes(byteArrayOf(2)) }

@@ -9,6 +9,9 @@ import com.ninepointnine.helper.domain.session.InstallationSessionSnapshot
 import com.ninepointnine.helper.domain.session.InstallationSessionState
 import com.ninepointnine.helper.domain.session.ResultKind
 import com.ninepointnine.helper.domain.session.MaintenanceApplicationActionId
+import com.ninepointnine.helper.domain.session.MaintenanceActionId
+import com.ninepointnine.helper.domain.session.MaintenanceActionStatus
+import com.ninepointnine.helper.domain.session.MaintenanceInventoryState
 import com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
 
 object InstallUiStateMapper {
@@ -94,6 +97,20 @@ object InstallUiStateMapper {
                     iconKey = application.componentId,
                 )
             },
+            applicationsState = when {
+                snapshot.maintenance.managedApplicationsState != MaintenanceInventoryState.NOT_STARTED ->
+                    snapshot.maintenance.managedApplicationsState
+                snapshot.maintenance.managedApplications.isNotEmpty() -> MaintenanceInventoryState.READY
+                snapshot.maintenance.lastAction?.actionId in setOf(
+                    MaintenanceActionId.MANAGE_APPS,
+                    MaintenanceActionId.REPAIR_CONFIGURATION,
+                    MaintenanceActionId.INSTALL_FILE_MANAGER,
+                ) && snapshot.maintenance.lastAction?.status == MaintenanceActionStatus.SUCCEEDED ->
+                    MaintenanceInventoryState.READY
+                else -> MaintenanceInventoryState.NOT_STARTED
+            },
+            applicationsErrorReason = snapshot.maintenance.managedApplicationsFailureReason,
+            applicationsErrorRetryable = snapshot.maintenance.managedApplicationsFailureRetryable,
             updateStatuses = snapshot.maintenance.updateStatuses.map { status ->
                 MaintenanceUpdateRow(
                     componentId = status.componentId,
@@ -129,6 +146,7 @@ object InstallUiStateMapper {
                     status = action.status,
                     resultCode = action.resultCode,
                     reasonCode = action.reasonCode,
+                    retryable = action.retryable,
                 )
             },
             applicationDetails = snapshot.maintenance.applicationDetails?.let { details ->

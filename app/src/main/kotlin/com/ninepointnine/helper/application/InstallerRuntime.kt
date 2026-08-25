@@ -7,7 +7,6 @@ import com.ninepointnine.helper.application.session.InstallationSessionEventPort
 import com.ninepointnine.helper.data.catalog.CatalogLoadResult
 import com.ninepointnine.helper.application.maintenance.MaintenanceController
 import com.ninepointnine.helper.data.artifact.ApkIconRepository
-import com.ninepointnine.helper.data.artifact.RemoteLogoRepository
 import com.ninepointnine.helper.domain.artifact.ArtifactManifest
 import com.ninepointnine.helper.application.artifact.ArtifactPreparationResult
 import com.ninepointnine.helper.application.artifact.PreparedArtifact
@@ -48,8 +47,6 @@ class InstallerRuntime(
     private val prepareSelectedCatalog: (suspend (Set<String>, InstallationSessionEventPort) -> CatalogLoadResult)? = null,
     /** Optional UI adapter; production injects the APK-backed icon reader. */
     val apkIconRepository: ApkIconRepository? = null,
-    /** Optional signed remote app-icon reader used before an APK is local. */
-    val remoteLogoRepository: RemoteLogoRepository? = null,
 ) : AutoCloseable {
     private val runtimeJob = SupervisorJob(coroutineContext[Job])
     private val scope = CoroutineScope(coroutineContext + runtimeJob)

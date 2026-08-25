@@ -54,6 +54,14 @@ class ArtifactIdentityVerifier(
         } catch (_: Exception) {
             return existingFailure(manifest, sourceKind, "apk_hash_failed")
         }
+        if (manifest.apkSizeBytes > 0L && apk.length() != manifest.apkSizeBytes) {
+            return existingFailure(manifest, sourceKind, "apk_size_mismatch")
+        }
+        if (manifest.apkSha256.isNotBlank() &&
+            !actualSha256.equals(manifest.apkSha256, ignoreCase = true)
+        ) {
+            return existingFailure(manifest, sourceKind, "apk_hash_mismatch")
+        }
         val metadata = runCatching { metadataReader.read(apk) }.getOrNull()
             ?: return existingFailure(manifest, sourceKind, "apk_metadata_unreadable")
         if (metadata.packageName != manifest.packageName) {
@@ -61,6 +69,11 @@ class ArtifactIdentityVerifier(
         }
         if (metadata.certificateSha256s.none { it.equals(manifest.certificateSha256, ignoreCase = true) }) {
             return existingFailure(manifest, sourceKind, "apk_certificate_mismatch")
+        }
+        if (metadata.version.code != manifest.apkVersion.code ||
+            (manifest.apkVersion.name.isNotBlank() && metadata.version.name != manifest.apkVersion.name)
+        ) {
+            return existingFailure(manifest, sourceKind, "apk_version_mismatch")
         }
         return ArtifactIdentityResult.Verified(
             VerifiedApk(

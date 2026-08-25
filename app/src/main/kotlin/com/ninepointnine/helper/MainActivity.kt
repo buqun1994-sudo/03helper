@@ -69,7 +69,6 @@ private fun InstallerRoot(runtime: InstallerRuntime) {
         snapshot = snapshot,
         onIntent = { intent -> runtime.dispatch(intent.toInstallationSessionCommand()) },
         apkIconRepository = runtime.apkIconRepository,
-        remoteLogoRepository = runtime.remoteLogoRepository,
     )
 }
 

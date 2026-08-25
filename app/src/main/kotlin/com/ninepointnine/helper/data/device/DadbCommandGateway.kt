@@ -633,12 +633,26 @@ internal class DadbCommandGateway(
                 DeviceActionFailure("maintenance_component_identity_invalid", component.componentId, retryable = false),
             )
         }
-        when (val installed = inspectInstalledPackage(component.componentId, component.packageName)) {
-            is PackageInspection.Failed -> return@withLease MaintenanceDeviceResult.Failed(installed.failure)
-            is PackageInspection.Completed -> if (!installed.installed) {
-                return@withLease MaintenanceDeviceResult.Failed(
-                    DeviceActionFailure("maintenance_component_not_installed", component.componentId, retryable = false),
+        if (actionId == MaintenanceApplicationActionId.UNINSTALL) {
+            when (probePackagePresence(component.packageName)) {
+                PackagePresence.ABSENT ->
+                    // Uninstall is idempotent. A stale management row can race
+                    // with another remover; the desired postcondition is
+                    // already true, so report success and refresh inventory.
+                    return@withLease MaintenanceDeviceResult.Completed("component_already_uninstalled")
+                PackagePresence.PRESENT -> Unit
+                PackagePresence.UNKNOWN -> return@withLease MaintenanceDeviceResult.Failed(
+                    DeviceActionFailure("maintenance_package_check_failed", component.componentId, retryable = true),
                 )
+            }
+        } else {
+            when (val installed = inspectInstalledPackage(component.componentId, component.packageName)) {
+                is PackageInspection.Failed -> return@withLease MaintenanceDeviceResult.Failed(installed.failure)
+                is PackageInspection.Completed -> if (!installed.installed) {
+                    return@withLease MaintenanceDeviceResult.Failed(
+                        DeviceActionFailure("maintenance_component_not_installed", component.componentId, retryable = false),
+                    )
+                }
             }
         }
         when (actionId) {
@@ -676,38 +690,47 @@ internal class DadbCommandGateway(
 
             MaintenanceApplicationActionId.UNINSTALL -> {
                 val response = shell("pm uninstall ${shellArgument(component.packageName)}")
-                if (response == null || response.exitCode != 0 ||
-                    !response.output.trim().equals("Success", ignoreCase = true)
-                ) {
+                if (!isUninstallAccepted(response)) {
                     MaintenanceDeviceResult.Failed(
                         DeviceActionFailure("maintenance_uninstall_failed", component.componentId, retryable = true),
                     )
                 } else {
                     var lastFailure: DeviceActionFailure? = null
                     var absent = false
-                    repeat(3) { attempt ->
+                    // PackageManager may publish the uninstall a few seconds
+                    // after returning its command response on Android 9 head
+                    // units. The bounded probe is the source of truth shown
+                    // to the user, not the first shell response.
+                    repeat(8) { attempt ->
                         if (absent) return@repeat
-                        when (val verification = inspectInstalledPackage(component.componentId, component.packageName)) {
-                            is PackageInspection.Completed -> if (!verification.installed) {
+                        when (probePackagePresence(component.packageName)) {
+                            PackagePresence.ABSENT -> {
                                 absent = true
                                 return@repeat
-                            } else {
-                                lastFailure = DeviceActionFailure(
-                                    "maintenance_uninstall_postcondition_failed",
-                                    component.componentId,
-                                    retryable = true,
-                                )
                             }
 
-                            is PackageInspection.Failed -> {
-                                lastFailure = DeviceActionFailure(
-                                    "maintenance_uninstall_postcondition_unknown",
-                                    component.componentId,
-                                    retryable = true,
-                                )
-                            }
+                            PackagePresence.PRESENT -> lastFailure = DeviceActionFailure(
+                                "maintenance_uninstall_postcondition_failed",
+                                component.componentId,
+                                retryable = true,
+                            )
+
+                            PackagePresence.UNKNOWN -> lastFailure = DeviceActionFailure(
+                                "maintenance_uninstall_postcondition_unknown",
+                                component.componentId,
+                                retryable = true,
+                            )
                         }
-                        if (!absent && attempt < 2) delay(250L * (attempt + 1))
+                        if (!absent && attempt < 7) {
+                            delay(
+                                when (attempt) {
+                                    0 -> 150L
+                                    1 -> 300L
+                                    2 -> 500L
+                                    else -> 750L
+                                },
+                            )
+                        }
                     }
                     if (absent) {
                         MaintenanceDeviceResult.Completed("component_uninstalled")
@@ -1053,6 +1076,45 @@ internal class DadbCommandGateway(
             text.contains("unable to find package") ||
             text.contains("does not exist") ||
             text.contains("not installed")
+    }
+
+    /**
+     * Presence-only probe used by destructive actions. It deliberately avoids
+     * dumpsys/stat because those details disappear before PackageManager has
+     * finished publishing an uninstall.
+     */
+    private fun probePackagePresence(packageName: String): PackagePresence {
+        val listed = shell("pm list packages --user 0 ${shellArgument(packageName)}")
+        if (listed != null && listed.exitCode == 0) {
+            val parsed = parsePackagePresence(listed.output, packageName)
+            if (parsed != null) return if (parsed) PackagePresence.PRESENT else PackagePresence.ABSENT
+            // A successful command with non-empty, non-package diagnostics is
+            // not a trustworthy empty inventory.
+            if (listed.output.lineSequence().any { it.trim().isNotEmpty() }) {
+                return PackagePresence.UNKNOWN
+            }
+            return PackagePresence.ABSENT
+        }
+        val path = shell("pm path ${shellArgument(packageName)}") ?: return PackagePresence.UNKNOWN
+        if (path.exitCode != 0) {
+            return if (isPackageAbsentResponse(path)) PackagePresence.ABSENT else PackagePresence.UNKNOWN
+        }
+        val hasPath = path.output.lineSequence()
+            .map(String::trim)
+            .filter { it.startsWith("package:") }
+            .map { it.removePrefix("package:") }
+            .any { it.isNotBlank() }
+        return if (hasPath) PackagePresence.PRESENT else if (path.output.isBlank()) {
+            PackagePresence.ABSENT
+        } else {
+            PackagePresence.UNKNOWN
+        }
+    }
+
+    private enum class PackagePresence {
+        PRESENT,
+        ABSENT,
+        UNKNOWN,
     }
 
     private fun parseEpochMillis(value: String): Long? = runCatching {
@@ -1723,4 +1785,40 @@ internal object PackageInventoryParser {
         .distinctBy { it.packageName }
 
     fun parse(output: String): Set<String> = parseEntries(output).mapTo(linkedSetOf()) { it.packageName }
+}
+
+/** Returns null when output is not a package inventory response. */
+internal fun parsePackagePresence(output: String, packageName: String): Boolean? {
+    val packageNamePattern = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$")
+    val lines = output.lineSequence()
+        .map(String::trim)
+        .filter(String::isNotEmpty)
+        .toList()
+    if (lines.isEmpty()) return false
+    val packages = lines.mapNotNull { line ->
+        line.removePrefix("package:")
+            .takeIf { line.startsWith("package:") && it.matches(packageNamePattern) }
+    }
+    if (packages.isEmpty()) return null
+    return packageName in packages
+}
+
+/** `pm uninstall` can return only harmless framework diagnostics with exitCode=0. */
+internal fun isUninstallAccepted(response: AdbShellResponse?): Boolean {
+    if (response == null || response.exitCode != 0) return false
+    val lines = (response.output + "\n" + response.errorOutput)
+        .lineSequence()
+        .map(String::trim)
+        .filter(String::isNotEmpty)
+        .toList()
+    val hasFailure = lines.any { line ->
+        line.startsWith("Failure", ignoreCase = true) ||
+            line.contains("INSTALL_FAILED", ignoreCase = true) ||
+            line.startsWith("Error", ignoreCase = true)
+    }
+    // The package-presence postcondition below is authoritative. Some Android
+    // 9 PackageManager builds return exitCode=0 with only a warning (or no
+    // stdout) after completing an uninstall, so requiring literal "Success"
+    // would turn a real uninstall into a false failure.
+    return !hasFailure
 }

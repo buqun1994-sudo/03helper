@@ -10,6 +10,7 @@ import com.ninepointnine.helper.domain.session.MaintenanceGroupId
 import com.ninepointnine.helper.domain.session.ResultKind
 import com.ninepointnine.helper.domain.session.MaintenanceUpdateState
 import com.ninepointnine.helper.domain.session.MaintenanceAuthorizationFlowState
+import com.ninepointnine.helper.domain.session.MaintenanceInventoryState
 import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationState
 
 sealed interface InstallUiState {
@@ -60,6 +61,9 @@ sealed interface InstallUiState {
         val reconnecting: Boolean = false,
         val feedback: MaintenanceFeedback? = null,
         val applications: List<MaintenanceApplicationRow> = emptyList(),
+        val applicationsState: MaintenanceInventoryState = MaintenanceInventoryState.NOT_STARTED,
+        val applicationsErrorReason: String? = null,
+        val applicationsErrorRetryable: Boolean = false,
         val updateStatuses: List<MaintenanceUpdateRow> = emptyList(),
         val authorization: MaintenanceAuthorizationUi = MaintenanceAuthorizationUi(),
         val applicationAction: MaintenanceApplicationFeedback? = null,
@@ -190,6 +194,7 @@ data class MaintenanceApplicationFeedback(
     val status: MaintenanceActionStatus,
     val resultCode: String? = null,
     val reasonCode: String? = null,
+    val retryable: Boolean = false,
 )
 
 data class MaintenanceApplicationDetailsRow(
