@@ -42,6 +42,7 @@ interface LanzouFolderWebViewHost {
     fun startFolder(
         folderUrl: String,
         password: String,
+        expectedArchiveFileNames: Set<String>,
         onEntries: (List<LanzouFolderEntry>) -> Unit,
         onFailure: (ArtifactFailure) -> Unit,
     )
@@ -64,7 +65,10 @@ class LanzouFolderSourceAdapter(
     private val sourcePolicy: ReleaseSourcePolicy = ReleaseSourcePolicy(),
     private val timeoutMillis: Long = DEFAULT_TIMEOUT_MILLIS,
 ) {
-    suspend fun resolve(config: InstallerDistributionConfig): LanzouFolderResolutionResult {
+    suspend fun resolve(
+        config: InstallerDistributionConfig,
+        expectedComponentIds: Set<String>? = null,
+    ): LanzouFolderResolutionResult {
         val folderUri = runCatching { URI(config.folderUrl) }.getOrNull()
         if (folderUri == null || !sourcePolicy.isLanzouFolderUrl(config.folderUrl)) {
             return failure("lanzou_folder_config_invalid", retryable = false)
@@ -84,7 +88,19 @@ class LanzouFolderSourceAdapter(
                         if (continuation.isActive) continuation.resume(FolderCallbackResult.Success(value))
                     }
                     try {
-                        host.startFolder(config.folderUrl, config.folderPassword, completeEntries, completeFailure)
+                        val expectedArchiveFileNames = config.declaredApps()
+                            .filter { component ->
+                                component.enabled && component.clientSupported &&
+                                    (expectedComponentIds == null || component.componentId in expectedComponentIds)
+                            }
+                            .mapTo(mutableSetOf()) { it.archiveFileName }
+                        host.startFolder(
+                            config.folderUrl,
+                            config.folderPassword,
+                            expectedArchiveFileNames,
+                            completeEntries,
+                            completeFailure,
+                        )
                     } catch (_: Exception) {
                         completeFailure(
                             ArtifactFailure(

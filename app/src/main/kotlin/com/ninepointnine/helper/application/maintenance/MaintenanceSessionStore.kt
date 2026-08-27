@@ -10,6 +10,7 @@ import com.ninepointnine.helper.domain.artifact.ManifestValidation
 import com.ninepointnine.helper.domain.artifact.ReleaseSourcePolicy
 import com.ninepointnine.helper.domain.artifact.InstallerSelfIdentity
 import com.ninepointnine.helper.domain.artifact.SourcePlan
+import com.ninepointnine.helper.domain.artifact.toComponentDescriptor
 import com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
 import com.ninepointnine.helper.domain.device.DeviceCapability
 import com.ninepointnine.helper.domain.session.ComponentDescriptor
@@ -30,6 +31,8 @@ import com.ninepointnine.helper.data.catalog.DeviceSetupWireDocument
 import com.ninepointnine.helper.data.catalog.InstallerAppIconDocument
 import com.ninepointnine.helper.data.catalog.SecureComponentWireDocument
 import com.ninepointnine.helper.domain.session.SessionEvidence
+import com.ninepointnine.helper.domain.session.toDurableMaintenanceBaseline
+import com.ninepointnine.helper.domain.session.withVerifiedInstallations
 import java.io.File
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
@@ -60,13 +63,9 @@ class MaintenanceSessionStore(
     }
 
     fun save(snapshot: InstallationSessionSnapshot): Boolean {
-        if (snapshot.state != InstallationSessionState.MAINTENANCE &&
-            snapshot.state != InstallationSessionState.SUCCEEDED
-        ) {
-            return false
-        }
+        val baseline = MaintenanceBaselineProjector.project(snapshot) ?: return false
         return try {
-            val stored = StoredMaintenanceState.from(snapshot)
+            val stored = StoredMaintenanceState.from(baseline)
             if (stored.toSnapshotOrNull(sourcePolicy) == null) return false
             val temporary = file.resolveSibling("${file.name}.part")
             file.parentFile?.mkdirs()
@@ -115,6 +114,112 @@ class MaintenanceSessionStore(
 private const val CURRENT_SCHEMA = 1
 private const val MAX_STORE_BYTES = 2L * 1024L * 1024L
 
+/**
+ * Pure projection from the live session to the only state allowed on disk.
+ * The result is idempotent and intentionally cannot resume an installation.
+ */
+internal object MaintenanceBaselineProjector {
+    fun project(snapshot: InstallationSessionSnapshot): InstallationSessionSnapshot? {
+        val device = snapshot.device ?: return null
+        val durableState = snapshot.state in setOf(
+            InstallationSessionState.MAINTENANCE,
+            InstallationSessionState.SUCCEEDED,
+            InstallationSessionState.COMPLETED_WITH_ERRORS,
+        )
+        val hasDurableInventory = snapshot.maintenance.installedManifests.isNotEmpty() ||
+            snapshot.maintenance.managedApplicationsState == MaintenanceInventoryState.READY
+        if (!durableState && !hasDurableInventory) return null
+
+        val declaredSource = snapshot.maintenance.availableComponents.ifEmpty { snapshot.components }
+        val declaredById = linkedMapOf<String, ComponentDescriptor>()
+        declaredSource.forEach { component -> declaredById[component.id] = component.toBaselineComponent() }
+        snapshot.components.forEach { component ->
+            declaredById.putIfAbsent(component.id, component.toBaselineComponent())
+        }
+        snapshot.maintenance.installedManifests.forEach { manifest ->
+            if (manifest.componentId !in declaredById) {
+                declaredById[manifest.componentId] = manifest
+                    .toComponentDescriptor(device.androidSdk)
+                    .copy(status = ComponentStatus.UNLISTED, errorReason = "unlisted")
+            }
+        }
+        snapshot.maintenance.managedApplications
+            .filter { it.installed }
+            .forEach { application ->
+                if (application.componentId !in declaredById) {
+                    declaredById[application.componentId] = ComponentDescriptor(
+                        id = application.componentId,
+                        displayName = application.componentId,
+                        required = false,
+                        versionLabel = application.versionLabel,
+                        status = ComponentStatus.UNLISTED,
+                        errorReason = "unlisted",
+                    )
+                }
+            }
+        val components = declaredById.values.toList()
+        val availableComponents = declaredSource
+            .map { component -> component.toBaselineComponent() }
+            .filterNot { InstallerSelfIdentity.isSelfComponentId(it.id) || it.status == ComponentStatus.UNLISTED }
+            .distinctBy { it.id }
+        val mayMigrateLegacyBatch = snapshot.state != InstallationSessionState.MAINTENANCE ||
+            snapshot.maintenance.managedApplicationsState != MaintenanceInventoryState.READY
+        val verifiedCurrentBatch = if (mayMigrateLegacyBatch) {
+            snapshot.artifactManifests.filter { manifest ->
+                manifest.componentId in snapshot.evidence.installed
+            }
+        } else {
+            emptyList()
+        }
+        val maintenance = snapshot.maintenance
+            .copy(availableComponents = availableComponents)
+            .withVerifiedInstallations(verifiedCurrentBatch)
+            .toDurableMaintenanceBaseline()
+        val installedIds = buildSet {
+            addAll(snapshot.evidence.installed)
+            addAll(maintenance.installedManifests.map { it.componentId })
+        } intersect components.mapTo(mutableSetOf()) { it.id }
+        val configuredIds = snapshot.evidence.configured intersect installedIds
+        val availableIds = snapshot.evidence.available intersect configuredIds
+        val controlPlaneReady = snapshot.catalogRevision > 0L &&
+            !snapshot.catalogVersion.isNullOrBlank() &&
+            !snapshot.catalogKeyId.isNullOrBlank() &&
+            !snapshot.catalogSignatureAlgorithm.isNullOrBlank()
+
+        return InstallationSessionSnapshot(
+            state = InstallationSessionState.MAINTENANCE,
+            device = device.copy(connectionStatus = DeviceConnectionStatus.DISCONNECTED),
+            components = components,
+            artifactCatalogStage = if (controlPlaneReady) {
+                ArtifactCatalogStage.CONTROL_PLANE_READY
+            } else {
+                ArtifactCatalogStage.NOT_LOADED
+            },
+            catalogVersion = snapshot.catalogVersion,
+            catalogRevision = snapshot.catalogRevision,
+            catalogKeyId = snapshot.catalogKeyId,
+            catalogSignatureAlgorithm = snapshot.catalogSignatureAlgorithm,
+            evidence = SessionEvidence(
+                installed = installedIds,
+                configured = configuredIds,
+                available = availableIds,
+            ),
+            maintenance = maintenance,
+        )
+    }
+
+    private fun ComponentDescriptor.toBaselineComponent(): ComponentDescriptor = copy(
+        status = when (status) {
+            ComponentStatus.UNLISTED,
+            ComponentStatus.CLIENT_CAPABILITY_INSUFFICIENT,
+            -> status
+
+            else -> ComponentStatus.AVAILABLE
+        },
+        errorReason = errorReason.takeIf { status == ComponentStatus.UNLISTED },
+    )
+}
+
 @Serializable
 private data class StoredMaintenanceState(
     val schemaVersion: Int,
@@ -138,6 +243,8 @@ private data class StoredMaintenanceState(
     val available: Set<String>,
     val managedApplications: List<StoredApplication>,
     val lastAction: StoredMaintenanceAction? = null,
+    /** Domain-owned secondary route; absent in older schema-1 records means home. */
+    val routeAction: String? = null,
     /** Added with defaults so schema-1 records written by older builds remain readable. */
     val managedApplicationsState: String = MaintenanceInventoryState.NOT_STARTED.name,
     val managedApplicationsFailureReason: String? = null,
@@ -158,10 +265,8 @@ private data class StoredMaintenanceState(
                 .distinctBy { it.id }
                 .map(StoredComponent::from),
             selectedOptionalComponentIds = snapshot.selectedOptionalComponentIds,
-            artifactManifests = snapshot.artifactManifests.map(StoredManifest::from),
-            installedManifests = (snapshot.maintenance.installedManifests.ifEmpty {
-                snapshot.artifactManifests.filter { it.componentId in snapshot.evidence.installed }
-            }).map(StoredManifest::from),
+            artifactManifests = emptyList(),
+            installedManifests = snapshot.maintenance.installedManifests.map(StoredManifest::from),
             availableManifests = snapshot.maintenance.availableManifests.map(StoredManifest::from),
             catalogVersion = snapshot.catalogVersion,
             catalogRevision = snapshot.catalogRevision,
@@ -177,6 +282,12 @@ private data class StoredMaintenanceState(
             available = snapshot.evidence.available,
             managedApplications = snapshot.maintenance.managedApplications.map(StoredApplication::from),
             lastAction = snapshot.maintenance.lastAction?.let(StoredMaintenanceAction::from),
+            // Secondary-page route data is intentionally process-local. The
+            // selection, update rows and detail payloads are not persisted as
+            // one atomic wire model, so restoring a route would reopen an
+            // incomplete page after process death. Cold start always returns
+            // to the maintenance home and keeps the durable session data.
+            routeAction = null,
             managedApplicationsState = snapshot.maintenance.managedApplicationsState.name,
             managedApplicationsFailureReason = snapshot.maintenance.managedApplicationsFailureReason,
             managedApplicationsFailureRetryable = snapshot.maintenance.managedApplicationsFailureRetryable,
@@ -305,6 +416,11 @@ private data class StoredMaintenanceState(
             return null
         }
         val parsedLastAction = lastAction?.toDomainOrNull() ?: if (lastAction == null) null else return null
+        routeAction?.let {
+            if (runCatching { MaintenanceActionId.valueOf(it) }.getOrNull() == null) {
+                return null
+            }
+        }
         val effectiveInventoryState = if (
             parsedInventoryState == MaintenanceInventoryState.NOT_STARTED &&
             parsedLastAction?.actionId in INVENTORY_ACTIONS &&
@@ -322,15 +438,33 @@ private data class StoredMaintenanceState(
         } catch (_: Exception) {
             return null
         }
-        val effectiveArtifactCatalogStage = when {
-            parsedArtifactCatalogStage != ArtifactCatalogStage.NOT_LOADED -> parsedArtifactCatalogStage
-            catalogControlPlaneOnly -> ArtifactCatalogStage.CONTROL_PLANE_READY
-            manifests.isNotEmpty() -> ArtifactCatalogStage.PREPARED
-            else -> ArtifactCatalogStage.NOT_LOADED
+        val effectiveArtifactCatalogStage = if (
+            parsedArtifactCatalogStage == ArtifactCatalogStage.CONTROL_PLANE_READY ||
+            catalogControlPlaneOnly ||
+            catalogRevision > 0L
+        ) {
+            ArtifactCatalogStage.CONTROL_PLANE_READY
+        } else {
+            ArtifactCatalogStage.NOT_LOADED
         }
         val effectiveInstalledManifests = parsedInstalledManifests.ifEmpty {
-            val installedIds = installed + applications.map(ManagedApplicationStatus::componentId)
-            manifests.filter { it.componentId in installedIds }
+            // Schema-1 records may predate installedManifests. Migrate only
+            // identities backed by explicit installation evidence or by an
+            // exact package/version inventory match. A visible inventory row
+            // alone must never acquire missing-only reuse privileges.
+            val manifestById = manifests.associateBy { it.componentId }
+            val exactInventoryIds = applications.asSequence()
+                .filter { it.installed }
+                .mapNotNull { application ->
+                    val manifest = manifestById[application.componentId] ?: return@mapNotNull null
+                    application.componentId.takeIf {
+                        application.packageName == manifest.packageName &&
+                            application.versionCode == manifest.apkVersion.code
+                    }
+                }
+                .toSet()
+            val trustedLegacyIds = installed + exactInventoryIds
+            manifests.filter { it.componentId in trustedLegacyIds }
         }
         if (manifests.isNotEmpty() && !validateBatchAuthorization(manifests)) {
             return null
@@ -341,7 +475,12 @@ private data class StoredMaintenanceState(
         ) {
             return null
         }
-        val unlistedComponents = applications
+        val effectiveApplications = com.ninepointnine.helper.domain.session.mergeVerifiedManagedApplications(
+            applications,
+            effectiveInstalledManifests,
+        )
+        val effectiveInstalledIds = installed + effectiveInstalledManifests.map { it.componentId }
+        val unlistedComponents = effectiveApplications
             .filter { it.installed && it.componentId !in componentIds }
             .map { it.componentId }
             .distinct()
@@ -366,24 +505,28 @@ private data class StoredMaintenanceState(
             components = parsedComponents + unlistedComponents.filter { unlisted ->
                 parsedComponents.none { component -> component.id == unlisted.id }
             },
-            selectedOptionalComponentIds = selectedOptionalComponentIds,
-            artifactManifests = manifests,
+            selectedOptionalComponentIds = emptySet(),
+            artifactManifests = emptyList(),
             artifactCatalogStage = effectiveArtifactCatalogStage,
             catalogVersion = catalogVersion,
             catalogRevision = catalogRevision,
             catalogKeyId = catalogKeyId,
             catalogSignatureAlgorithm = catalogSignatureAlgorithm,
             evidence = SessionEvidence(
-                installed = installed,
-                configured = configured,
-                available = available,
+                installed = effectiveInstalledIds,
+                configured = configured intersect effectiveInstalledIds,
+                available = available intersect configured intersect effectiveInstalledIds,
             ),
             maintenance = MaintenanceSnapshot(
-                lastAction = parsedLastAction,
+                // Route fields from older records remain strictly parsed above
+                // for schema validation, but are never restored without the
+                // matching page wire model. The durable entry point is home.
+                routeAction = null,
+                lastAction = null,
                 managedApplicationsState = effectiveInventoryState,
-                managedApplicationsFailureReason = managedApplicationsFailureReason,
-                managedApplicationsFailureRetryable = managedApplicationsFailureRetryable,
-                managedApplications = applications,
+                managedApplicationsFailureReason = null,
+                managedApplicationsFailureRetryable = false,
+                managedApplications = effectiveApplications,
                 installedManifests = effectiveInstalledManifests,
                 availableComponents = parsedAvailableComponents.ifEmpty {
                     parsedComponents.filter {
@@ -460,6 +603,7 @@ private val SUPPORTED_SIGNATURE_ALGORITHMS = setOf("SHA256withECDSA", "Ed25519")
 private val INVENTORY_ACTIONS = setOf(
     MaintenanceActionId.MANAGE_APPS,
     MaintenanceActionId.REPAIR_CONFIGURATION,
+    MaintenanceActionId.INSTALL_APPLICATIONS,
     MaintenanceActionId.INSTALL_FILE_MANAGER,
 )
 
@@ -483,7 +627,11 @@ private data class StoredMaintenanceAction(
 
     fun toDomainOrNull(): MaintenanceActionRecord? {
         return try {
-            val parsedAction = MaintenanceActionId.valueOf(actionId)
+            val parsedAction = if (actionId == "INSTALL_FILE_MANAGER") {
+                MaintenanceActionId.INSTALL_APPLICATIONS
+            } else {
+                MaintenanceActionId.valueOf(actionId)
+            }
             val parsedStatus = MaintenanceActionStatus.valueOf(status)
             when (parsedStatus) {
                 MaintenanceActionStatus.RUNNING -> null

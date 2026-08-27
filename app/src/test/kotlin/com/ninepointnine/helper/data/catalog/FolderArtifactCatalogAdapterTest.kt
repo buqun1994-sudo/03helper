@@ -50,6 +50,7 @@ class FolderArtifactCatalogAdapterTest {
                             override fun startFolder(
                                 folderUrl: String,
                                 password: String,
+                                expectedArchiveFileNames: Set<String>,
                                 onEntries: (List<LanzouFolderEntry>) -> Unit,
                                 onFailure: (com.ninepointnine.helper.domain.artifact.ArtifactFailure) -> Unit,
                             ) {
@@ -198,6 +199,7 @@ class FolderArtifactCatalogAdapterTest {
                     override fun startFolder(
                         folderUrl: String,
                         password: String,
+                        expectedArchiveFileNames: Set<String>,
                         onEntries: (List<LanzouFolderEntry>) -> Unit,
                         onFailure: (com.ninepointnine.helper.domain.artifact.ArtifactFailure) -> Unit,
                     ) {
@@ -407,7 +409,10 @@ class FolderArtifactCatalogAdapterTest {
                 metadataReader = ApkMetadataReader {
                     ApkMetadata(
                         packageName = desktop.packageName,
-                        version = ArtifactVersion(desktop.versionName, desktop.versionCode),
+                        // The local APK metadata is intentionally newer than
+                        // the Cloud display fields. Identity, not the stale
+                        // config version, decides whether it can be reused.
+                        version = ArtifactVersion("9.9.9", 99L),
                         certificateSha256s = setOf(desktop.certificateSha256),
                     )
                 },
@@ -422,6 +427,7 @@ class FolderArtifactCatalogAdapterTest {
 
             assertTrue(manifest.localOnly)
             assertEquals(ArtifactSourceKind.LOCAL_DOWNLOAD, manifest.sources.single().kind)
+            assertEquals(99L, manifest.apkVersion.code)
             assertEquals(0, remoteAttempts.get())
             assertTrue(localApk.exists())
         } finally {
@@ -446,6 +452,7 @@ class FolderArtifactCatalogAdapterTest {
                             override fun startFolder(
                                 folderUrl: String,
                                 password: String,
+                                expectedArchiveFileNames: Set<String>,
                                 onEntries: (List<LanzouFolderEntry>) -> Unit,
                                 onFailure: (com.ninepointnine.helper.domain.artifact.ArtifactFailure) -> Unit,
                             ) {
@@ -597,6 +604,99 @@ class FolderArtifactCatalogAdapterTest {
         }
     }
 
+    @Test
+    fun `a later installation batch resolves a fresh folder snapshot`() = runBlocking {
+        val config = config()
+        val desktop = config.apps.single { it.componentId == "desktop" }
+        val lyrics = config.apps.single { it.componentId == "lyrics" }
+        val cast = config.apps.single { it.componentId == "cast" }
+        val folderSnapshots = listOf(
+            listOf(
+                LanzouFolderEntry("idesktop", desktop.archiveFileName),
+                LanzouFolderEntry("ilyrics", lyrics.archiveFileName),
+            ),
+            listOf(
+                LanzouFolderEntry("idesktop", desktop.archiveFileName),
+                LanzouFolderEntry("ilyrics", lyrics.archiveFileName),
+                LanzouFolderEntry("icast", cast.archiveFileName),
+            ),
+        )
+        val folderCalls = AtomicInteger(0)
+        val root = java.nio.file.Files.createTempDirectory("03helper-fresh-folder-batch").toFile()
+        try {
+            val sourcePolicy = ReleaseSourcePolicy(mode = ReleaseSourceMode.FOLDER_CONFIG)
+            val adapter = FolderArtifactCatalogAdapter(
+                configAdapter = configAdapter(config),
+                folderSourceAdapter = LanzouFolderSourceAdapter(
+                    hostFactory = LanzouFolderWebViewHostFactory {
+                        val index = folderCalls.getAndIncrement().coerceAtMost(folderSnapshots.lastIndex)
+                        FolderHost(folderSnapshots[index])
+                    },
+                    sourcePolicy = sourcePolicy,
+                ),
+                lanzouSourceAdapter = LanzouWebSourceAdapter(
+                    hostFactory = LanzouWebViewHostFactory {
+                        DownloadHost { shareUrl ->
+                            ResolvedDownloadRequest(
+                                sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                                url = "https://zip1.webgetstore.com/${shareUrl.substringAfterLast('/')}",
+                                userAgent = "03helper-test",
+                            )
+                        }
+                    },
+                    sourcePolicy = sourcePolicy,
+                ),
+                downloader = DynamicArtifactDownloader(
+                    transport = ArtifactTransport { request, _ ->
+                        val component = when (request.url.substringAfterLast('/')) {
+                            "idesktop" -> desktop
+                            "ilyrics" -> lyrics
+                            "icast" -> cast
+                            else -> error("unexpected_share")
+                        }
+                        val bytes = zip(component.apkEntryName, component.componentId.toByteArray())
+                        ArtifactTransportResponse(
+                            statusCode = 200,
+                            contentLength = bytes.size.toLong(),
+                            contentType = "application/zip",
+                            body = ByteArrayInputStream(bytes),
+                        )
+                    },
+                    sourcePolicy = sourcePolicy,
+                ),
+                metadataReader = ApkMetadataReader { apk ->
+                    val componentId = apk.readText(Charsets.UTF_8)
+                    val component = config.apps.single { it.componentId == componentId }
+                    ApkMetadata(
+                        packageName = component.packageName,
+                        version = ArtifactVersion(component.versionName, component.versionCode),
+                        certificateSha256s = setOf(component.certificateSha256),
+                    )
+                },
+                sourcePolicy = sourcePolicy,
+                artifactCache = ArtifactCache(root.resolve("cache"), root.resolve("Download")),
+                workingDirectory = root.resolve("working"),
+            )
+
+            assertTrue(adapter.loadSelection() is CatalogLoadResult.Success)
+            val first = adapter.prepareSelected(setOf("desktop", "lyrics")) as CatalogLoadResult.Success
+            val second = adapter.prepareSelected(
+                selectedIds = setOf("desktop", "cast"),
+                skippedIds = setOf("desktop"),
+            ) as CatalogLoadResult.Success
+
+            assertEquals(setOf("desktop", "lyrics"), first.catalog.manifests.map { it.componentId }.toSet())
+            assertEquals(
+                "failures=${second.catalog.appFailures}",
+                listOf("cast"),
+                second.catalog.manifests.map { it.componentId },
+            )
+            assertEquals(2, folderCalls.get())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
     private fun configAdapter(config: InstallerDistributionConfig): CloudInstallerDistributionConfigAdapter {
         val payload = InstallerDistributionConfigPayload(
             schemaVersion = 3,
@@ -667,6 +767,7 @@ class FolderArtifactCatalogAdapterTest {
                 val stagingCertificate = when (definition.componentId) {
                     "desktop" -> "bfb70dc15b54ad2f1b8acd35fa26ecf552bf2ef21d416a44b7eeda5e5e9ebaa9"
                     "lyrics" -> "1eb136fffd3f1e4c204d0933cab66c51ee4536a29e949b9c080925c01563b51d"
+                    "cast" -> "98740b95c30064f727b9401a851ecf2e576d5e5c38fcc318284578747ba50e2a"
                     else -> definition.certificateSha256
                 }
                 InstallerComponentSource(
@@ -709,6 +810,7 @@ class FolderArtifactCatalogAdapterTest {
         override fun startFolder(
             folderUrl: String,
             password: String,
+            expectedArchiveFileNames: Set<String>,
             onEntries: (List<LanzouFolderEntry>) -> Unit,
             onFailure: (com.ninepointnine.helper.domain.artifact.ArtifactFailure) -> Unit,
         ) = onEntries(entries)

@@ -131,6 +131,12 @@ class ArtifactIdentityVerifier(
         if (!certificateMatches) {
             return failed(manifest, verifiedArchive.file, extractedApk.file, finalApk, "apk_certificate_mismatch")
         }
+        if (
+            metadata.version.code != manifest.apkVersion.code ||
+            (manifest.apkVersion.name.isNotBlank() && metadata.version.name != manifest.apkVersion.name)
+        ) {
+            return failed(manifest, verifiedArchive.file, extractedApk.file, finalApk, "apk_version_mismatch")
+        }
 
         finalApk.parentFile?.let { parent ->
             if (!parent.mkdirs() && !parent.isDirectory) {

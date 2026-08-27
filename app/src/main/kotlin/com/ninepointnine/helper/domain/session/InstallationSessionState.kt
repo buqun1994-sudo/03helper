@@ -98,12 +98,18 @@ enum class MaintenanceActionId {
     REINSTALL,
     REPAIR_CONFIGURATION,
     MANAGE_APPS,
+    INSTALL_APPLICATIONS,
+    /** Legacy persisted name; new UI and flows use [INSTALL_APPLICATIONS]. */
     INSTALL_FILE_MANAGER,
     LAUNCH_LYRICS,
     LAUNCH_DESKTOP,
     CLEANUP,
     EXPORT_DIAGNOSTICS,
 }
+
+val MaintenanceActionId.isApplicationInstallation: Boolean
+    get() = this == MaintenanceActionId.INSTALL_APPLICATIONS ||
+        this == MaintenanceActionId.INSTALL_FILE_MANAGER
 
 /** Whether the action needs the retained, confirmed car connection. */
 val MaintenanceActionId.requiresConnectedDevice: Boolean
@@ -116,6 +122,7 @@ val MaintenanceActionId.requiresConnectedDevice: Boolean
         MaintenanceActionId.REINSTALL,
         MaintenanceActionId.REPAIR_CONFIGURATION,
         MaintenanceActionId.MANAGE_APPS,
+        MaintenanceActionId.INSTALL_APPLICATIONS,
         MaintenanceActionId.INSTALL_FILE_MANAGER,
         MaintenanceActionId.LAUNCH_LYRICS,
         MaintenanceActionId.LAUNCH_DESKTOP,

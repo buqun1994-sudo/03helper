@@ -12,6 +12,7 @@ import com.ninepointnine.helper.domain.device.DeviceCapability
 import com.ninepointnine.helper.domain.device.AuthorizationActionEvidence
 import com.ninepointnine.helper.domain.device.DeviceAvailabilityEvidence
 import com.ninepointnine.helper.domain.device.InstalledArtifactEvidence
+import com.ninepointnine.helper.domain.device.DeviceInstallWarning
 import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationState
 import com.ninepointnine.helper.domain.device.ManagedApplicationAuthorizationStatus
 
@@ -27,6 +28,8 @@ data class InstallationSessionSnapshot(
     val componentProgress: Map<String, ComponentProgress> = emptyMap(),
     /** Selected applications that were attempted but failed in one phase. */
     val failedComponentIds: Set<String> = emptySet(),
+    /** Retryability of the latest structured failure for each component. */
+    val componentFailureRetryable: Map<String, Boolean> = emptyMap(),
     val failure: SessionFailure? = null,
     val componentResults: List<ComponentResult> = emptyList(),
     val sessionId: Long = 0L,
@@ -55,6 +58,10 @@ data class InstallationSessionSnapshot(
     val installationStrategy: InstallationStrategy = InstallationStrategy.INSTALL_MISSING_ONLY,
     /** Explicit business flow retained across a resumable batch. */
     val installationFlow: InstallationFlow = InstallationFlow.INITIAL_INSTALL,
+    /** Immutable component decisions for the current installation attempt. */
+    val installationBatch: InstallationBatchPlan? = null,
+    /** Phone-local durability of the projected maintenance baseline; never an install result. */
+    val maintenanceBaselinePersistence: MaintenanceBaselinePersistence = MaintenanceBaselinePersistence(),
 )
 
 data class DeviceSummary(
@@ -145,23 +152,62 @@ data class ComponentResult(
     val failureReason: String? = null,
     val failurePhase: InstallPhase? = null,
     val retryable: Boolean = false,
+    /** True when the device accepted the APK write but identity proof is absent. */
+    val writeConfirmed: Boolean = false,
+    /** Stable stage semantics used by both initial and maintenance result views. */
+    val status: ComponentResultStatus = when {
+        writeConfirmed && !installed -> ComponentResultStatus.WRITE_CONFIRMED_IDENTITY_UNVERIFIED
+        !installed -> ComponentResultStatus.NOT_INSTALLED
+        !configured -> ComponentResultStatus.AUTHORIZATION_INCOMPLETE
+        !available -> ComponentResultStatus.AVAILABILITY_INCOMPLETE
+        else -> ComponentResultStatus.READY
+    },
 )
+
+enum class ComponentResultStatus {
+    NOT_INSTALLED,
+    WRITE_CONFIRMED_IDENTITY_UNVERIFIED,
+    AUTHORIZATION_INCOMPLETE,
+    AVAILABILITY_INCOMPLETE,
+    READY,
+}
+
+/** Structured result of saving the durable maintenance baseline on this phone. */
+data class MaintenanceBaselinePersistence(
+    val status: MaintenanceBaselinePersistenceStatus = MaintenanceBaselinePersistenceStatus.NOT_ATTEMPTED,
+    /** Runtime-local correlation id used to reject a late result from an older baseline. */
+    val attemptId: Long = 0L,
+    val reasonCode: String? = null,
+)
+
+enum class MaintenanceBaselinePersistenceStatus {
+    NOT_ATTEMPTED,
+    SAVING,
+    SAVED,
+    FAILED,
+}
 
 /** Structured proof collected by the session before it can report success. */
 data class SessionEvidence(
     val artifactsVerified: Set<String> = emptySet(),
     val artifactVerifications: Map<String, ArtifactVerification> = emptyMap(),
     val installed: Set<String> = emptySet(),
+    /** Device-side PackageManager writes confirmed before identity proof. */
+    val writeConfirmed: Set<String> = emptySet(),
     val installation: Map<String, InstalledArtifactEvidence> = emptyMap(),
     val configured: Set<String> = emptySet(),
     val available: Set<String> = emptySet(),
     val authorizationActions: List<AuthorizationActionEvidence> = emptyList(),
     val availability: Map<String, DeviceAvailabilityEvidence> = emptyMap(),
+    /** Non-fatal transfer housekeeping observations. */
+    val installationWarnings: List<DeviceInstallWarning> = emptyList(),
 )
 
 /** Structured, non-sensitive status for the one maintenance action in flight. */
 data class MaintenanceSnapshot(
     val activeAction: MaintenanceActionId? = null,
+    /** Domain-owned secondary-page route; null means the maintenance home. */
+    val routeAction: MaintenanceActionId? = null,
     val lastAction: MaintenanceActionRecord? = null,
     /** Explicit inventory state; an empty list is a valid loaded result. */
     val managedApplicationsState: MaintenanceInventoryState = MaintenanceInventoryState.NOT_STARTED,
@@ -215,6 +261,86 @@ data class ManagedApplicationStatus(
     val uid: Int? = null,
     val authorizationState: MaintenanceAuthorizationState? = null,
 )
+
+/** Atomically replaces verified identities without disturbing other installed baselines. */
+internal fun mergeVerifiedInstalledManifests(
+    existing: List<ArtifactManifest>,
+    verified: List<ArtifactManifest>,
+): List<ArtifactManifest> {
+    val byComponent = linkedMapOf<String, ArtifactManifest>()
+    existing.forEach { manifest -> byComponent[manifest.componentId] = manifest }
+    verified.forEach { manifest -> byComponent[manifest.componentId] = manifest }
+    return byComponent.values.toList()
+}
+
+/** Derives inventory rows from the same verified identities used by installation. */
+internal fun mergeVerifiedManagedApplications(
+    existing: List<ManagedApplicationStatus>,
+    verified: List<ArtifactManifest>,
+): List<ManagedApplicationStatus> {
+    val byComponent = linkedMapOf<String, ManagedApplicationStatus>()
+    existing.forEach { application -> byComponent[application.componentId] = application }
+    verified.forEach { manifest ->
+        val retained = byComponent[manifest.componentId]
+        byComponent[manifest.componentId] = retained?.copy(
+            packageName = manifest.packageName,
+            installed = true,
+            versionLabel = manifest.apkVersion.name.takeIf(String::isNotBlank),
+            versionCode = manifest.apkVersion.code,
+            fileSizeBytes = manifest.apkSizeBytes,
+        ) ?: ManagedApplicationStatus(
+            componentId = manifest.componentId,
+            packageName = manifest.packageName,
+            installed = true,
+            versionLabel = manifest.apkVersion.name.takeIf(String::isNotBlank),
+            versionCode = manifest.apkVersion.code,
+            fileSizeBytes = manifest.apkSizeBytes,
+        )
+    }
+    return byComponent.values.toList()
+}
+
+/** The one domain rule for promoting verified installation identities into maintenance facts. */
+internal fun MaintenanceSnapshot.withVerifiedInstallations(
+    verified: List<ArtifactManifest>,
+): MaintenanceSnapshot {
+    val mergedManifests = mergeVerifiedInstalledManifests(installedManifests, verified)
+    return copy(
+        installedManifests = mergedManifests,
+        managedApplications = mergeVerifiedManagedApplications(managedApplications, verified),
+        managedApplicationsState = if (
+            managedApplicationsState == MaintenanceInventoryState.READY || mergedManifests.isNotEmpty()
+        ) {
+            MaintenanceInventoryState.READY
+        } else {
+            managedApplicationsState
+        },
+        managedApplicationsFailureReason = null,
+        managedApplicationsFailureRetryable = false,
+    )
+}
+
+/** Removes every page/action field that cannot survive process death independently. */
+internal fun MaintenanceSnapshot.toDurableMaintenanceBaseline(): MaintenanceSnapshot {
+    val normalized = withVerifiedInstallations(installedManifests)
+    val inventoryState = when {
+        normalized.managedApplicationsState == MaintenanceInventoryState.READY -> MaintenanceInventoryState.READY
+        normalized.managedApplications.any { it.installed } -> MaintenanceInventoryState.READY
+        else -> MaintenanceInventoryState.NOT_STARTED
+    }
+    return MaintenanceSnapshot(
+        managedApplicationsState = inventoryState,
+        managedApplications = normalized.managedApplications,
+        availableComponents = normalized.availableComponents,
+        installedManifests = normalized.installedManifests,
+        availableManifests = normalized.availableManifests,
+        availableCatalogVersion = normalized.availableCatalogVersion,
+        availableCatalogRevision = normalized.availableCatalogRevision,
+        availableCatalogKeyId = normalized.availableCatalogKeyId,
+        availableCatalogSignatureAlgorithm = normalized.availableCatalogSignatureAlgorithm,
+        catalogControlPlaneOnly = normalized.catalogControlPlaneOnly,
+    )
+}
 
 data class MaintenanceAuthorizationSnapshot(
     val state: MaintenanceAuthorizationFlowState = MaintenanceAuthorizationFlowState.NOT_STARTED,
@@ -317,6 +443,7 @@ data class SessionCheckpoint(
     val progress: SessionProgress?,
     val componentProgress: Map<String, ComponentProgress> = emptyMap(),
     val failedComponentIds: Set<String> = emptySet(),
+    val componentFailureRetryable: Map<String, Boolean> = emptyMap(),
     val evidence: SessionEvidence,
     val selectedSources: Map<String, ArtifactSourceKind> = emptyMap(),
     val archiveDownloads: Map<String, ArchiveDownloadEvidence> = emptyMap(),
@@ -325,4 +452,5 @@ data class SessionCheckpoint(
     val installationStrategy: InstallationStrategy = InstallationStrategy.INSTALL_MISSING_ONLY,
     val artifactCatalogStage: ArtifactCatalogStage = ArtifactCatalogStage.NOT_LOADED,
     val installationFlow: InstallationFlow = InstallationFlow.INITIAL_INSTALL,
+    val installationBatch: InstallationBatchPlan? = null,
 )

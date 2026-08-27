@@ -392,7 +392,7 @@ class ArtifactSecurityTest {
     }
 
     @Test
-    fun `identity verifier keeps package and publisher certificate as the minimum gate`() {
+    fun `identity verifier checks package publisher certificate and declared version`() {
         val directory = Files.createTempDirectory("artifact-identity-fields").toFile()
         fun runCase(
             name: String,
@@ -427,7 +427,7 @@ class ArtifactSecurityTest {
             name = "version_stale",
             manifestChange = { it },
             metadata = ApkMetadata("com.example.app", ArtifactVersion("9.0.0", 99), setOf("aa".repeat(32))),
-            expectedFailure = null,
+            expectedFailure = "apk_version_mismatch",
         )
         runCase(
             name = "certificate_wrong",

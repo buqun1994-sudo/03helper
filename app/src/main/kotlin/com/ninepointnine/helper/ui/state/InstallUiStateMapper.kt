@@ -8,11 +8,14 @@ import com.ninepointnine.helper.domain.session.InstallPhase
 import com.ninepointnine.helper.domain.session.InstallationSessionSnapshot
 import com.ninepointnine.helper.domain.session.InstallationSessionState
 import com.ninepointnine.helper.domain.session.ResultKind
+import com.ninepointnine.helper.domain.session.InstallationFlow
 import com.ninepointnine.helper.domain.session.MaintenanceApplicationActionId
 import com.ninepointnine.helper.domain.session.MaintenanceActionId
 import com.ninepointnine.helper.domain.session.MaintenanceActionStatus
 import com.ninepointnine.helper.domain.session.MaintenanceInventoryState
+import com.ninepointnine.helper.domain.session.MaintenanceBaselinePersistenceStatus
 import com.ninepointnine.helper.domain.session.ArtifactCatalogStage
+import com.ninepointnine.helper.domain.session.isApplicationInstallation
 import com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
 
 object InstallUiStateMapper {
@@ -72,6 +75,14 @@ object InstallUiStateMapper {
             deviceName = snapshot.device?.displayName,
             connected = snapshot.device?.connectionStatus == DeviceConnectionStatus.CONFIRMED,
             reconnecting = reconnecting,
+            // Keep the maintenance secondary route recoverable from the
+            // active selection as well as the explicit route field. Older
+            // snapshots and a recreated composition may briefly lack the
+            // route field, but a maintenance selection still unambiguously
+            // identifies the B-flow owner.
+            routeAction = snapshot.maintenance.routeAction
+                ?: snapshot.maintenance.installationSelection?.actionId
+                    ?.takeIf { it.isApplicationInstallation },
             feedback = snapshot.maintenance.lastAction?.let { action ->
                 MaintenanceFeedback(
                     actionId = action.actionId,
@@ -79,6 +90,8 @@ object InstallUiStateMapper {
                     resultCode = action.resultCode,
                     reasonCode = action.reasonCode,
                     retryable = action.retryable,
+                    message = failureReasonToUserMessage(action.reasonCode)
+                        .takeIf { action.status == MaintenanceActionStatus.FAILED && action.actionId.isApplicationInstallation },
                 )
             },
             applications = snapshot.maintenance.managedApplications.map { application ->
@@ -105,6 +118,7 @@ object InstallUiStateMapper {
                 snapshot.maintenance.lastAction?.actionId in setOf(
                     MaintenanceActionId.MANAGE_APPS,
                     MaintenanceActionId.REPAIR_CONFIGURATION,
+                    MaintenanceActionId.INSTALL_APPLICATIONS,
                     MaintenanceActionId.INSTALL_FILE_MANAGER,
                 ) && snapshot.maintenance.lastAction?.status == MaintenanceActionStatus.SUCCEEDED ->
                     MaintenanceInventoryState.READY
@@ -188,10 +202,13 @@ object InstallUiStateMapper {
                                 resultCode = action.resultCode,
                                 reasonCode = action.reasonCode,
                                 retryable = action.retryable,
+                                message = failureReasonToUserMessage(action.reasonCode)
+                                    .takeIf { action.status == MaintenanceActionStatus.FAILED && action.actionId.isApplicationInstallation },
                             )
                         },
                 )
             },
+            persistenceWarning = snapshot.persistenceWarning(),
         )
 
     private fun connectionState(
@@ -291,32 +308,122 @@ object InstallUiStateMapper {
                 indeterminate = progress?.indeterminate ?: true,
             ),
             completedStages = completedStages,
+            installationFlow = snapshot.installationFlow,
         )
     }
 
     private fun resultState(
         kind: ResultKind,
         snapshot: InstallationSessionSnapshot,
-    ): InstallUiState.Result = InstallUiState.Result(
-        kind = kind,
-        componentResults = snapshot.componentResults.map {
+    ): InstallUiState.Result {
+        val batch = snapshot.installationBatch
+        val resultIds = batch?.resultComponentIds
+            ?: snapshot.componentResults.mapNotNull { it.componentId }.toSet()
+        // A terminal snapshot can retain baseline evidence for a reusable
+        // maintenance prerequisite. Only the current batch may influence the
+        // result header or its rows.
+        val resultRows = if (batch == null) {
+            snapshot.componentResults
+        } else {
+            snapshot.componentResults.filter { it.componentId != null && it.componentId in resultIds }
+        }
+        val installedIds = if (batch == null) {
+            snapshot.evidence.installed
+        } else {
+            snapshot.evidence.installed intersect resultIds
+        }
+        val configuredIds = if (batch == null) {
+            snapshot.evidence.configured
+        } else {
+            snapshot.evidence.configured intersect resultIds
+        }
+        val availableIds = if (batch == null) {
+            snapshot.evidence.available
+        } else {
+            snapshot.evidence.available intersect resultIds
+        }
+        val writeConfirmedIds = if (batch == null) {
+            snapshot.evidence.writeConfirmed
+        } else {
+            snapshot.evidence.writeConfirmed intersect resultIds
+        }
+        val hasUnverifiedWrite = writeConfirmedIds.any { it !in installedIds } ||
+            resultRows.any {
+                it.status == com.ninepointnine.helper.domain.session.ComponentResultStatus.WRITE_CONFIRMED_IDENTITY_UNVERIFIED
+            }
+        val hasPostInstallFailure = hasUnverifiedWrite ||
+            installedIds.any { it !in configuredIds || it !in availableIds } ||
+            resultRows.any { it.installed && (!it.configured || !it.available) }
+        // A write-confirmed component is not an ordinary install failure: the
+        // device accepted the write, and only the identity readback remains
+        // unresolved. Keep it out of the pre-install failure bucket so the
+        // result page can explain the actual post-install boundary.
+        val ordinaryInstallationFailureIds = resultIds - writeConfirmedIds
+        val hasInstallationFailure = ordinaryInstallationFailureIds.any { it !in installedIds } ||
+            resultRows.any {
+                !it.installed &&
+                    it.status != com.ninepointnine.helper.domain.session.ComponentResultStatus.WRITE_CONFIRMED_IDENTITY_UNVERIFIED
+            }
+        // A device write can succeed before authorization or availability
+        // fails. Present that as a partial result so the page never labels a
+        // package with current-batch install proof as wholly uninstalled.
+        val effectiveKind = if (
+            kind !in setOf(ResultKind.SUCCESS, ResultKind.PAUSED) &&
+            hasPostInstallFailure
+        ) {
+            ResultKind.PARTIAL_FAILURE
+        } else {
+            kind
+        }
+        val visibleFailureReason = resultRows.asSequence()
+            .mapNotNull { it.failureReason }
+            .firstOrNull()
+        val failureReason = (visibleFailureReason ?: snapshot.failure?.reasonCode)
+            ?.toUserMessage()
+        val failureStage = when {
+            effectiveKind == ResultKind.SUCCESS || effectiveKind == ResultKind.PAUSED -> ResultFailureStage.NONE
+            hasPostInstallFailure && hasInstallationFailure -> ResultFailureStage.MIXED
+            hasPostInstallFailure -> ResultFailureStage.POST_INSTALL
+            else -> ResultFailureStage.INSTALLATION
+        }
+        val desktopIsInCurrentBatch = batch?.let {
+            AuthorizationPlanFactory.DESKTOP_COMPONENT_ID in it.resultComponentIds ||
+                AuthorizationPlanFactory.DESKTOP_COMPONENT_ID in it.reusableComponentIds
+        } ?: true
+        val desktopReady = desktopIsInCurrentBatch &&
+            AuthorizationPlanFactory.DESKTOP_COMPONENT_ID in snapshot.evidence.available
+        return InstallUiState.Result(
+            kind = effectiveKind,
+            componentResults = resultRows.map {
             ComponentResultRow(
                 componentName = it.componentName,
                 installed = it.installed,
                 configured = it.configured,
                 available = it.available,
+                status = it.status,
                 errorReason = (
                     it.failureReason
                         ?: snapshot.components.firstOrNull { component -> component.id == it.componentId }?.errorReason
                         ?: snapshot.failure?.reasonCode.takeIf { reason -> it.componentId == null }
-                    )?.toUserMessage(),
+                )?.toUserMessage(),
             )
-        },
-        canContinue = kind != ResultKind.SUCCESS,
-        canEnterMaintenance = kind == ResultKind.SUCCESS ||
-            kind == ResultKind.PARTIAL_FAILURE &&
-            AuthorizationPlanFactory.DESKTOP_COMPONENT_ID in snapshot.evidence.available,
-    )
+            },
+            canContinue = effectiveKind != ResultKind.SUCCESS,
+            canEnterMaintenance = effectiveKind in setOf(ResultKind.SUCCESS, ResultKind.PARTIAL_FAILURE) &&
+                desktopReady,
+            failureReason = failureReason,
+            installationFlow = snapshot.installationFlow,
+            failureStage = failureStage,
+            persistenceWarning = snapshot.persistenceWarning(),
+        )
+    }
+
+    private fun InstallationSessionSnapshot.persistenceWarning(): String? =
+        maintenanceBaselinePersistence.reasonCode
+            ?.takeIf { maintenanceBaselinePersistence.status == MaintenanceBaselinePersistenceStatus.FAILED }
+            ?.let {
+                "安装结果已保留在本次使用中，但未能保存到手机；下次打开时需要重新读取车机应用状态"
+            }
 
     private fun ComponentDescriptor.toUiRow(selectedOptionalIds: Set<String>): ComponentRow = ComponentRow(
         id = id,
@@ -335,18 +442,34 @@ object InstallUiStateMapper {
 
     private fun ComponentRow.isMandatory(): Boolean = id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
 
+internal fun failureReasonToUserMessage(reasonCode: String?): String? = reasonCode?.toUserMessage()
+
 private fun String.toUserMessage(): String = when {
+    contains("component_metadata_incomplete") ->
+        "安装配置缺少必要信息，请重新读取安装配置"
+    contains("selected_catalog_preparation_failed") || contains("artifact_preparation_failed") ->
+        "安装包准备失败，请重试"
     contains("catalog_android_profile") || contains("catalog_load") || contains("distribution_config") ->
         "暂时无法读取安装配置，请重试"
     contains("desktop_prerequisite") -> "03桌面未完成，无法继续授权此应用"
-    contains("local_download") || contains("public_download") || contains("distribution_app_missing") ->
-        "下载目录中没有可用的安装包"
+    contains("public_download_publish_failed") ->
+        "安装包已下载，但暂时无法保存到手机的下载目录"
+    contains("local_download") || contains("distribution_app_missing") ->
+        "手机的下载目录中没有可复用的安装包"
+    contains("lanzou_folder_duplicate") ->
+        "云端安装目录中存在重复文件，已停止使用"
+    contains("lanzou_folder_missing") ->
+        "云端安装目录中暂时没有这个应用"
+    contains("lanzou_folder") ->
+        "暂时无法读取云端安装目录，请重试"
     contains("certificate") -> "应用签名与官方发布者不匹配"
     contains("archive") || contains("zip") -> "压缩包校验失败"
+    contains("desktop_launch") || contains("desktop_process") || contains("desktop_service") ->
+        "03桌面未通过可用性检查"
     contains("install") || contains("shortcut_selected") -> "车机未接受此应用的安装"
     contains("authorization") -> "车机授权未完成"
     contains("availability") || contains("device_verif") -> "应用未通过可用性检查"
-    contains("missing") -> "下载目录中暂时没有这个应用"
+    contains("missing") -> "安装所需资料不完整，请重试"
     contains("schema") || contains("capability") || contains("incompatible") -> "当前客户端或车机能力不足"
     else -> "暂时无法使用，请稍后重试"
 }

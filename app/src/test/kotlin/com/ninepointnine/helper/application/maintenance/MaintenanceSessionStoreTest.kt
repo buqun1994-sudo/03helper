@@ -67,13 +67,36 @@ class MaintenanceSessionStoreTest {
         assertEquals(InstallationSessionState.MAINTENANCE, restored?.state)
         assertEquals(DeviceConnectionStatus.DISCONNECTED, restored?.device?.connectionStatus)
         assertEquals(snapshot.device?.id, restored?.device?.id)
-        assertEquals(installed, restored?.artifactManifests)
+        assertTrue(restored?.artifactManifests.orEmpty().isEmpty())
         assertEquals(installed, restored?.maintenance?.installedManifests)
         assertEquals(available, restored?.maintenance?.availableManifests)
         assertEquals(snapshot.evidence, restored?.evidence)
-        assertEquals(snapshot.maintenance.managedApplications, restored?.maintenance?.managedApplications)
-        assertEquals(snapshot.maintenance.lastAction, restored?.maintenance?.lastAction)
+        assertEquals(
+            snapshot.maintenance.managedApplications.map { it.componentId },
+            restored?.maintenance?.managedApplications?.map { it.componentId },
+        )
+        assertNull(restored?.maintenance?.lastAction)
+        assertNull(restored?.installationBatch)
+        assertNull(restored?.checkpoint)
         assertEquals(icon, restored?.components?.first { it.id == "desktop" }?.iconAsset)
+    }
+
+    @Test
+    fun `cold start returns to maintenance home when a secondary route has no page payload`() {
+        val file = Files.createTempDirectory("maintenance-store-route").resolve("session.json").toFile()
+        val base = maintenanceSnapshot(manifests(1L), manifests(2L))
+        val snapshot = base.copy(
+            maintenance = base.maintenance.copy(
+                routeAction = MaintenanceActionId.INSTALL_APPLICATIONS,
+            ),
+        )
+        val store = MaintenanceSessionStore(file)
+
+        assertTrue(store.save(snapshot))
+        val restored = store.load() ?: error("snapshot_not_restored")
+
+        assertNull(restored.maintenance.routeAction)
+        assertNull(restored.maintenance.installationSelection)
     }
 
     @Test
@@ -105,7 +128,34 @@ class MaintenanceSessionStoreTest {
     }
 
     @Test
-    fun `partial missing-only batch survives without requiring desktop in batch manifests`() {
+    fun `installed identity baseline survives after the transient batch catalog is cleared`() {
+        val file = Files.createTempDirectory("maintenance-store-installed-baseline")
+            .resolve("session.json")
+            .toFile()
+        val desktop = manifest("desktop", 1L, required = true)
+        val base = maintenanceSnapshot(listOf(desktop), emptyList())
+        val snapshot = base.copy(
+            selectedOptionalComponentIds = emptySet(),
+            artifactManifests = emptyList(),
+            artifactCatalogStage = ArtifactCatalogStage.NOT_LOADED,
+            evidence = SessionEvidence(installed = setOf(desktop.componentId)),
+            maintenance = base.maintenance.copy(
+                installedManifests = listOf(desktop),
+                availableManifests = emptyList(),
+            ),
+        )
+        val store = MaintenanceSessionStore(file)
+
+        assertTrue(store.save(snapshot))
+        val restored = store.load() ?: error("snapshot_not_restored")
+
+        assertTrue(restored.artifactManifests.isEmpty())
+        assertEquals(listOf(desktop), restored.maintenance.installedManifests)
+        assertEquals(setOf(desktop.componentId), restored.evidence.installed)
+    }
+
+    @Test
+    fun `partial missing-only batch persists only its merged installed baseline`() {
         val file = Files.createTempDirectory("maintenance-store-partial-batch").resolve("session.json").toFile()
         val desktop = manifest("desktop", 1L, required = true)
         val lyrics = manifest("lyrics", 2L, required = false)
@@ -140,9 +190,15 @@ class MaintenanceSessionStoreTest {
         assertTrue(store.save(snapshot))
         val restored = store.load() ?: error("snapshot_not_restored")
 
-        assertEquals(listOf("lyrics"), restored.artifactManifests.map { it.componentId })
-        assertEquals(listOf("desktop"), restored.maintenance.installedManifests.map { it.componentId })
+        assertTrue(restored.artifactManifests.isEmpty())
+        assertEquals(
+            setOf("desktop", "lyrics"),
+            restored.maintenance.installedManifests.map { it.componentId }.toSet(),
+        )
         assertEquals(setOf("desktop", "lyrics"), restored.maintenance.availableManifests.map { it.componentId }.toSet())
+        assertTrue(restored.selectedOptionalComponentIds.isEmpty())
+        assertNull(restored.installationBatch)
+        assertNull(restored.checkpoint)
     }
 
     @Test
@@ -189,9 +245,16 @@ class MaintenanceSessionStoreTest {
         assertTrue(store.save(snapshot))
         val restored = store.load()
 
-        assertEquals("com.tcrrry.notes", restored?.artifactManifests?.single { it.componentId == "notes" }?.packageName)
-        assertEquals(setup, restored?.artifactManifests?.single { it.componentId == "notes" }?.deviceSetup)
-        assertEquals(setOf("notes"), restored?.selectedOptionalComponentIds)
+        assertTrue(restored?.artifactManifests.orEmpty().isEmpty())
+        assertEquals(
+            "com.tcrrry.notes",
+            restored?.maintenance?.availableManifests?.single { it.componentId == "notes" }?.packageName,
+        )
+        assertEquals(
+            setup,
+            restored?.maintenance?.availableManifests?.single { it.componentId == "notes" }?.deviceSetup,
+        )
+        assertTrue(restored?.selectedOptionalComponentIds.orEmpty().isEmpty())
     }
 
     @Test

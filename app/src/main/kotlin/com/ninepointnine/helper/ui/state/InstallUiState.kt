@@ -12,6 +12,7 @@ import com.ninepointnine.helper.domain.session.MaintenanceUpdateState
 import com.ninepointnine.helper.domain.session.MaintenanceAuthorizationFlowState
 import com.ninepointnine.helper.domain.session.MaintenanceInventoryState
 import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationState
+import com.ninepointnine.helper.domain.session.InstallationFlow
 
 sealed interface InstallUiState {
     val screen: InstallScreen
@@ -44,6 +45,8 @@ sealed interface InstallUiState {
         val currentPhase: InstallPhase,
         val progress: UiProgress,
         val completedStages: Set<InstallPhase>,
+        /** Business flow owning this installation page; never inferred by UI route state. */
+        val installationFlow: InstallationFlow = InstallationFlow.INITIAL_INSTALL,
     ) : InstallUiState {
         override val screen: InstallScreen = InstallScreen.INSTALLING
     }
@@ -53,6 +56,14 @@ sealed interface InstallUiState {
         val componentResults: List<ComponentResultRow>,
         val canContinue: Boolean,
         val canEnterMaintenance: Boolean = false,
+        /** Batch-level concrete reason, including failures of hidden prerequisites. */
+        val failureReason: String? = null,
+        /** Business flow owning this result page; never inferred by UI route state. */
+        val installationFlow: InstallationFlow = InstallationFlow.INITIAL_INSTALL,
+        /** Whether a failed result stopped before or after the APK write. */
+        val failureStage: ResultFailureStage = ResultFailureStage.NONE,
+        /** Independent phone-storage warning; it never changes [kind] or component facts. */
+        val persistenceWarning: String? = null,
     ) : InstallUiState {
         override val screen: InstallScreen = InstallScreen.RESULT
     }
@@ -61,6 +72,8 @@ sealed interface InstallUiState {
         val deviceName: String?,
         val connected: Boolean,
         val reconnecting: Boolean = false,
+        /** Secondary maintenance page selected by the domain session. */
+        val routeAction: MaintenanceActionId? = null,
         val feedback: MaintenanceFeedback? = null,
         val applications: List<MaintenanceApplicationRow> = emptyList(),
         val applicationsState: MaintenanceInventoryState = MaintenanceInventoryState.NOT_STARTED,
@@ -71,6 +84,8 @@ sealed interface InstallUiState {
         val applicationAction: MaintenanceApplicationFeedback? = null,
         val applicationDetails: MaintenanceApplicationDetailsRow? = null,
         val installationSelection: MaintenanceInstallationSelectionUi? = null,
+        /** Independent phone-storage warning for the durable maintenance baseline. */
+        val persistenceWarning: String? = null,
         val groups: List<MaintenanceGroupId> = listOf(
             MaintenanceGroupId.COMMON,
             MaintenanceGroupId.APPS,
@@ -140,7 +155,17 @@ data class ComponentResultRow(
     val configured: Boolean,
     val available: Boolean,
     val errorReason: String? = null,
+    val status: com.ninepointnine.helper.domain.session.ComponentResultStatus =
+        com.ninepointnine.helper.domain.session.ComponentResultStatus.NOT_INSTALLED,
 )
+
+/** Stable aggregate semantics for the result header and recovery action. */
+enum class ResultFailureStage {
+    NONE,
+    INSTALLATION,
+    POST_INSTALL,
+    MIXED,
+}
 
 data class MaintenanceFeedback(
     val actionId: MaintenanceActionId,
@@ -148,6 +173,8 @@ data class MaintenanceFeedback(
     val resultCode: String? = null,
     val reasonCode: String? = null,
     val retryable: Boolean = false,
+    /** Concrete explanation retained for application-install failures. */
+    val message: String? = null,
 )
 
 data class MaintenanceApplicationRow(

@@ -7,6 +7,9 @@ import com.ninepointnine.helper.domain.session.FailureCategory
 import com.ninepointnine.helper.domain.session.InstallPhase
 import com.ninepointnine.helper.domain.session.InstallationSessionSnapshot
 import com.ninepointnine.helper.domain.session.InstallationSessionState
+import com.ninepointnine.helper.domain.session.InstallationBatchPlan
+import com.ninepointnine.helper.domain.session.InstallationFlow
+import com.ninepointnine.helper.domain.session.InstallationStrategy
 import com.ninepointnine.helper.domain.session.MaintenanceActionId
 import com.ninepointnine.helper.domain.session.MaintenanceActionRecord
 import com.ninepointnine.helper.domain.session.MaintenanceActionStatus
@@ -14,6 +17,8 @@ import com.ninepointnine.helper.domain.session.MaintenanceSnapshot
 import com.ninepointnine.helper.domain.session.MaintenanceInventoryState
 import com.ninepointnine.helper.domain.session.MaintenanceInstallationSelection
 import com.ninepointnine.helper.domain.session.MaintenanceInstallationOption
+import com.ninepointnine.helper.domain.session.MaintenanceBaselinePersistence
+import com.ninepointnine.helper.domain.session.MaintenanceBaselinePersistenceStatus
 import com.ninepointnine.helper.domain.session.ArtifactCatalogStage
 import com.ninepointnine.helper.domain.session.ManagedApplicationStatus
 import com.ninepointnine.helper.domain.session.ResultKind
@@ -21,6 +26,7 @@ import com.ninepointnine.helper.domain.session.SessionFailure
 import com.ninepointnine.helper.domain.session.SessionProgress
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -154,6 +160,222 @@ class InstallUiStateMapperTest {
         assertEquals(ResultKind.PARTIAL_FAILURE, state.kind)
         assertTrue(state.canEnterMaintenance)
         assertEquals(2, state.componentResults.size)
+    }
+
+    @Test
+    fun `installed component keeps status facts alongside a post install failure reason`() {
+        val state = InstallUiStateMapper.map(
+            InstallationSessionSnapshot(
+                state = InstallationSessionState.COMPLETED_WITH_ERRORS,
+                device = device,
+                components = listOf(component("cast", required = false, size = null)),
+                failedComponentIds = setOf("cast"),
+                componentResults = listOf(
+                    com.ninepointnine.helper.domain.session.ComponentResult(
+                        componentName = "03投屏",
+                        installed = true,
+                        configured = true,
+                        available = false,
+                        componentId = "cast",
+                        failureReason = "desktop_service_not_bound",
+                    ),
+                ),
+            ),
+        ) as InstallUiState.Result
+
+        val row = state.componentResults.single()
+        assertTrue(row.installed)
+        assertTrue(row.configured)
+        assertFalse(row.available)
+        assertEquals("03桌面未通过可用性检查", row.errorReason)
+    }
+
+    @Test
+    fun `maintenance result excludes a hidden prerequisite reason outside the target rows`() {
+        val state = InstallUiStateMapper.map(
+            InstallationSessionSnapshot(
+                state = InstallationSessionState.COMPLETED_WITH_ERRORS,
+                device = device,
+                components = listOf(
+                    component("desktop", required = true, size = null).copy(errorReason = "desktop_service_not_bound"),
+                    component("cast", required = false, size = null),
+                ),
+                failedComponentIds = setOf("desktop"),
+                installationFlow = com.ninepointnine.helper.domain.session.InstallationFlow.MAINTENANCE_INSTALL,
+                installationBatch = com.ninepointnine.helper.domain.session.InstallationBatchPlan(
+                    batchId = 1L,
+                    flow = com.ninepointnine.helper.domain.session.InstallationFlow.MAINTENANCE_INSTALL,
+                    strategy = com.ninepointnine.helper.domain.session.InstallationStrategy.INSTALL_MISSING_ONLY,
+                    selectedComponentIds = setOf("desktop", "cast"),
+                    reusableComponentIds = setOf("desktop"),
+                    preparationComponentIds = setOf("cast"),
+                    resultComponentIds = setOf("cast"),
+                ),
+                componentResults = listOf(
+                    com.ninepointnine.helper.domain.session.ComponentResult(
+                        componentName = "03投屏",
+                        installed = true,
+                        configured = true,
+                        available = true,
+                        componentId = "cast",
+                    ),
+                ),
+            ),
+        ) as InstallUiState.Result
+
+        assertEquals(1, state.componentResults.size)
+        assertNull(state.failureReason)
+    }
+
+    @Test
+    fun `baseline persistence failure is visible without changing successful install facts`() {
+        val state = InstallUiStateMapper.map(
+            InstallationSessionSnapshot(
+                state = InstallationSessionState.SUCCEEDED,
+                installationBatch = singleResultBatch("cast"),
+                components = listOf(component("cast", required = false, size = null)),
+                evidence = com.ninepointnine.helper.domain.session.SessionEvidence(
+                    installed = setOf("cast"),
+                    configured = setOf("cast"),
+                    available = setOf("cast"),
+                ),
+                componentResults = listOf(
+                    com.ninepointnine.helper.domain.session.ComponentResult(
+                        componentName = "03投屏",
+                        installed = true,
+                        configured = true,
+                        available = true,
+                        componentId = "cast",
+                    ),
+                ),
+                maintenanceBaselinePersistence = MaintenanceBaselinePersistence(
+                    status = MaintenanceBaselinePersistenceStatus.FAILED,
+                    attemptId = 1L,
+                    reasonCode = "maintenance_baseline_save_failed",
+                ),
+            ),
+        ) as InstallUiState.Result
+
+        assertEquals(ResultKind.SUCCESS, state.kind)
+        assertTrue(state.componentResults.single().available)
+        assertTrue(state.persistenceWarning?.contains("未能保存到手机") == true)
+    }
+
+    @Test
+    fun `reusable maintenance baseline does not reclassify a current install failure`() {
+        val state = InstallUiStateMapper.map(
+            InstallationSessionSnapshot(
+                state = InstallationSessionState.FAILED,
+                installationFlow = InstallationFlow.MAINTENANCE_INSTALL,
+                installationBatch = InstallationBatchPlan(
+                    batchId = 9L,
+                    flow = InstallationFlow.MAINTENANCE_INSTALL,
+                    strategy = InstallationStrategy.INSTALL_MISSING_ONLY,
+                    selectedComponentIds = setOf("desktop", "cast"),
+                    reusableComponentIds = setOf("desktop"),
+                    preparationComponentIds = setOf("cast"),
+                    resultComponentIds = setOf("cast"),
+                ),
+                components = listOf(
+                    component("desktop", required = true, size = null),
+                    component("cast", required = false, size = null),
+                ),
+                evidence = com.ninepointnine.helper.domain.session.SessionEvidence(
+                    installed = setOf("desktop"),
+                    configured = setOf("desktop"),
+                    available = setOf("desktop"),
+                ),
+                failure = SessionFailure(
+                    category = FailureCategory.CONFIGURATION,
+                    reasonCode = "authorization_failed",
+                ),
+            ),
+        ) as InstallUiState.Result
+
+        assertEquals(ResultKind.CONFIGURATION_FAILED, state.kind)
+        assertEquals(ResultFailureStage.INSTALLATION, state.failureStage)
+        assertTrue(state.componentResults.isEmpty())
+    }
+
+    @Test
+    fun `installed target with incomplete authorization is a post install result`() {
+        val state = InstallUiStateMapper.map(
+            InstallationSessionSnapshot(
+                state = InstallationSessionState.FAILED,
+                installationBatch = singleResultBatch("cast"),
+                installationFlow = InstallationFlow.INITIAL_INSTALL,
+                components = listOf(component("cast", required = false, size = null)),
+                evidence = com.ninepointnine.helper.domain.session.SessionEvidence(
+                    installed = setOf("cast"),
+                ),
+                componentResults = listOf(
+                    com.ninepointnine.helper.domain.session.ComponentResult(
+                        componentName = "03投屏",
+                        installed = true,
+                        configured = false,
+                        available = false,
+                        componentId = "cast",
+                    ),
+                ),
+                failure = SessionFailure(
+                    category = FailureCategory.CONFIGURATION,
+                    reasonCode = "authorization_failed",
+                ),
+            ),
+        ) as InstallUiState.Result
+
+        assertEquals(ResultKind.PARTIAL_FAILURE, state.kind)
+        assertEquals(ResultFailureStage.POST_INSTALL, state.failureStage)
+        assertEquals(1, state.componentResults.size)
+    }
+
+    @Test
+    fun `installed and authorized target with incomplete availability is post install`() {
+        val state = InstallUiStateMapper.map(
+            InstallationSessionSnapshot(
+                state = InstallationSessionState.COMPLETED_WITH_ERRORS,
+                installationBatch = singleResultBatch("cast"),
+                components = listOf(component("cast", required = false, size = null)),
+                evidence = com.ninepointnine.helper.domain.session.SessionEvidence(
+                    installed = setOf("cast"),
+                    configured = setOf("cast"),
+                ),
+                componentResults = listOf(
+                    com.ninepointnine.helper.domain.session.ComponentResult(
+                        componentName = "03投屏",
+                        installed = true,
+                        configured = true,
+                        available = false,
+                        componentId = "cast",
+                    ),
+                ),
+            ),
+        ) as InstallUiState.Result
+
+        assertEquals(ResultKind.PARTIAL_FAILURE, state.kind)
+        assertEquals(ResultFailureStage.POST_INSTALL, state.failureStage)
+    }
+
+    @Test
+    fun `not installed target keeps installation failure stage`() {
+        val state = InstallUiStateMapper.map(
+            InstallationSessionSnapshot(
+                state = InstallationSessionState.COMPLETED_WITH_ERRORS,
+                installationBatch = singleResultBatch("cast"),
+                components = listOf(component("cast", required = false, size = null)),
+                componentResults = listOf(
+                    com.ninepointnine.helper.domain.session.ComponentResult(
+                        componentName = "03投屏",
+                        installed = false,
+                        configured = false,
+                        available = false,
+                        componentId = "cast",
+                    ),
+                ),
+            ),
+        ) as InstallUiState.Result
+
+        assertEquals(ResultFailureStage.INSTALLATION, state.failureStage)
     }
 
     @Test
@@ -328,6 +550,38 @@ class InstallUiStateMapperTest {
     }
 
     @Test
+    fun `maintenance application failure keeps a concrete archive message after retry`() {
+        val state = InstallUiStateMapper.map(
+            InstallationSessionSnapshot(
+                state = InstallationSessionState.MAINTENANCE,
+                device = device,
+                maintenance = MaintenanceSnapshot(
+                    lastAction = MaintenanceActionRecord(
+                        actionId = MaintenanceActionId.INSTALL_APPLICATIONS,
+                        status = MaintenanceActionStatus.FAILED,
+                        reasonCode = "distribution_archive_invalid",
+                        retryable = true,
+                    ),
+                    installationSelection = MaintenanceInstallationSelection(
+                        actionId = MaintenanceActionId.INSTALL_APPLICATIONS,
+                        options = listOf(
+                            MaintenanceInstallationOption(
+                                componentId = "cast",
+                                displayName = "03投屏",
+                                installed = false,
+                            ),
+                        ),
+                        selectedComponentIds = setOf("cast"),
+                    ),
+                ),
+            ),
+        ) as InstallUiState.Maintenance
+
+        assertEquals("distribution_archive_invalid", state.feedback?.reasonCode)
+        assertEquals("压缩包校验失败", state.feedback?.message)
+    }
+
+    @Test
     fun `connected catalog failure is projected as visible selection feedback`() {
         val state = InstallUiStateMapper.map(
             InstallationSessionSnapshot(
@@ -364,6 +618,16 @@ class InstallUiStateMapperTest {
         versionLabel = "1.0",
         sizeLabel = size,
         compatibilityLabel = "适用于当前车机",
+    )
+
+    private fun singleResultBatch(componentId: String) = InstallationBatchPlan(
+        batchId = 12L,
+        flow = InstallationFlow.INITIAL_INSTALL,
+        strategy = InstallationStrategy.INSTALL_MISSING_ONLY,
+        selectedComponentIds = setOf(componentId),
+        reusableComponentIds = emptySet(),
+        preparationComponentIds = setOf(componentId),
+        resultComponentIds = setOf(componentId),
     )
 
     private companion object {

@@ -114,6 +114,7 @@ class ArtifactPreparationCoordinator(
                                 componentId = manifest.componentId,
                                 reasonCode = local.failure.reasonCode,
                                 sourceKind = ArtifactSourceKind.LOCAL_DOWNLOAD,
+                                retryable = local.failure.retryable,
                             ),
                         )
                         return@forEach
@@ -132,6 +133,7 @@ class ArtifactPreparationCoordinator(
                                 componentId = manifest.componentId,
                                 reasonCode = failure.reasonCode,
                                 sourceKind = failure.sourceKind,
+                                retryable = failure.retryable,
                             ),
                         )
                         return@forEach
@@ -183,6 +185,7 @@ class ArtifactPreparationCoordinator(
                                 componentId = manifest.componentId,
                                 reasonCode = failure.reasonCode,
                                 sourceKind = failure.sourceKind,
+                                retryable = failure.retryable,
                             ),
                         )
                         return@forEach
@@ -210,6 +213,7 @@ class ArtifactPreparationCoordinator(
                             componentId = manifest.componentId,
                             reasonCode = failure.reasonCode,
                             sourceKind = ArtifactSourceKind.LOCAL_DOWNLOAD,
+                            retryable = failure.retryable,
                         ),
                     )
                 }
@@ -405,17 +409,6 @@ class ArtifactPreparationCoordinator(
     }
 
     private fun prepareFromExistingApk(manifest: ArtifactManifest): AttemptResult {
-        if (!cache.publicDirectoryAvailable) {
-            return AttemptResult.Failed(
-                ArtifactFailure(
-                    phase = ArtifactFailurePhase.CACHE,
-                    componentId = manifest.componentId,
-                    sourceKind = ArtifactSourceKind.LOCAL_DOWNLOAD,
-                    reasonCode = "public_download_directory_unavailable",
-                    retryable = true,
-                ),
-            )
-        }
         val sourceKind = if (manifest.localOnly) {
             ArtifactSourceKind.LOCAL_DOWNLOAD
         } else {
@@ -423,7 +416,9 @@ class ArtifactPreparationCoordinator(
         }
         val candidates = buildList {
             cache.verifiedApkFor(manifest)?.let(::add)
-            cache.withPublicApkCandidates { addAll(it) }
+            if (cache.publicDirectoryAvailable) {
+                cache.withPublicApkCandidates { addAll(it) }
+            }
         }.distinctBy { runCatching { it.canonicalPath }.getOrDefault(it.absolutePath) }
         candidates.forEach { candidate ->
             when (val result = identityVerifier.verifyExisting(manifest, sourceKind, candidate)) {
@@ -454,8 +449,12 @@ class ArtifactPreparationCoordinator(
                 phase = ArtifactFailurePhase.CACHE,
                 componentId = manifest.componentId,
                 sourceKind = sourceKind,
-                reasonCode = "local_download_candidate_missing",
-                retryable = false,
+                reasonCode = if (cache.publicDirectoryAvailable) {
+                    "local_download_candidate_missing"
+                } else {
+                    "verified_apk_cache_missing"
+                },
+                retryable = !cache.publicDirectoryAvailable,
             ),
         )
     }

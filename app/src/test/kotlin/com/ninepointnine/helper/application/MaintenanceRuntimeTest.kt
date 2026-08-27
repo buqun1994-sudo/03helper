@@ -12,6 +12,9 @@ import com.ninepointnine.helper.domain.session.InstallationSessionCommand
 import com.ninepointnine.helper.domain.session.InstallationSessionSnapshot
 import com.ninepointnine.helper.domain.session.InstallationSessionState
 import com.ninepointnine.helper.domain.session.MaintenanceActionId
+import com.ninepointnine.helper.domain.session.MaintenanceBaselinePersistenceStatus
+import com.ninepointnine.helper.domain.session.ManagedApplicationStatus
+import com.ninepointnine.helper.domain.session.InstallationSessionEvent
 import com.ninepointnine.helper.domain.session.SessionEvidence
 import java.nio.file.Files
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -80,6 +83,59 @@ class MaintenanceRuntimeTest {
         assertTrue(saved.isNotEmpty())
         assertTrue(saved.all { it.state == InstallationSessionState.MAINTENANCE })
         assertTrue(saved.last().maintenance.activeAction == null)
+        assertEquals(
+            MaintenanceBaselinePersistenceStatus.SAVED,
+            runtime.session.currentSnapshot().maintenanceBaselinePersistence.status,
+        )
+        runtime.close()
+    }
+
+    @Test
+    fun `failed baseline is visible and attempted once until business baseline changes`() = runTest {
+        var attempts = 0
+        val runtime = runtime(
+            maintenanceSnapshot(),
+            controller = null,
+            persist = {
+                attempts += 1
+                error("disk unavailable")
+            },
+        )
+        advanceUntilIdle()
+
+        val firstFailure = runtime.session.currentSnapshot().maintenanceBaselinePersistence
+        assertEquals(1, attempts)
+        assertEquals(MaintenanceBaselinePersistenceStatus.FAILED, firstFailure.status)
+        assertEquals("maintenance_baseline_save_failed", firstFailure.reasonCode)
+
+        // Persistence feedback projects to the same business baseline and must
+        // not recursively trigger a second write.
+        advanceUntilIdle()
+        assertEquals(1, attempts)
+
+        val action = runtime.session.dispatch(
+            InstallationSessionCommand.MaintenanceAction(MaintenanceActionId.MANAGE_APPS),
+        )
+        runtime.session.dispatchEvent(
+            InstallationSessionEvent.MaintenanceApplicationsResolved(
+                applications = listOf(
+                    ManagedApplicationStatus(
+                        componentId = "desktop",
+                        packageName = "com.ninepointnine.desktop",
+                        installed = true,
+                        versionCode = 1L,
+                    ),
+                ),
+            ),
+            sessionId = action.sessionId,
+        )
+        advanceUntilIdle()
+
+        assertEquals(2, attempts)
+        assertEquals(
+            MaintenanceBaselinePersistenceStatus.FAILED,
+            runtime.session.currentSnapshot().maintenanceBaselinePersistence.status,
+        )
         runtime.close()
     }
 

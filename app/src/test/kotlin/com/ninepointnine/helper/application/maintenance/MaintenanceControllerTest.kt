@@ -336,6 +336,55 @@ class MaintenanceControllerTest {
     }
 
     @Test
+    fun `already authorized applications complete an explicit repair without a stale manifest baseline`() = runBlocking {
+        val events = mutableListOf<InstallationSessionEvent>()
+        val desktop = manifest("desktop", 1)
+        val gateway = FakeGateway().apply {
+            managedApplications = ManagedApplicationsResult.Completed(
+                listOf(ManagedApplicationProbe("desktop", desktop.packageName, true)),
+            )
+            authorizationStatuses = com.ninepointnine.helper.domain.device.MaintenanceAuthorizationResult.Completed(
+                listOf(
+                    com.ninepointnine.helper.domain.device.ManagedApplicationAuthorizationStatus(
+                        componentId = "desktop",
+                        packageName = desktop.packageName,
+                        authorized = true,
+                    ),
+                ),
+            )
+        }
+        val base = maintenanceSnapshot(listOf(desktop))
+        val snapshot = base.copy(
+            artifactManifests = emptyList(),
+            maintenance = base.maintenance.copy(
+                installedManifests = emptyList(),
+                availableManifests = emptyList(),
+                authorization = MaintenanceAuthorizationSnapshot(
+                    state = MaintenanceAuthorizationFlowState.REPAIRING,
+                ),
+            ),
+        )
+
+        MaintenanceController(tempCache(), tempDiagnostics()).execute(
+            actionId = MaintenanceActionId.REPAIR_CONFIGURATION,
+            snapshot = snapshot,
+            connection = lease(gateway),
+            eventPort = InstallationSessionEventPort { events += it },
+        )
+
+        assertTrue(
+            events.any {
+                it == InstallationSessionEvent.MaintenanceActionCompleted(
+                    MaintenanceActionId.REPAIR_CONFIGURATION,
+                    "authorization_repaired",
+                )
+            },
+        )
+        assertTrue(gateway.repairManifests.isEmpty())
+        assertFalse(events.any { it is InstallationSessionEvent.MaintenanceActionFailed })
+    }
+
+    @Test
     fun `authorization check forwards the same live inventory used for displayed versions`() = runBlocking {
         val events = mutableListOf<InstallationSessionEvent>()
         val live = ManagedApplicationProbe(

@@ -9,6 +9,7 @@ import com.ninepointnine.helper.domain.artifact.ArtifactVerification
 import com.ninepointnine.helper.domain.artifact.SourceSelectionEvidence
 import com.ninepointnine.helper.domain.device.AuthorizationActionEvidence
 import com.ninepointnine.helper.domain.device.DeviceAvailabilityEvidence
+import com.ninepointnine.helper.domain.device.DeviceInstallWarning
 import com.ninepointnine.helper.domain.device.InstalledArtifactEvidence
 import com.ninepointnine.helper.domain.device.ManagedApplicationAuthorizationStatus
 
@@ -92,6 +93,7 @@ sealed interface InstallationSessionEvent {
         val catalogRevision: Long = 0L,
         val apps: List<ComponentDescriptor> = emptyList(),
         val appFailures: Map<String, String> = emptyMap(),
+        val appFailureRetryable: Map<String, Boolean> = emptyMap(),
     ) : InstallationSessionEvent
 
     /** Folder-based distribution exposes component choices before APK metadata is known. */
@@ -101,6 +103,7 @@ sealed interface InstallationSessionEvent {
         val signatureAlgorithm: String,
         val components: List<ComponentDescriptor>,
         val appFailures: Map<String, String> = emptyMap(),
+        val appFailureRetryable: Map<String, Boolean> = emptyMap(),
         val catalogRevision: Long = 0L,
     ) : InstallationSessionEvent
 
@@ -113,9 +116,15 @@ sealed interface InstallationSessionEvent {
         val catalogRevision: Long = 0L,
         val apps: List<ComponentDescriptor> = emptyList(),
         val appFailures: Map<String, String> = emptyMap(),
+        val appFailureRetryable: Map<String, Boolean> = emptyMap(),
+        /** Echo of the immutable request; production responses must carry it unchanged. */
+        val batch: InstallationBatchPlan? = null,
     ) : InstallationSessionEvent
 
-    data class CatalogFailed(val reasonCode: String) : InstallationSessionEvent
+    data class CatalogFailed(
+        val reasonCode: String,
+        val retryable: Boolean = false,
+    ) : InstallationSessionEvent
 
     data class SourceResolved(
         val sourceId: String,
@@ -165,6 +174,7 @@ sealed interface InstallationSessionEvent {
         val componentId: String,
         val reasonCode: String,
         val sourceKind: ArtifactSourceKind? = null,
+        val retryable: Boolean = false,
     ) : InstallationSessionEvent
 
     /** A real per-application transfer or install state update. */
@@ -191,16 +201,23 @@ sealed interface InstallationSessionEvent {
     data class InstallationCompleted(
         val checks: List<ComponentCheck>,
         val evidence: List<InstalledArtifactEvidence> = emptyList(),
+        val warnings: List<DeviceInstallWarning> = emptyList(),
+        /** PackageManager-confirmed writes whose identity may still be unknown. */
+        val writeConfirmedComponentIds: Set<String> = emptySet(),
     ) : InstallationSessionEvent
 
     data class AuthorizationCompleted(
         val checks: List<ComponentCheck>,
         val evidence: List<AuthorizationActionEvidence> = emptyList(),
+        /** Components whose verified authorization is retained from the batch baseline. */
+        val preservedComponentIds: Set<String> = emptySet(),
     ) : InstallationSessionEvent
 
     data class DeviceVerified(
         val checks: List<ComponentCheck>,
         val evidence: List<DeviceAvailabilityEvidence> = emptyList(),
+        /** Components whose verified availability is retained from the batch baseline. */
+        val preservedComponentIds: Set<String> = emptySet(),
     ) : InstallationSessionEvent
 
     data class DeviceDisconnected(
@@ -267,9 +284,26 @@ sealed interface InstallationSessionEvent {
         val manifests: List<ArtifactManifest>,
         val apps: List<ComponentDescriptor> = emptyList(),
         val appFailures: Map<String, String> = emptyMap(),
+        val appFailureRetryable: Map<String, Boolean> = emptyMap(),
         val catalogRevision: Long = 0L,
         val updateStatuses: List<MaintenanceUpdateStatus> = emptyList(),
         val controlPlaneOnly: Boolean = false,
+    ) : InstallationSessionEvent
+
+    /** The phone started saving one projected maintenance baseline. */
+    data class MaintenanceBaselinePersistenceStarted(
+        val attemptId: Long,
+    ) : InstallationSessionEvent
+
+    /** The same projected baseline is now durable on the phone. */
+    data class MaintenanceBaselinePersistenceCompleted(
+        val attemptId: Long,
+    ) : InstallationSessionEvent
+
+    /** Installation facts remain valid, but this phone could not save their durable baseline. */
+    data class MaintenanceBaselinePersistenceFailed(
+        val attemptId: Long,
+        val reasonCode: String = "maintenance_baseline_save_failed",
     ) : InstallationSessionEvent
 
     data class RecoverableError(

@@ -59,7 +59,10 @@ import com.ninepointnine.helper.domain.session.MaintenanceAuthorizationFlowState
 import com.ninepointnine.helper.domain.session.MaintenanceInventoryState
 import com.ninepointnine.helper.domain.session.InstallPhase
 import com.ninepointnine.helper.domain.session.ResultKind
+import com.ninepointnine.helper.domain.session.ComponentResultStatus
 import com.ninepointnine.helper.domain.session.requiresConnectedDevice
+import com.ninepointnine.helper.domain.session.isApplicationInstallation
+import com.ninepointnine.helper.ui.state.ResultFailureStage
 import com.ninepointnine.helper.ui.components.AnimatedEntry
 import com.ninepointnine.helper.ui.components.ComponentLogo
 import com.ninepointnine.helper.ui.components.DividerLine
@@ -88,24 +91,21 @@ fun MaintenanceHome(
     state: InstallUiState.Maintenance,
     onIntent: (InstallUiIntent) -> Unit,
     modifier: Modifier = Modifier,
-    selectedAction: MaintenanceActionId? = null,
-    onSelectedActionChange: (MaintenanceActionId?) -> Unit = {},
 ) {
     val overviewScrollState = rememberLazyListState()
     var applicationPage by remember { mutableStateOf(ApplicationMaintenancePage.LIST) }
-    LaunchedEffect(selectedAction) { applicationPage = ApplicationMaintenancePage.LIST }
+    LaunchedEffect(state.routeAction) { applicationPage = ApplicationMaintenancePage.LIST }
     val leaveAction = {
         onIntent(InstallUiIntent.LeaveMaintenanceAction)
-        onSelectedActionChange(null)
     }
-    BackHandler(enabled = selectedAction != null && applicationPage == ApplicationMaintenancePage.LIST) {
+    BackHandler(enabled = state.routeAction != null && applicationPage == ApplicationMaintenancePage.LIST) {
         leaveAction()
     }
 
     BoxWithConstraints(modifier = modifier.fillMaxSize()) {
         val columns = maintenanceColumnCount(maxWidth.value)
         AnimatedContent(
-            targetState = selectedAction,
+            targetState = state.routeAction,
             modifier = Modifier.fillMaxSize(),
             transitionSpec = {
                 if (targetState != null) {
@@ -147,8 +147,7 @@ fun MaintenanceHome(
                     columns = columns,
                     onReconnect = { onIntent(InstallUiIntent.Reconnect) },
                     onDisconnect = { onIntent(InstallUiIntent.DisconnectDevice) },
-                    onAction = { onSelectedActionChange(it) },
-                    onRunAction = { onIntent(InstallUiIntent.MaintenanceAction(it)) },
+                    onAction = { onIntent(InstallUiIntent.MaintenanceAction(it)) },
                     scrollState = overviewScrollState,
                 )
             } else {
@@ -156,7 +155,6 @@ fun MaintenanceHome(
                     MaintenanceActionId.CHECK_UPDATES -> MaintenanceUpdatesPage(
                         state = state,
                         onBeginUpdates = {
-                            onSelectedActionChange(MaintenanceActionId.REINSTALL)
                             onIntent(InstallUiIntent.MaintenanceAction(MaintenanceActionId.REINSTALL))
                         },
                         onRetry = { onIntent(InstallUiIntent.MaintenanceAction(MaintenanceActionId.CHECK_UPDATES)) },
@@ -179,7 +177,7 @@ fun MaintenanceHome(
                         onBack = leaveAction,
                     )
 
-                    else -> if (action == MaintenanceActionId.INSTALL_FILE_MANAGER &&
+                    else -> if (action.isApplicationInstallation &&
                         state.installationSelection != null
                     ) {
                         MaintenanceInstallationSelectionPage(
@@ -419,7 +417,7 @@ private fun MaintenanceAuthorizationPage(
         }
     }
     val allAuthorized = authorizationRows.isNotEmpty() && authorizationRows.all { it.authorized == true }
-    val completedRepair = state.feedback?.resultCode == "authorization_repaired"
+    val completedRepair = state.authorization.state == MaintenanceAuthorizationFlowState.COMPLETED
     val inventoryLoading = state.applicationsState == MaintenanceInventoryState.LOADING
     val inventoryFailed = state.applicationsState == MaintenanceInventoryState.FAILED
     val hasApplications = authorizationRows.isNotEmpty() || state.applications.isNotEmpty()
@@ -896,7 +894,7 @@ private fun MaintenanceInstallationSelectionPage(
     ) {
         TaskTopBar(
             title = stringResource(R.string.maintenance_install_file_manager),
-            iconName = actionIcon(MaintenanceActionId.INSTALL_FILE_MANAGER),
+            iconName = actionIcon(MaintenanceActionId.INSTALL_APPLICATIONS),
             onBack = onBack,
         )
         LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(InstallerDimensions.ListSpacing)) {
@@ -1246,7 +1244,7 @@ private fun MaintenanceInstallResult(
     onBack: () -> Unit,
     actionId: MaintenanceActionId,
 ) {
-    val retryIntent = if (actionId == MaintenanceActionId.INSTALL_FILE_MANAGER) {
+    val retryIntent = if (state.installationFlow == com.ninepointnine.helper.domain.session.InstallationFlow.MAINTENANCE_INSTALL) {
         InstallUiIntent.ReturnToMaintenanceInstallationSelection
     } else {
         InstallUiIntent.ReturnToSelection
@@ -1260,14 +1258,41 @@ private fun MaintenanceInstallResult(
             R.string.result_enter_maintenance,
             InstallUiIntent.EnterMaintenance,
         )
-        ResultKind.PARTIAL_FAILURE -> ResultFlowCopy(
-            R.string.result_failure_title,
-            null,
-            "triangle_alert",
-            InstallerColors.Warning,
-            if (state.canEnterMaintenance) R.string.result_enter_maintenance else R.string.result_retry,
-            if (state.canEnterMaintenance) InstallUiIntent.EnterMaintenance else retryIntent,
-        )
+        ResultKind.PARTIAL_FAILURE -> if (state.failureStage == ResultFailureStage.POST_INSTALL) {
+            ResultFlowCopy(
+                R.string.result_post_install_failure_title,
+                R.string.result_post_install_failure_description,
+                "triangle_alert",
+                InstallerColors.Warning,
+                if (actionId.isApplicationInstallation || !state.canEnterMaintenance) {
+                    R.string.result_retry
+                } else {
+                    R.string.result_enter_maintenance
+                },
+                if (actionId.isApplicationInstallation || !state.canEnterMaintenance) {
+                    retryIntent
+                } else {
+                    InstallUiIntent.EnterMaintenance
+                },
+            )
+        } else {
+            ResultFlowCopy(
+                R.string.result_partial_failure_title,
+                R.string.result_partial_failure_description,
+                "triangle_alert",
+                InstallerColors.Warning,
+                if (actionId.isApplicationInstallation || !state.canEnterMaintenance) {
+                    R.string.result_retry
+                } else {
+                    R.string.result_enter_maintenance
+                },
+                if (actionId.isApplicationInstallation || !state.canEnterMaintenance) {
+                    retryIntent
+                } else {
+                    InstallUiIntent.EnterMaintenance
+                },
+            )
+        }
         ResultKind.PAUSED -> ResultFlowCopy(
             R.string.result_paused_title,
             R.string.result_paused_description,
@@ -1330,6 +1355,26 @@ private fun MaintenanceInstallResult(
                 modifier = Modifier.fillMaxWidth(),
             )
         }
+        state.failureReason?.let { reason ->
+            Text(
+                text = reason,
+                style = MaterialTheme.typography.bodyMedium,
+                color = InstallerColors.Warning,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
+        state.persistenceWarning?.let { warning ->
+            Text(
+                text = warning,
+                style = MaterialTheme.typography.bodyMedium,
+                color = InstallerColors.Warning,
+                textAlign = TextAlign.Center,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("maintenance_result_persistence_warning"),
+            )
+        }
         Spacer(modifier = Modifier.height(InstallerDimensions.SectionVerticalSpacing))
         LazyColumn(
             modifier = Modifier.weight(1f),
@@ -1340,21 +1385,35 @@ private fun MaintenanceInstallResult(
                     Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text(text = result.componentName, style = MaterialTheme.typography.bodyLarge, color = InstallerColors.White)
-                            if (result.errorReason != null) {
+                            Text(
+                                text = listOf(
+                                    stringResource(
+                                        when (result.status) {
+                                            ComponentResultStatus.WRITE_CONFIRMED_IDENTITY_UNVERIFIED ->
+                                                R.string.result_status_write_confirmed
+                                            else -> if (result.installed) R.string.result_status_installed else R.string.result_status_not_installed
+                                        },
+                                    ),
+                                    stringResource(if (result.configured) R.string.result_status_configured else R.string.result_status_not_configured),
+                                    stringResource(if (result.available) R.string.result_status_available else R.string.result_status_not_available),
+                                ).joinToString(" · "),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = InstallerColors.AuxiliaryWhite,
+                            )
+                            Text(
+                                text = stringResource(maintenanceResultStageLabel(result.status)),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = if (result.status == ComponentResultStatus.READY) {
+                                    InstallerColors.Success
+                                } else {
+                                    InstallerColors.Warning
+                                },
+                            )
+                            result.errorReason?.let { reason ->
                                 Text(
-                                    text = result.errorReason,
+                                    text = reason,
                                     style = MaterialTheme.typography.bodySmall,
                                     color = InstallerColors.Warning,
-                                )
-                            } else {
-                                Text(
-                                    text = listOf(
-                                        stringResource(if (result.installed) R.string.result_status_installed else R.string.result_status_not_installed),
-                                        stringResource(if (result.configured) R.string.result_status_configured else R.string.result_status_not_configured),
-                                        stringResource(if (result.available) R.string.result_status_available else R.string.result_status_not_available),
-                                    ).joinToString(" · "),
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = InstallerColors.AuxiliaryWhite,
                                 )
                             }
                         }
@@ -1372,9 +1431,6 @@ private fun MaintenanceInstallResult(
             text = stringResource(actionText),
             onClick = {
                 onIntent(action)
-                if (action == InstallUiIntent.EnterMaintenance) {
-                    onBack()
-                }
             },
             modifier = Modifier.fillMaxWidth(),
         )
@@ -1398,7 +1454,6 @@ private fun MaintenanceOverview(
     onReconnect: () -> Unit,
     onDisconnect: () -> Unit,
     onAction: (MaintenanceActionId) -> Unit,
-    onRunAction: (MaintenanceActionId) -> Unit,
     scrollState: LazyListState,
 ) {
     Column(
@@ -1413,6 +1468,16 @@ private fun MaintenanceOverview(
             onReconnect = onReconnect,
             onDisconnect = onDisconnect,
         )
+        state.persistenceWarning?.let { warning ->
+            Text(
+                text = warning,
+                style = MaterialTheme.typography.bodyMedium,
+                color = InstallerColors.Warning,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag("maintenance_persistence_warning"),
+            )
+        }
         Spacer(modifier = Modifier.height(InstallerDimensions.SectionVerticalSpacing))
         LazyColumn(
             modifier = Modifier
@@ -1427,10 +1492,7 @@ private fun MaintenanceOverview(
                     columns = columns,
                     connected = state.connected,
                     busy = state.feedback?.status == MaintenanceActionStatus.RUNNING,
-                    onAction = { action ->
-                        onAction(action)
-                        onRunAction(action)
-                    },
+                    onAction = onAction,
                 )
             }
         }
@@ -1663,6 +1725,12 @@ private fun MaintenanceFeedbackBlock(
                         style = MaterialTheme.typography.bodySmall,
                         color = InstallerColors.AuxiliaryWhite,
                     )
+                } ?: feedback.message?.let { message ->
+                    Text(
+                        text = message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = InstallerColors.AuxiliaryWhite,
+                    )
                 }
             }
         }
@@ -1720,7 +1788,7 @@ private fun MaintenanceGroup(
         )
         MaintenanceGroupId.APPS -> listOf(
             MaintenanceActionId.MANAGE_APPS,
-            MaintenanceActionId.INSTALL_FILE_MANAGER,
+            MaintenanceActionId.INSTALL_APPLICATIONS,
         )
         MaintenanceGroupId.STORAGE -> listOf(
             MaintenanceActionId.EXPORT_DIAGNOSTICS,
@@ -1802,12 +1870,23 @@ private fun groupTitle(group: MaintenanceGroupId): Int = when (group) {
     MaintenanceGroupId.STORAGE -> R.string.maintenance_storage
 }
 
+private fun maintenanceResultStageLabel(status: ComponentResultStatus): Int = when (status) {
+    ComponentResultStatus.NOT_INSTALLED -> R.string.result_stage_not_installed
+    ComponentResultStatus.WRITE_CONFIRMED_IDENTITY_UNVERIFIED ->
+        R.string.result_stage_write_confirmed_identity_unverified
+    ComponentResultStatus.AUTHORIZATION_INCOMPLETE -> R.string.result_stage_authorization_incomplete
+    ComponentResultStatus.AVAILABILITY_INCOMPLETE -> R.string.result_stage_availability_incomplete
+    ComponentResultStatus.READY -> R.string.result_stage_ready
+}
+
 private fun actionTitle(action: MaintenanceActionId): Int = when (action) {
     MaintenanceActionId.CHECK_UPDATES -> R.string.maintenance_check_updates
     MaintenanceActionId.REINSTALL -> R.string.maintenance_reinstall
     MaintenanceActionId.REPAIR_CONFIGURATION -> R.string.maintenance_repair
     MaintenanceActionId.MANAGE_APPS -> R.string.maintenance_manage_apps
-    MaintenanceActionId.INSTALL_FILE_MANAGER -> R.string.maintenance_install_file_manager
+    MaintenanceActionId.INSTALL_APPLICATIONS,
+    MaintenanceActionId.INSTALL_FILE_MANAGER,
+    -> R.string.maintenance_install_file_manager
     MaintenanceActionId.LAUNCH_LYRICS -> R.string.maintenance_launch_lyrics
     MaintenanceActionId.LAUNCH_DESKTOP -> R.string.maintenance_launch_desktop
     MaintenanceActionId.CLEANUP -> R.string.maintenance_cleanup
@@ -1819,7 +1898,9 @@ private fun actionDescription(action: MaintenanceActionId): Int = when (action) 
     MaintenanceActionId.REINSTALL -> R.string.maintenance_reinstall_description
     MaintenanceActionId.REPAIR_CONFIGURATION -> R.string.maintenance_repair_description
     MaintenanceActionId.MANAGE_APPS -> R.string.maintenance_manage_apps_description
-    MaintenanceActionId.INSTALL_FILE_MANAGER -> R.string.maintenance_install_file_manager_description
+    MaintenanceActionId.INSTALL_APPLICATIONS,
+    MaintenanceActionId.INSTALL_FILE_MANAGER,
+    -> R.string.maintenance_install_file_manager_description
     MaintenanceActionId.LAUNCH_LYRICS -> R.string.maintenance_launch_lyrics_description
     MaintenanceActionId.LAUNCH_DESKTOP -> R.string.maintenance_launch_desktop_description
     MaintenanceActionId.CLEANUP -> R.string.maintenance_cleanup_description
@@ -1831,7 +1912,9 @@ private fun actionIcon(action: MaintenanceActionId): String = when (action) {
     MaintenanceActionId.REINSTALL -> "download"
     MaintenanceActionId.REPAIR_CONFIGURATION -> "wrench"
     MaintenanceActionId.MANAGE_APPS -> "layout_grid"
-    MaintenanceActionId.INSTALL_FILE_MANAGER -> "folder_plus"
+    MaintenanceActionId.INSTALL_APPLICATIONS,
+    MaintenanceActionId.INSTALL_FILE_MANAGER,
+    -> "folder_plus"
     MaintenanceActionId.LAUNCH_LYRICS -> "music_2"
     MaintenanceActionId.LAUNCH_DESKTOP -> "panels_top_left"
     MaintenanceActionId.CLEANUP -> "trash_2"
@@ -1865,6 +1948,7 @@ private fun maintenanceFeedbackDescription(feedback: MaintenanceFeedback): Int? 
                 "selected_catalog_preparer_strategy_unavailable",
             ) -> R.string.maintenance_failure_catalog
         feedback.reasonCode?.contains("identity") == true -> R.string.maintenance_failure_identity
+        feedback.actionId.isApplicationInstallation -> null
         else -> R.string.maintenance_failure_generic
     }
 }

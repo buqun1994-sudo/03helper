@@ -235,10 +235,36 @@ data class AuthorizationSetupDeclaration(
 }
 
 sealed interface DeviceInstallResult {
-    data class Installed(val evidence: List<InstalledArtifactEvidence>) : DeviceInstallResult
+    data class Installed(
+        val evidence: List<InstalledArtifactEvidence>,
+        /** Housekeeping warnings never invalidate the verified package write. */
+        val warnings: List<DeviceInstallWarning> = emptyList(),
+        /** Components for which PackageManager accepted a fresh device write. */
+        val writeConfirmedComponentIds: Set<String> = emptySet(),
+    ) : DeviceInstallResult
 
-    data class Failed(val failure: DeviceActionFailure) : DeviceInstallResult
+    data class Failed(
+        val failure: DeviceActionFailure,
+        /** Confirmed writes that happened before a later command failed. */
+        val writeConfirmedComponentIds: Set<String> = emptySet(),
+        /** Verified identities collected before a later command failed. */
+        val verifiedEvidence: List<InstalledArtifactEvidence> = emptyList(),
+        val warnings: List<DeviceInstallWarning> = emptyList(),
+    ) : DeviceInstallResult
+
+    /** PackageManager accepted a write, but the installed APK identity is not yet trusted. */
+    data class WrittenButUnverified(
+        val writeConfirmedComponentIds: Set<String>,
+        val failure: DeviceActionFailure,
+        val verifiedEvidence: List<InstalledArtifactEvidence> = emptyList(),
+        val warnings: List<DeviceInstallWarning> = emptyList(),
+    ) : DeviceInstallResult
 }
+
+data class DeviceInstallWarning(
+    val reasonCode: String,
+    val componentId: String? = null,
+)
 
 data class InstalledArtifactEvidence(
     val componentId: String,
@@ -267,6 +293,8 @@ sealed interface DeviceAvailabilityResult {
 
 enum class DeviceShortcut {
     CONFIGURE_ALL_INSTALLED_APPS_AND_START_DESKTOP,
+    /** Applies only the supplied typed actions; it never launches the desktop. */
+    CONFIGURE_SELECTED_APPS,
 }
 
 sealed interface DeviceShortcutResult {
@@ -280,6 +308,11 @@ sealed interface DeviceShortcutResult {
     data class Failed(
         val stage: DeviceShortcutFailureStage,
         val failure: DeviceActionFailure,
+        /** Structured receipts emitted before the command stopped. */
+        val configuredComponentIds: Set<String> = emptySet(),
+        val skippedComponentIds: Set<String> = emptySet(),
+        val authorizationEvidence: List<AuthorizationActionEvidence> = emptyList(),
+        val availabilityEvidence: List<ManagedApplicationAvailabilityEvidence> = emptyList(),
     ) : DeviceShortcutResult
 }
 
@@ -471,7 +504,10 @@ object AuthorizationPlanFactory {
             },
         )
 
-    fun createForManifests(manifests: List<ArtifactManifest>): AuthorizationPlanBuildResult =
+    fun createForManifests(
+        manifests: List<ArtifactManifest>,
+        requireDesktop: Boolean = true,
+    ): AuthorizationPlanBuildResult =
         createComponents(
             manifests.map {
                 ManagedComponent(
@@ -481,10 +517,13 @@ object AuthorizationPlanFactory {
                     order = it.sortOrder,
                 )
             },
+            requireDesktop = requireDesktop,
         )
 
-    fun createForComponents(components: List<ManagedComponent>): AuthorizationPlanBuildResult =
-        createComponents(components)
+    fun createForComponents(
+        components: List<ManagedComponent>,
+        requireDesktop: Boolean = true,
+    ): AuthorizationPlanBuildResult = createComponents(components, requireDesktop = requireDesktop)
 
     /**
      * Builds the same typed action set for a read-only probe without requiring
@@ -520,6 +559,21 @@ object AuthorizationPlanFactory {
             return false
         }
         val actions = plan.actions.associateBy { it.id }
+        if (evidence.map { it.actionId }.toSet() != actions.keys) return false
+        return validateEvidenceSubset(plan, evidence)
+    }
+
+    /**
+     * Validates evidence emitted before a device-side action failed. A partial
+     * response is useful only when every retained row still proves one typed
+     * action from this exact plan; unknown or duplicated rows are rejected.
+     */
+    fun validateEvidenceSubset(
+        plan: AuthorizationPlan,
+        evidence: List<AuthorizationActionEvidence>,
+    ): Boolean {
+        if (evidence.map { it.actionId }.toSet().size != evidence.size) return false
+        val actions = plan.actions.associateBy { it.id }
         return evidence.all { item ->
             val action = actions[item.actionId] ?: return@all false
             if (item.componentId != action.componentId || item.writeApplied != (item.before != item.after)) {
@@ -540,6 +594,23 @@ object AuthorizationPlanFactory {
                         item.preservedEntryCount != null && item.preservedEntryCount >= 0
             }
         }
+    }
+
+    /** Components for which every typed action has a valid retained receipt. */
+    fun configuredComponentIdsForEvidence(
+        plan: AuthorizationPlan,
+        evidence: List<AuthorizationActionEvidence>,
+    ): Set<String> {
+        if (!validateEvidenceSubset(plan, evidence)) return emptySet()
+        val evidenceIds = evidence.map { it.actionId }.toSet()
+        return plan.components
+            .filter { component ->
+                plan.actions
+                    .filter { action -> action.componentId == component.componentId }
+                    .all { action -> action.id in evidenceIds }
+            }
+            .map { it.componentId }
+            .toSet()
     }
 
     private fun createComponents(

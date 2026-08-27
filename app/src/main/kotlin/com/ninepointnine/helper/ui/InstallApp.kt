@@ -1,5 +1,6 @@
 package com.ninepointnine.helper.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.ContentTransform
 import androidx.compose.animation.fadeIn
@@ -30,10 +31,12 @@ import com.ninepointnine.helper.domain.artifact.InstallerSelfIdentity
 import com.ninepointnine.helper.domain.artifact.ArtifactManifest
 import com.ninepointnine.helper.domain.session.InstallationSessionSnapshot
 import com.ninepointnine.helper.domain.session.ArtifactCatalogStage
+import com.ninepointnine.helper.domain.session.InstallationFlow
 import com.ninepointnine.helper.ui.screens.FirstInstallScreen
 import com.ninepointnine.helper.ui.screens.MaintenanceActionFlowPage
 import com.ninepointnine.helper.ui.screens.MaintenanceHome
 import com.ninepointnine.helper.domain.session.MaintenanceActionId
+import com.ninepointnine.helper.domain.session.isApplicationInstallation
 import com.ninepointnine.helper.ui.state.InstallUiIntent
 import com.ninepointnine.helper.ui.state.InstallUiState
 import com.ninepointnine.helper.ui.state.InstallUiStateMapper
@@ -50,8 +53,41 @@ fun InstallApp(
     apkIconRepository: ApkIconRepository? = null,
 ) {
     val uiState = InstallUiStateMapper.map(snapshot)
-    var maintenanceAction by remember { mutableStateOf<MaintenanceActionId?>(null) }
-    val renderTarget = InstallRenderTarget(uiState = uiState, maintenanceAction = maintenanceAction)
+    // The session snapshot is the sole owner of the secondary maintenance
+    // route. No remembered action may survive a flow transition or process
+    // recreation and redirect an initial-install result into maintenance.
+    val routedMaintenanceAction = when {
+        uiState is InstallUiState.Maintenance -> uiState.routeAction
+        uiState.ownsMaintenanceInstallation() -> snapshot.maintenance.routeAction
+            ?: snapshot.maintenance.installationSelection?.actionId
+                ?.takeIf { it.isApplicationInstallation }
+            ?: snapshot.maintenance.lastAction?.actionId
+                ?.takeIf { it.isApplicationInstallation }
+        else -> null
+    }
+    // The system back gesture is part of the same flow-level contract as the
+    // page button. Use the latest mapped state here rather than a remembered
+    // page-local flag, so a recreated or animated page cannot route a
+    // maintenance result through the initial-install selection.
+    val currentFlowBack: (() -> Unit)? = when (val state = uiState) {
+        is InstallUiState.Result -> {
+            {
+                onIntent(
+                    if (state.installationFlow == InstallationFlow.MAINTENANCE_INSTALL) {
+                        maintenanceResultBackIntent(routedMaintenanceAction, state)
+                    } else {
+                        InstallUiIntent.ReturnToSelection
+                    },
+                )
+            }
+        }
+
+        else -> null
+    }
+    BackHandler(enabled = currentFlowBack != null) {
+        currentFlowBack?.invoke()
+    }
+    val renderTarget = InstallRenderTarget(uiState = uiState, maintenanceAction = routedMaintenanceAction)
     val density = LocalDensity.current
     val iconManifests = remember(
         snapshot.artifactManifests,
@@ -143,21 +179,18 @@ fun InstallApp(
                             MaintenanceHome(
                                 state = target.uiState,
                                 onIntent = onIntent,
-                                selectedAction = target.maintenanceAction,
-                                onSelectedActionChange = { maintenanceAction = it },
                             )
                         }
 
-                        target.maintenanceAction != null &&
-                            (
-                                target.uiState is InstallUiState.Installing ||
-                                    target.uiState is InstallUiState.Result
-                                ) -> {
+                        target.maintenanceAction != null && target.uiState.ownsMaintenanceInstallation() -> {
                             MaintenanceActionFlowPage(
                                 action = target.maintenanceAction,
                                 state = target.uiState,
                                 onIntent = onIntent,
-                                onBack = { maintenanceAction = null },
+                                onBack = {
+                                    currentFlowBack?.invoke()
+                                        ?: onIntent(InstallUiIntent.ReturnToMaintenanceInstallationSelection)
+                                },
                             )
                         }
 
@@ -166,6 +199,43 @@ fun InstallApp(
                 }
             }
         }
+    }
+}
+
+private fun InstallUiState.ownsMaintenanceInstallation(): Boolean = when (this) {
+    is InstallUiState.Installing -> installationFlow == InstallationFlow.MAINTENANCE_INSTALL
+    is InstallUiState.Result -> installationFlow == InstallationFlow.MAINTENANCE_INSTALL
+    else -> false
+}
+
+/** Maps every maintenance result gesture to its owning recovery boundary. */
+internal fun maintenanceResultBackIntent(
+    action: MaintenanceActionId?,
+    state: InstallUiState.Result,
+): InstallUiIntent {
+    // A result carrying the initial-install identity can never be routed by a
+    // maintenance action argument. This guard prevents a stale page callback
+    // from sending an initial failure into the maintenance recovery command.
+    if (state.installationFlow != InstallationFlow.MAINTENANCE_INSTALL) {
+        return if (state.kind == com.ninepointnine.helper.domain.session.ResultKind.SUCCESS &&
+            state.canEnterMaintenance
+        ) {
+            InstallUiIntent.EnterMaintenance
+        } else {
+            InstallUiIntent.ReturnToSelection
+        }
+    }
+    return when {
+        state.kind == com.ninepointnine.helper.domain.session.ResultKind.SUCCESS ->
+            InstallUiIntent.EnterMaintenance
+
+        action?.isApplicationInstallation == true ->
+            InstallUiIntent.ReturnToMaintenanceInstallationSelection
+
+        state.kind == com.ninepointnine.helper.domain.session.ResultKind.PARTIAL_FAILURE &&
+            state.canEnterMaintenance -> InstallUiIntent.EnterMaintenance
+
+        else -> InstallUiIntent.ReturnToMaintenanceInstallationSelection
     }
 }
 

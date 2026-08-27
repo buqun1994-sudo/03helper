@@ -8,6 +8,7 @@ import com.ninepointnine.helper.domain.artifact.toComponentDescriptor
 import com.ninepointnine.helper.domain.session.ComponentCompatibility
 import com.ninepointnine.helper.domain.session.ComponentDescriptor
 import com.ninepointnine.helper.domain.session.ComponentStatus
+import com.ninepointnine.helper.domain.session.InstallationBatchPlan
 import com.ninepointnine.helper.domain.session.InstallationSessionEvent
 
 fun interface InstallerCatalogLoader {
@@ -20,6 +21,7 @@ class ArtifactCatalogSessionAdapter(
     private val selectionLoader: (suspend () -> CatalogLoadResult)? = null,
     private val selectedCatalogLoader: (suspend (Set<String>, (CatalogPreparationProgress) -> Unit) -> CatalogLoadResult)? = null,
     private val selectedCatalogLoaderWithSkipped: (suspend (Set<String>, Set<String>, (CatalogPreparationProgress) -> Unit) -> CatalogLoadResult)? = null,
+    private val selectedCatalogLoaderWithBatch: (suspend (InstallationBatchPlan, (CatalogPreparationProgress) -> Unit) -> CatalogLoadResult)? = null,
 ) {
     suspend fun load(): CatalogLoadResult {
         val result = catalogLoader.load()
@@ -32,12 +34,13 @@ class ArtifactCatalogSessionAdapter(
                     manifests = result.catalog.manifests,
                     apps = result.catalog.toComponentDescriptors(),
                     appFailures = result.catalog.appFailures.associate { it.componentId to it.reasonCode },
+                    appFailureRetryable = result.catalog.appFailures.associate { it.componentId to it.retryable },
                     catalogRevision = result.catalog.catalogRevision,
                 ),
             )
 
             is CatalogLoadResult.Failure -> eventPort.emit(
-                InstallationSessionEvent.CatalogFailed(result.reasonCode),
+                InstallationSessionEvent.CatalogFailed(result.reasonCode, retryable = result.retryable),
             )
         }
         return result
@@ -53,11 +56,14 @@ class ArtifactCatalogSessionAdapter(
                     signatureAlgorithm = result.catalog.signatureAlgorithm,
                     components = result.catalog.toComponentDescriptors(),
                     appFailures = result.catalog.appFailures.associate { it.componentId to it.reasonCode },
+                    appFailureRetryable = result.catalog.appFailures.associate { it.componentId to it.retryable },
                     catalogRevision = result.catalog.catalogRevision,
                 ),
             )
 
-            is CatalogLoadResult.Failure -> eventPort.emit(InstallationSessionEvent.CatalogFailed(result.reasonCode))
+            is CatalogLoadResult.Failure -> eventPort.emit(
+                InstallationSessionEvent.CatalogFailed(result.reasonCode, retryable = result.retryable),
+            )
         }
         return result
     }
@@ -65,6 +71,33 @@ class ArtifactCatalogSessionAdapter(
     suspend fun prepareSelected(
         selectedIds: Set<String>,
         skippedIds: Set<String> = emptySet(),
+    ): CatalogLoadResult = prepareSelectedResult(batch = null) { progress ->
+        when {
+            selectedCatalogLoaderWithSkipped != null ->
+                selectedCatalogLoaderWithSkipped.invoke(selectedIds, skippedIds, progress)
+
+            selectedCatalogLoader != null && skippedIds.isEmpty() ->
+                selectedCatalogLoader.invoke(selectedIds, progress)
+
+            else -> CatalogLoadResult.Failure(
+                "selected_catalog_preparer_unavailable",
+                retryable = false,
+            )
+        }
+    }
+
+    suspend fun prepareSelected(batch: InstallationBatchPlan): CatalogLoadResult =
+        prepareSelectedResult(batch) { progress ->
+            selectedCatalogLoaderWithBatch?.invoke(batch, progress)
+                ?: CatalogLoadResult.Failure(
+                    "selected_catalog_preparer_unavailable",
+                    retryable = false,
+                )
+        }
+
+    private suspend fun prepareSelectedResult(
+        batch: InstallationBatchPlan?,
+        load: suspend ((CatalogPreparationProgress) -> Unit) -> CatalogLoadResult,
     ): CatalogLoadResult {
         val progress: (CatalogPreparationProgress) -> Unit = { update ->
             eventPort.emit(
@@ -78,18 +111,7 @@ class ArtifactCatalogSessionAdapter(
                 ),
             )
         }
-        val result = when {
-            selectedCatalogLoaderWithSkipped != null ->
-                selectedCatalogLoaderWithSkipped.invoke(selectedIds, skippedIds, progress)
-
-            selectedCatalogLoader != null && skippedIds.isEmpty() ->
-                selectedCatalogLoader.invoke(selectedIds, progress)
-
-            else -> return CatalogLoadResult.Failure(
-                "selected_catalog_preparer_unavailable",
-                retryable = false,
-            )
-        }
+        val result = load(progress)
         when (result) {
             is CatalogLoadResult.Success -> eventPort.emit(
                 InstallationSessionEvent.SelectedCatalogResolved(
@@ -99,11 +121,15 @@ class ArtifactCatalogSessionAdapter(
                     manifests = result.catalog.manifests,
                     apps = result.catalog.toComponentDescriptors(),
                     appFailures = result.catalog.appFailures.associate { it.componentId to it.reasonCode },
+                    appFailureRetryable = result.catalog.appFailures.associate { it.componentId to it.retryable },
                     catalogRevision = result.catalog.catalogRevision,
+                    batch = batch,
                 ),
             )
 
-            is CatalogLoadResult.Failure -> eventPort.emit(InstallationSessionEvent.CatalogFailed(result.reasonCode))
+            is CatalogLoadResult.Failure -> eventPort.emit(
+                InstallationSessionEvent.CatalogFailed(result.reasonCode, retryable = result.retryable),
+            )
         }
         return result
     }

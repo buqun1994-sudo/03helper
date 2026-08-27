@@ -6,8 +6,11 @@ import com.ninepointnine.helper.application.session.InstallationSessionEventDisp
 import com.ninepointnine.helper.application.session.InstallationSessionEventPort
 import com.ninepointnine.helper.data.catalog.CatalogLoadResult
 import com.ninepointnine.helper.application.maintenance.MaintenanceController
+import com.ninepointnine.helper.application.maintenance.MaintenanceBaselineProjector
 import com.ninepointnine.helper.data.artifact.ApkIconRepository
 import com.ninepointnine.helper.domain.artifact.ArtifactManifest
+import com.ninepointnine.helper.domain.artifact.ArtifactFailure
+import com.ninepointnine.helper.domain.artifact.ArtifactFailurePhase
 import com.ninepointnine.helper.application.artifact.ArtifactPreparationResult
 import com.ninepointnine.helper.application.artifact.PreparedArtifact
 import com.ninepointnine.helper.domain.device.ConnectedDevice
@@ -20,6 +23,8 @@ import com.ninepointnine.helper.domain.session.InstallationSessionEvent
 import com.ninepointnine.helper.domain.session.InstallationSessionSnapshot
 import com.ninepointnine.helper.domain.session.InstallationSessionState
 import com.ninepointnine.helper.domain.session.InstallationStrategy
+import com.ninepointnine.helper.domain.session.InstallationFlow
+import com.ninepointnine.helper.domain.session.InstallationBatchPlan
 import com.ninepointnine.helper.domain.session.ArtifactCatalogStage
 import com.ninepointnine.helper.domain.session.MaintenanceActionStatus
 import kotlin.coroutines.CoroutineContext
@@ -49,10 +54,16 @@ class InstallerRuntime(
     private val prepareSelectedCatalog: (suspend (Set<String>, InstallationSessionEventPort) -> CatalogLoadResult)? = null,
     /** Strategy-aware selected-catalog hook; skipped ids never enter remote preparation. */
     private val prepareSelectedCatalogWithSkipped: (suspend (Set<String>, Set<String>, InstallationSessionEventPort) -> CatalogLoadResult)? = null,
+    /** Production selected-catalog hook; the immutable domain batch is the complete request. */
+    private val prepareSelectedCatalogWithBatch: (suspend (InstallationBatchPlan, InstallationSessionEventPort) -> CatalogLoadResult)? = null,
     /** Optional UI adapter; production injects the APK-backed icon reader. */
     val apkIconRepository: ApkIconRepository? = null,
     /** Strategy-aware production hook; the legacy hook above remains for older fakes. */
     private val executeDeviceInstallationWithStrategy: (suspend (DeviceConnectionLease, List<PreparedArtifact>, InstallationStrategy, InstallationSessionEventPort) -> Unit)? = null,
+    /** Full production hook; carries the business flow without changing legacy test adapters. */
+    private val executeDeviceInstallationWithFlow: (suspend (DeviceConnectionLease, List<PreparedArtifact>, InstallationStrategy, InstallationFlow, InstallationSessionEventPort) -> Unit)? = null,
+    /** Production hook carrying the immutable batch contract from the domain session. */
+    private val executeDeviceInstallationWithBatch: (suspend (DeviceConnectionLease, List<PreparedArtifact>, InstallationBatchPlan, InstallationSessionEventPort) -> Unit)? = null,
 ) : AutoCloseable {
     private val runtimeJob = SupervisorJob(coroutineContext[Job])
     private val scope = CoroutineScope(coroutineContext + runtimeJob)
@@ -74,6 +85,8 @@ class InstallerRuntime(
     private var foregroundGeneration = 0L
     private var maintenanceReconnectGeneration: Long? = null
     private var manualMaintenanceDisconnect = false
+    private var lastAttemptedMaintenanceBaseline: InstallationSessionSnapshot? = null
+    private var maintenancePersistenceAttemptId = 0L
     private var closed = false
 
     init {
@@ -85,16 +98,30 @@ class InstallerRuntime(
         persistMaintenanceSnapshot?.let { persist ->
             scope.launch {
                 session.snapshots.collect { snapshot ->
-                    if (
-                        snapshot.state == InstallationSessionState.MAINTENANCE ||
-                        snapshot.state == InstallationSessionState.SUCCEEDED
-                    ) {
-                        try {
-                            persist(snapshot)
-                        } catch (cancelled: CancellationException) {
-                            throw cancelled
-                        } catch (_: Exception) {
-                            // Persistence is best effort; the in-memory session remains authoritative.
+                    val baseline = MaintenanceBaselineProjector.project(snapshot) ?: return@collect
+                    if (baseline == lastAttemptedMaintenanceBaseline) return@collect
+                    // Record the business baseline before publishing feedback. The
+                    // feedback projects to the same baseline and must not start a
+                    // recursive write.
+                    lastAttemptedMaintenanceBaseline = baseline
+                    val attemptId = ++maintenancePersistenceAttemptId
+                    eventPortFor(session.currentSnapshot()).emit(
+                        InstallationSessionEvent.MaintenanceBaselinePersistenceStarted(attemptId),
+                    )
+                    try {
+                        persist(baseline)
+                        if (MaintenanceBaselineProjector.project(session.currentSnapshot()) == baseline) {
+                            eventPortFor(session.currentSnapshot()).emit(
+                                InstallationSessionEvent.MaintenanceBaselinePersistenceCompleted(attemptId),
+                            )
+                        }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (_: Exception) {
+                        if (MaintenanceBaselineProjector.project(session.currentSnapshot()) == baseline) {
+                            eventPortFor(session.currentSnapshot()).emit(
+                                InstallationSessionEvent.MaintenanceBaselinePersistenceFailed(attemptId),
+                            )
                         }
                     }
                 }
@@ -256,6 +283,7 @@ class InstallerRuntime(
             is InstallationSessionCommand.MaintenanceAction -> when {
                 before.state == InstallationSessionState.MAINTENANCE &&
                     after.state == InstallationSessionState.SELECTION_CONFIRMED -> {
+                    if (after.sessionId != before.sessionId) cancelTransferWork()
                     if (needsSelectedCatalogPreparation(after) && hasSelectedCatalogPreparer()) {
                         beginSelectedCatalogPreparation(after)
                     } else {
@@ -284,6 +312,7 @@ class InstallerRuntime(
                     before.state == InstallationSessionState.MAINTENANCE &&
                     after.state == InstallationSessionState.SELECTION_CONFIRMED
                 ) {
+                    if (after.sessionId != before.sessionId) cancelTransferWork()
                     if (needsSelectedCatalogPreparation(after) && hasSelectedCatalogPreparer()) {
                         beginSelectedCatalogPreparation(after)
                     } else {
@@ -427,16 +456,40 @@ class InstallerRuntime(
         artifactJob?.cancel()
         val port = eventPortFor(snapshot)
         val loader = prepareSelectedCatalog
-        if (loader == null && prepareSelectedCatalogWithSkipped == null) {
+        val batchLoader = prepareSelectedCatalogWithBatch
+        if (loader == null && prepareSelectedCatalogWithSkipped == null && batchLoader == null) {
             return beginArtifactPreparation(snapshot)
         }
-        val selectedIds = snapshot.components
-            .filter {
-                it.id == com.ninepointnine.helper.domain.device.AuthorizationPlanFactory.DESKTOP_COMPONENT_ID ||
-                    it.id in snapshot.selectedOptionalComponentIds
-            }
-            .map { it.id }
-            .toSet()
+        val batch = snapshot.installationBatch
+        // The batch identifies the user's installation attempt; sessionId
+        // identifies the current adapter-event generation. Reconnect and
+        // checkpoint recovery advance only the latter.
+        if (batchLoader != null && batch == null) {
+            port.emit(
+                InstallationSessionEvent.FatalError(
+                    category = FailureCategory.VERIFICATION,
+                    reasonCode = "selected_catalog_batch_mismatch",
+                ),
+            )
+            return
+        }
+        if (batchLoader != null && batch?.catalogIdentity == null) {
+            port.emit(
+                InstallationSessionEvent.FatalError(
+                    category = FailureCategory.VERIFICATION,
+                    reasonCode = "selected_catalog_identity_mismatch",
+                ),
+            )
+            return
+        }
+        val selectedIds = snapshot.installationBatch?.selectedComponentIds
+            ?: snapshot.components
+                .filter {
+                    it.id == com.ninepointnine.helper.domain.device.AuthorizationPlanFactory.DESKTOP_COMPONENT_ID ||
+                        it.id in snapshot.selectedOptionalComponentIds
+                }
+                .map { it.id }
+                .toSet()
         if (selectedIds.isEmpty()) {
             port.emit(
                 InstallationSessionEvent.FatalError(
@@ -449,10 +502,13 @@ class InstallerRuntime(
         // Only selected components participate in this preparation request.
         // Older or unlisted installed components remain maintenance state, but
         // must not make a selected-catalog adapter reject the request.
-        val skippedIds = session.reusableInstalledComponentIds(snapshot) intersect selectedIds
+        val skippedIds = (snapshot.installationBatch?.reusableComponentIds
+            ?: session.reusableInstalledComponentIds(snapshot)) intersect selectedIds
         artifactJob = scope.launch {
             try {
                 val result = when {
+                    batchLoader != null -> batchLoader.invoke(checkNotNull(batch), port)
+
                     prepareSelectedCatalogWithSkipped != null ->
                         prepareSelectedCatalogWithSkipped.invoke(selectedIds, skippedIds, port)
 
@@ -468,20 +524,24 @@ class InstallerRuntime(
                         return@launch
                     }
                 }
-                if (result is CatalogLoadResult.Success) {
-                    val current = session.currentSnapshot()
-                    if (current.state == InstallationSessionState.SELECTION_CONFIRMED) {
-                        beginArtifactPreparation(current)
+                when (result) {
+                    is CatalogLoadResult.Success -> {
+                        val current = session.currentSnapshot()
+                        if (current.state == InstallationSessionState.SELECTION_CONFIRMED) {
+                            beginArtifactPreparation(current)
+                        }
                     }
+
+                    is CatalogLoadResult.Failure -> emitCatalogFailureIfWaiting(port, result)
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
-                port.emit(
-                    InstallationSessionEvent.FatalError(
-                        category = FailureCategory.DOWNLOAD,
-                        reasonCode = "selected_catalog_preparation_failed",
-                    ),
+                emitPreparationFailure(
+                    port = port,
+                    snapshot = session.currentSnapshot(),
+                    fallbackCategory = FailureCategory.DOWNLOAD,
+                    fallbackReason = "selected_catalog_preparation_failed",
                 )
             }
         }
@@ -645,19 +705,40 @@ class InstallerRuntime(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
-                port.emit(InstallationSessionEvent.CatalogFailed("catalog_load_failed"))
+                port.emit(InstallationSessionEvent.CatalogFailed("catalog_load_failed", retryable = true))
             }
+        }
+    }
+
+    /**
+     * Some test or future catalog adapters return a typed failure without
+     * emitting the session event themselves. Close that boundary exactly once
+     * while the selected-catalog state is still waiting.
+     */
+    private fun emitCatalogFailureIfWaiting(
+        port: InstallationSessionEventPort,
+        result: CatalogLoadResult.Failure,
+    ) {
+        if (session.currentSnapshot().state == InstallationSessionState.SELECTION_CONFIRMED) {
+            port.emit(
+                InstallationSessionEvent.CatalogFailed(
+                    reasonCode = result.reasonCode,
+                    retryable = result.retryable,
+                ),
+            )
         }
     }
 
     private fun launchArtifactPreparation(snapshot: InstallationSessionSnapshot) {
         artifactJob?.cancel()
         val port = eventPortFor(snapshot)
-        val selectedIds = snapshot.components
-            .filter { it.id == com.ninepointnine.helper.domain.device.AuthorizationPlanFactory.DESKTOP_COMPONENT_ID ||
-                it.id in snapshot.selectedOptionalComponentIds }
-            .map { it.id }
-            .toSet()
+        val batchPlan = snapshot.installationBatch
+        val selectedIds = snapshot.installationBatch?.selectedComponentIds
+            ?: snapshot.components
+                .filter { it.id == com.ninepointnine.helper.domain.device.AuthorizationPlanFactory.DESKTOP_COMPONENT_ID ||
+                    it.id in snapshot.selectedOptionalComponentIds }
+                .map { it.id }
+                .toSet()
         if (snapshot.artifactCatalogStage != ArtifactCatalogStage.PREPARED) {
             port.emit(
                 InstallationSessionEvent.FatalError(
@@ -667,12 +748,14 @@ class InstallerRuntime(
             )
             return
         }
-        val reusableIds = session.reusableInstalledComponentIds(snapshot) intersect selectedIds
+        val reusableIds = (snapshot.installationBatch?.reusableComponentIds
+            ?: session.reusableInstalledComponentIds(snapshot)) intersect selectedIds
         val reusableManifests = reusableIds.mapNotNull { componentId ->
             session.installedIdentityManifest(snapshot, componentId)
         }
         val missingReusableIds =
-            (session.reusableInstalledComponentIds(snapshot) intersect selectedIds) -
+            ((snapshot.installationBatch?.reusableComponentIds
+                ?: session.reusableInstalledComponentIds(snapshot)) intersect selectedIds) -
                 reusableManifests.map { it.componentId }.toSet()
         if (missingReusableIds.isNotEmpty()) {
             port.emit(
@@ -700,69 +783,259 @@ class InstallerRuntime(
                 val result = prepareArtifactsWithResult?.invoke(manifests, port)
                 if (result == null) {
                     prepareArtifacts(manifests, port)
-                } else if (result is ArtifactPreparationResult.Prepared) {
-                    val reusableArtifacts = reusableManifests.map { manifest ->
-                        PreparedArtifact(
-                            manifest = manifest,
-                            sourceKind = null,
-                            finalApk = null,
-                        )
-                    }
-                    val preparedArtifacts = result.artifacts + reusableArtifacts
-                    val connection = activeConnection
-                    if (session.currentSnapshot().state != InstallationSessionState.VERIFYING_ARTIFACTS) {
+                } else {
+                    // A cancelled adapter may still complete a non-cooperative
+                    // I/O call. Never let its result start device work for a
+                    // newer batch or overwrite a terminal state.
+                    val currentGeneration = session.currentSnapshot()
+                    if (currentGeneration.sessionId != snapshot.sessionId) {
                         return@launch
                     }
-                    if (connection == null) {
-                        port.emit(
-                            InstallationSessionEvent.FatalError(
-                                category = FailureCategory.INSTALLATION,
-                                reasonCode = "device_action_gateway_unavailable",
-                            ),
-                        )
-                        return@launch
-                    }
-                    val execute = executeDeviceInstallation
-                    val executeWithStrategy = executeDeviceInstallationWithStrategy
-                    if (execute == null && executeWithStrategy == null) {
-                        port.emit(
-                            InstallationSessionEvent.FatalError(
-                                category = FailureCategory.INSTALLATION,
-                                reasonCode = "device_action_gateway_unavailable",
-                            ),
-                        )
-                    } else if (executeWithStrategy != null) {
-                        executeWithStrategy(connection, preparedArtifacts, snapshot.installationStrategy, port)
-                    } else if (preparedArtifacts.any { it.finalApk == null }) {
-                        // The legacy callback has no installation-strategy
-                        // contract and cannot safely represent a reused APK.
-                        // Failing closed is preferable to handing it a null
-                        // file and accidentally restoring overwrite semantics.
-                        port.emit(
-                            InstallationSessionEvent.FatalError(
-                                category = FailureCategory.INSTALLATION,
-                                reasonCode = "strategy_aware_device_action_unavailable",
-                            ),
-                        )
-                    } else {
-                        execute!!(connection, preparedArtifacts, port)
+                    when (result) {
+                        is ArtifactPreparationResult.Failed -> {
+                            val failure = result.failure
+                            failure.componentId?.let { componentId ->
+                                port.emit(
+                                    InstallationSessionEvent.ArtifactUnavailable(
+                                        componentId = componentId,
+                                        reasonCode = failure.reasonCode,
+                                        sourceKind = failure.sourceKind,
+                                        retryable = failure.retryable,
+                                    ),
+                                )
+                            }
+                            emitPreparationFailure(
+                                port = port,
+                                snapshot = session.currentSnapshot(),
+                                fallbackCategory = failureCategory(failure),
+                                fallbackReason = failure.reasonCode,
+                                fallbackComponentName = failure.componentId,
+                            )
+                        }
+
+                        is ArtifactPreparationResult.Prepared -> {
+                            val invalidFailure = result.failures.firstOrNull { failure ->
+                                failure.componentId !in preparationIds
+                            }
+                            val preparedIdsInOrder = result.artifacts.map { it.manifest.componentId }
+                            val duplicatePreparedId = preparedIdsInOrder
+                                .groupingBy { it }
+                                .eachCount()
+                                .entries
+                                .firstOrNull { it.value > 1 }
+                                ?.key
+                            val unexpectedPreparedId = preparedIdsInOrder.firstOrNull { it !in preparationIds }
+                            if (invalidFailure != null || duplicatePreparedId != null || unexpectedPreparedId != null) {
+                                port.emit(
+                                    InstallationSessionEvent.FatalError(
+                                        category = FailureCategory.VERIFICATION,
+                                        componentName = invalidFailure?.componentId
+                                            ?: duplicatePreparedId
+                                            ?: unexpectedPreparedId,
+                                        reasonCode = "artifact_preparation_result_invalid",
+                                    ),
+                                )
+                                return@launch
+                            }
+
+                            // A typed result may carry component failures without
+                            // emitting the corresponding session events. Normalize
+                            // those failures at this boundary before deciding if
+                            // the device batch is complete.
+                            result.failures.forEach { failure ->
+                                val componentId = failure.componentId ?: return@forEach
+                                if (componentId !in session.currentSnapshot().failedComponentIds) {
+                                    port.emit(
+                                        InstallationSessionEvent.ArtifactUnavailable(
+                                            componentId = componentId,
+                                            reasonCode = failure.reasonCode,
+                                            sourceKind = failure.sourceKind,
+                                            retryable = failure.retryable,
+                                        ),
+                                    )
+                                }
+                            }
+                            val afterFailures = session.currentSnapshot()
+                            val preparedIds = preparedIdsInOrder.toSet()
+                            val missingFreshIds =
+                                (preparationIds - afterFailures.failedComponentIds) - preparedIds
+                            val failedPreparedId = preparedIds.firstOrNull {
+                                it in afterFailures.failedComponentIds
+                            }
+                            if (failedPreparedId != null) {
+                                port.emit(
+                                    InstallationSessionEvent.FatalError(
+                                        category = FailureCategory.VERIFICATION,
+                                        componentName = failedPreparedId,
+                                        reasonCode = "artifact_preparation_result_invalid",
+                                    ),
+                                )
+                                return@launch
+                            }
+                            if (missingFreshIds.isNotEmpty()) {
+                                missingFreshIds.forEach { componentId ->
+                                    port.emit(
+                                        InstallationSessionEvent.ArtifactUnavailable(
+                                            componentId = componentId,
+                                            reasonCode = "artifact_preparation_incomplete",
+                                            retryable = false,
+                                        ),
+                                    )
+                                }
+                                emitPreparationFailure(
+                                    port = port,
+                                    snapshot = session.currentSnapshot(),
+                                    fallbackCategory = FailureCategory.VERIFICATION,
+                                    fallbackReason = "artifact_preparation_incomplete",
+                                )
+                                return@launch
+                            }
+
+                            val reusableArtifacts = reusableManifests.map { manifest ->
+                                PreparedArtifact(
+                                    manifest = manifest,
+                                    sourceKind = null,
+                                    finalApk = null,
+                                )
+                            }
+                            val preparedArtifacts = result.artifacts + reusableArtifacts
+                            val connection = activeConnection
+                            val latest = session.currentSnapshot()
+                            if (
+                                latest.sessionId != snapshot.sessionId ||
+                                latest.state != InstallationSessionState.VERIFYING_ARTIFACTS
+                            ) {
+                                return@launch
+                            }
+                            if (connection == null) {
+                                port.emit(
+                                    InstallationSessionEvent.FatalError(
+                                        category = FailureCategory.INSTALLATION,
+                                        reasonCode = "device_action_gateway_unavailable",
+                                    ),
+                                )
+                                return@launch
+                            }
+                            val execute = executeDeviceInstallation
+                            val executeWithStrategy = executeDeviceInstallationWithStrategy
+                            val executeWithFlow = executeDeviceInstallationWithFlow
+                            val executeWithBatch = executeDeviceInstallationWithBatch
+                            if (
+                                execute == null &&
+                                executeWithStrategy == null &&
+                                executeWithFlow == null &&
+                                (executeWithBatch == null || batchPlan == null)
+                            ) {
+                                port.emit(
+                                    InstallationSessionEvent.FatalError(
+                                        category = FailureCategory.INSTALLATION,
+                                        reasonCode = "device_action_gateway_unavailable",
+                                    ),
+                                )
+                            } else if (executeWithBatch != null && batchPlan != null) {
+                                executeWithBatch(
+                                    connection,
+                                    preparedArtifacts,
+                                    batchPlan,
+                                    port,
+                                )
+                            } else if (executeWithFlow != null) {
+                                executeWithFlow(
+                                    connection,
+                                    preparedArtifacts,
+                                    snapshot.installationStrategy,
+                                    snapshot.installationFlow,
+                                    port,
+                                )
+                            } else if (executeWithStrategy != null) {
+                                executeWithStrategy(connection, preparedArtifacts, snapshot.installationStrategy, port)
+                            } else if (preparedArtifacts.any { it.finalApk == null }) {
+                                // The legacy callback has no installation-strategy
+                                // contract and cannot safely represent a reused APK.
+                                // Failing closed is preferable to handing it a null
+                                // file and accidentally restoring overwrite semantics.
+                                port.emit(
+                                    InstallationSessionEvent.FatalError(
+                                        category = FailureCategory.INSTALLATION,
+                                        reasonCode = "strategy_aware_device_action_unavailable",
+                                    ),
+                                )
+                            } else {
+                                execute!!(connection, preparedArtifacts, port)
+                            }
+                        }
                     }
                 }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
-                port.emit(
-                    InstallationSessionEvent.FatalError(
-                        category = FailureCategory.VERIFICATION,
-                        reasonCode = "artifact_preparation_failed",
-                    ),
+                emitPreparationFailure(
+                    port = port,
+                    snapshot = session.currentSnapshot(),
+                    fallbackCategory = FailureCategory.VERIFICATION,
+                    fallbackReason = "artifact_preparation_failed",
                 )
             }
         }
     }
 
+    private fun emitPreparationFailure(
+        port: InstallationSessionEventPort,
+        snapshot: InstallationSessionSnapshot,
+        fallbackCategory: FailureCategory,
+        fallbackReason: String,
+        fallbackComponentName: String? = null,
+    ) {
+        if (snapshot.state == InstallationSessionState.FAILED ||
+            snapshot.state == InstallationSessionState.COMPLETED_WITH_ERRORS
+        ) {
+            return
+        }
+        val concrete = concreteFailure(snapshot)
+        port.emit(
+            InstallationSessionEvent.FatalError(
+                category = concrete?.second?.let(::failureCategoryForReason) ?: fallbackCategory,
+                componentName = concrete?.first ?: fallbackComponentName,
+                reasonCode = concrete?.second ?: fallbackReason,
+            ),
+        )
+    }
+
+    private fun concreteFailure(snapshot: InstallationSessionSnapshot): Pair<String, String>? =
+        snapshot.installationBatch?.resultComponentIds
+            ?.asSequence()
+            ?.mapNotNull { componentId ->
+                val reason = snapshot.componentResults.firstOrNull { it.componentId == componentId }?.failureReason
+                    ?: snapshot.components.firstOrNull { it.id == componentId }?.errorReason
+                reason?.let { componentId to it }
+            }
+            ?.firstOrNull()
+
+    private fun failureCategoryForReason(reasonCode: String): FailureCategory = when {
+        reasonCode.contains("archive") || reasonCode.contains("zip") -> FailureCategory.ARCHIVE
+        reasonCode.contains("download") || reasonCode.contains("source") -> FailureCategory.DOWNLOAD
+        else -> FailureCategory.VERIFICATION
+    }
+
+    private fun failureCategory(failure: ArtifactFailure): FailureCategory = when (failure.phase) {
+        ArtifactFailurePhase.ARCHIVE_VERIFICATION,
+        ArtifactFailurePhase.EXTRACTION,
+        -> FailureCategory.ARCHIVE
+
+        ArtifactFailurePhase.DOWNLOAD,
+        ArtifactFailurePhase.SOURCE_RESOLUTION,
+        ArtifactFailurePhase.CACHE,
+        -> FailureCategory.DOWNLOAD
+
+        ArtifactFailurePhase.CATALOG,
+        ArtifactFailurePhase.APK_VERIFICATION,
+        -> FailureCategory.VERIFICATION
+    }
+
     private fun hasSelectedCatalogPreparer(): Boolean =
-        prepareSelectedCatalog != null || prepareSelectedCatalogWithSkipped != null
+        prepareSelectedCatalogWithBatch != null ||
+            prepareSelectedCatalog != null ||
+            prepareSelectedCatalogWithSkipped != null
 
     /**
      * A selected-catalog pass is required whenever the control plane is ready
@@ -771,14 +1044,16 @@ class InstallerRuntime(
      */
     private fun needsSelectedCatalogPreparation(snapshot: InstallationSessionSnapshot): Boolean {
         if (snapshot.artifactCatalogStage != ArtifactCatalogStage.PREPARED) return true
-        val selectedIds = snapshot.components
-            .filter {
-                it.id == com.ninepointnine.helper.domain.device.AuthorizationPlanFactory.DESKTOP_COMPONENT_ID ||
-                    it.id in snapshot.selectedOptionalComponentIds
-            }
-            .map { it.id }
-            .toSet()
-        val reusableIds = session.reusableInstalledComponentIds(snapshot) intersect selectedIds
+        val selectedIds = snapshot.installationBatch?.selectedComponentIds
+            ?: snapshot.components
+                .filter {
+                    it.id == com.ninepointnine.helper.domain.device.AuthorizationPlanFactory.DESKTOP_COMPONENT_ID ||
+                        it.id in snapshot.selectedOptionalComponentIds
+                }
+                .map { it.id }
+                .toSet()
+        val reusableIds = (snapshot.installationBatch?.reusableComponentIds
+            ?: session.reusableInstalledComponentIds(snapshot)) intersect selectedIds
         val preparedIds = snapshot.artifactManifests.map { it.componentId }.toSet()
         return (selectedIds - reusableIds - preparedIds - snapshot.failedComponentIds).isNotEmpty()
     }

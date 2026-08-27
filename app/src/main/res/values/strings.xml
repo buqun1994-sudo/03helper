@@ -44,6 +44,8 @@
     <string name="result_failure_title">安装失败</string>
     <string name="result_partial_failure_title">部分应用未完成</string>
     <string name="result_partial_failure_description">失败的应用已记录原因，其余应用已继续处理。请查看下方结果。</string>
+    <string name="result_post_install_failure_title">应用已安装，但后续处理未完成</string>
+    <string name="result_post_install_failure_description">安装包已经写入车机，授权或可用性检查未完成。请重新尝试。</string>
     <string name="result_paused_title">等待连接恢复</string>
     <string name="result_paused_description">连接恢复后，将从已完成步骤继续。</string>
     <string name="result_download_failed_title">安装包暂时无法获取</string>
@@ -58,10 +60,16 @@
     <string name="result_reconfigure">重新授权</string>
     <string name="result_status_installed">已安装</string>
     <string name="result_status_not_installed">未安装</string>
+    <string name="result_status_write_confirmed">已写入，身份待核验</string>
     <string name="result_status_configured">已完成授权</string>
     <string name="result_status_not_configured">未完成授权</string>
     <string name="result_status_available">可用</string>
     <string name="result_status_not_available">不可用</string>
+    <string name="result_stage_not_installed">安装未完成</string>
+    <string name="result_stage_write_confirmed_identity_unverified">已写入，身份待核验</string>
+    <string name="result_stage_authorization_incomplete">已安装，但授权未完成</string>
+    <string name="result_stage_availability_incomplete">已安装并授权，但可用性检查未完成</string>
+    <string name="result_stage_ready">安装和后续处理已完成</string>
     <string name="maintenance_disconnected">车机未连接</string>
     <string name="maintenance_reconnect">连接</string>
     <string name="maintenance_reconnecting">正在连接</string>

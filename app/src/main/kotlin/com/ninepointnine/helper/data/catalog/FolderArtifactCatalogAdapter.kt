@@ -29,6 +29,7 @@ import com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
 import com.ninepointnine.helper.domain.device.ManagedComponent
 import com.ninepointnine.helper.domain.session.ComponentProgressStatus
 import com.ninepointnine.helper.domain.session.InstallPhase
+import com.ninepointnine.helper.domain.session.InstallationBatchPlan
 import java.io.File
 import java.io.FileInputStream
 import java.io.FileOutputStream
@@ -150,6 +151,41 @@ class FolderArtifactCatalogAdapter(
 
     /** Builds manifests only for the applications the user confirmed. */
     suspend fun prepareSelected(
+        batch: InstallationBatchPlan,
+        onProgress: (CatalogPreparationProgress) -> Unit = {},
+    ): CatalogLoadResult {
+        val context = selectionContext ?: run {
+            val config = loadConfig() ?: return lastConfigFailure
+            SelectionContext(config = config, localCandidates = emptyList()).also { selectionContext = it }
+        }
+        val identity = batch.catalogIdentity
+        if (identity == null || !identity.matches(
+                version = context.config.effectiveCatalogVersion(),
+                revision = context.config.catalogRevision,
+                keyId = context.config.keyId,
+                signatureAlgorithm = context.config.signatureAlgorithm,
+            )
+        ) {
+            return CatalogLoadResult.Failure("selected_catalog_identity_mismatch", retryable = false)
+        }
+        val declaredIds = context.config.declaredApps()
+            .asSequence()
+            .filter { it.enabled }
+            .map { it.componentId }
+            .filterNot(InstallerSelfIdentity::isSelfComponentId)
+            .toSet()
+        if (!declaredIds.containsAll(batch.selectedComponentIds)) {
+            return CatalogLoadResult.Failure("selected_catalog_component_set_mismatch", retryable = false)
+        }
+        return prepareSelected(
+            selectedIds = batch.selectedComponentIds,
+            onProgress = onProgress,
+            skippedIds = batch.reusableComponentIds,
+        )
+    }
+
+    /** Legacy entry retained for isolated adapter tests. Production uses the immutable batch overload. */
+    suspend fun prepareSelected(
         selectedIds: Set<String>,
         onProgress: (CatalogPreparationProgress) -> Unit = {},
         skippedIds: Set<String> = emptySet(),
@@ -159,15 +195,15 @@ class FolderArtifactCatalogAdapter(
             is CatalogLoadResult.Failure -> return result
         }
         ?: return CatalogLoadResult.Failure("distribution_selection_context_missing", retryable = true)
+        if (!baseContext.config.expiresAt.isAfter(now())) {
+            selectionContext = null
+            return CatalogLoadResult.Failure("distribution_config_expired", retryable = true)
+        }
         // A new preparation attempt is a new inventory decision. Refresh once
         // here so APKs added since the previous partial attempt are visible,
         // then share this exact list across every selected component.
         val context = baseContext.copy(localCandidates = artifactCache.refreshPublicApkCandidates())
         selectionContext = context
-        if (!context.config.expiresAt.isAfter(now())) {
-            selectionContext = null
-            return CatalogLoadResult.Failure("distribution_config_expired", retryable = true)
-        }
         if (!skippedIds.all { it in selectedIds }) {
             return CatalogLoadResult.Failure("distribution_selected_skip_mismatch", retryable = false)
         }
@@ -210,19 +246,20 @@ class FolderArtifactCatalogAdapter(
             val unresolved = selectedComponents.filter {
                 localResults[it.componentId] !is ManifestBuildResult.Success
             }
-            var folder = context.folder
+            var folder: LanzouFolderResolutionResult.Success? = null
             var folderFailure: LanzouFolderResolutionResult.Failure? = null
-            if (unresolved.isNotEmpty() && folder == null) {
-                when (val resolved = folderSourceAdapter.resolve(context.config)) {
-                    is LanzouFolderResolutionResult.Success -> {
-                        folder = resolved
-                        selectionContext = context.copy(folder = resolved)
-                    }
+            if (unresolved.isNotEmpty()) {
+                when (val resolved = folderSourceAdapter.resolve(
+                    context.config,
+                    unresolved.mapTo(mutableSetOf()) { it.componentId },
+                )) {
+                    is LanzouFolderResolutionResult.Success -> folder = resolved
 
                     is LanzouFolderResolutionResult.Failure -> folderFailure = resolved
                 }
             }
             val appFailures = folder?.appFailures
+                ?.filter { it.componentId in effectiveSelectedIds }
                 ?.map { CatalogAppFailure(it.componentId, it.reasonCode, it.retryable) }
                 ?.toMutableList()
                 ?: mutableListOf()
@@ -234,7 +271,7 @@ class FolderArtifactCatalogAdapter(
                     val failure = folderFailure?.failure
                     appFailures += CatalogAppFailure(
                         componentId = component.componentId,
-                        reasonCode = failure?.reasonCode ?: "distribution_app_missing_${component.componentId}",
+                        reasonCode = failure?.reasonCode ?: "lanzou_folder_missing_${component.componentId}",
                         retryable = failure?.retryable ?: false,
                     )
                 }
@@ -251,7 +288,7 @@ class FolderArtifactCatalogAdapter(
                                 } ?: ManifestBuildResult.Failure(
                                     reasonCode = appFailures.firstOrNull { failure ->
                                         failure.componentId == component.componentId
-                                    }?.reasonCode ?: "distribution_app_missing_${component.componentId}",
+                                    }?.reasonCode ?: "lanzou_folder_missing_${component.componentId}",
                                     retryable = false,
                                 )
                             } catch (cancelled: CancellationException) {
@@ -350,7 +387,6 @@ class FolderArtifactCatalogAdapter(
             }
             selectionContext = SelectionContext(
                 config = config,
-                folder = folder,
                 localCandidates = artifactCache.refreshPublicApkCandidates(),
             )
             val appFailures = folder.appFailures
@@ -596,7 +632,6 @@ class FolderArtifactCatalogAdapter(
         candidates: List<File>,
         onProgress: (CatalogPreparationProgress) -> Unit,
     ): ManifestBuildResult? {
-        if (!artifactCache.publicDirectoryAvailable) return null
         onProgress(CatalogPreparationProgress(component.componentId, InstallPhase.FETCH, ComponentProgressStatus.RUNNING))
         val candidate = candidates
             .asSequence()
@@ -698,10 +733,10 @@ class FolderArtifactCatalogAdapter(
             packageName = metadata.packageName,
             certificateDigests = metadata.certificateSha256s,
         ) ?: return null
-        // Cloud's signed version code is the release selection key. A local
-        // APK from an older release is a miss and must continue to the remote
-        // source instead of silently reinstalling stale bytes.
-        if (component.versionCode > 0L && metadata.version.code != component.versionCode) return null
+        // Cloud version fields describe the published release, but they are
+        // not the local APK identity gate. The package and trusted publisher
+        // checks above establish identity; the local-only manifest below then
+        // records the version actually present in this APK.
         return Candidate(file = file, metadata = metadata, identity = identity)
     }
 
@@ -781,7 +816,6 @@ class FolderArtifactCatalogAdapter(
 
     private data class SelectionContext(
         val config: InstallerDistributionConfig,
-        val folder: LanzouFolderResolutionResult.Success? = null,
         val localCandidates: List<File> = emptyList(),
     )
 

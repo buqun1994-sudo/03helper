@@ -46,6 +46,8 @@ import com.ninepointnine.helper.domain.session.DeviceConnectionStatus
 import com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
 import com.ninepointnine.helper.domain.session.InstallPhase
 import com.ninepointnine.helper.domain.session.ResultKind
+import com.ninepointnine.helper.domain.session.ComponentResultStatus
+import com.ninepointnine.helper.ui.state.ResultFailureStage
 import com.ninepointnine.helper.ui.components.AnimatedEntry
 import com.ninepointnine.helper.ui.components.ComponentLogo
 import com.ninepointnine.helper.ui.components.InstallStepIndicator
@@ -687,18 +689,28 @@ private fun ResultScreen(
 ) {
     val copy = when (state.kind) {
         ResultKind.SUCCESS -> ResultCopy(R.string.result_success_title, R.string.result_success_description, "circle_check", InstallerColors.Success, R.string.result_enter_maintenance) { onIntent(InstallUiIntent.EnterMaintenance) }
-        ResultKind.PARTIAL_FAILURE -> if (state.canEnterMaintenance) {
+        ResultKind.PARTIAL_FAILURE -> if (state.failureStage == ResultFailureStage.POST_INSTALL) {
             ResultCopy(
-                R.string.result_failure_title,
-                null,
+                R.string.result_post_install_failure_title,
+                R.string.result_post_install_failure_description,
+                "triangle_alert",
+                InstallerColors.Warning,
+                if (state.canEnterMaintenance) R.string.result_enter_maintenance else R.string.result_retry,
+            ) {
+                onIntent(if (state.canEnterMaintenance) InstallUiIntent.EnterMaintenance else InstallUiIntent.ReturnToSelection)
+            }
+        } else if (state.canEnterMaintenance) {
+            ResultCopy(
+                R.string.result_partial_failure_title,
+                R.string.result_partial_failure_description,
                 "triangle_alert",
                 InstallerColors.Warning,
                 R.string.result_enter_maintenance,
             ) { onIntent(InstallUiIntent.EnterMaintenance) }
         } else {
             ResultCopy(
-                R.string.result_failure_title,
-                null,
+                R.string.result_partial_failure_title,
+                R.string.result_partial_failure_description,
                 "triangle_alert",
                 InstallerColors.Warning,
                 R.string.result_retry,
@@ -742,6 +754,26 @@ private fun ResultScreen(
                     modifier = Modifier.fillMaxWidth(),
                 )
             }
+            state.failureReason?.let { reason ->
+                Text(
+                    text = reason,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = InstallerColors.Warning,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
+            state.persistenceWarning?.let { warning ->
+                Text(
+                    text = warning,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = InstallerColors.Warning,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("result_persistence_warning"),
+                )
+            }
         }
         // Keep the result heading visually separate from the first app card;
         // the card list owns its own scrolling area and must not touch the
@@ -757,7 +789,14 @@ private fun ResultScreen(
             if (state.componentResults.isNotEmpty()) {
                 state.componentResults.forEachIndexed { index, result ->
                     AnimatedEntry(visible = true, index = index) {
-                        ResultRow(result.componentName, result.installed, result.configured, result.available, result.errorReason)
+                        ResultRow(
+                            componentName = result.componentName,
+                            installed = result.installed,
+                            configured = result.configured,
+                            available = result.available,
+                            errorReason = result.errorReason,
+                            status = result.status,
+                        )
                     }
                 }
             }
@@ -783,25 +822,40 @@ private fun ResultRow(
     configured: Boolean,
     available: Boolean,
     errorReason: String?,
+    status: ComponentResultStatus,
 ) {
     PressableSurface(onClick = {}, enabled = false, containerColor = InstallerColors.WhiteSurface) {
         Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                Text(text = componentName, style = MaterialTheme.typography.bodyLarge, color = InstallerColors.White)
-                if (errorReason != null) {
-                    Text(text = errorReason, style = MaterialTheme.typography.bodySmall, color = InstallerColors.Warning)
-                } else {
+                Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text(text = componentName, style = MaterialTheme.typography.bodyLarge, color = InstallerColors.White)
                     Text(
                         text = listOf(
-                            stringResource(if (installed) R.string.result_status_installed else R.string.result_status_not_installed),
+                            stringResource(
+                                when (status) {
+                                    ComponentResultStatus.WRITE_CONFIRMED_IDENTITY_UNVERIFIED ->
+                                        R.string.result_status_write_confirmed
+                                    else -> if (installed) R.string.result_status_installed else R.string.result_status_not_installed
+                                },
+                            ),
                             stringResource(if (configured) R.string.result_status_configured else R.string.result_status_not_configured),
                             stringResource(if (available) R.string.result_status_available else R.string.result_status_not_available),
                         ).joinToString(" · "),
                         style = MaterialTheme.typography.bodySmall,
                         color = InstallerColors.AuxiliaryWhite,
                     )
+                    Text(
+                        text = stringResource(resultStageLabel(status)),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (status == ComponentResultStatus.READY) {
+                            InstallerColors.Success
+                        } else {
+                            InstallerColors.Warning
+                        },
+                    )
+                    errorReason?.let { reason ->
+                        Text(text = reason, style = MaterialTheme.typography.bodySmall, color = InstallerColors.Warning)
+                    }
                 }
-            }
             StatusIcon(
                 name = if (installed && configured && available) "circle_check" else "circle_alert",
                 contentDescription = componentName,
@@ -810,6 +864,15 @@ private fun ResultRow(
             )
         }
     }
+}
+
+private fun resultStageLabel(status: ComponentResultStatus): Int = when (status) {
+    ComponentResultStatus.NOT_INSTALLED -> R.string.result_stage_not_installed
+    ComponentResultStatus.WRITE_CONFIRMED_IDENTITY_UNVERIFIED ->
+        R.string.result_stage_write_confirmed_identity_unverified
+    ComponentResultStatus.AUTHORIZATION_INCOMPLETE -> R.string.result_stage_authorization_incomplete
+    ComponentResultStatus.AVAILABILITY_INCOMPLETE -> R.string.result_stage_availability_incomplete
+    ComponentResultStatus.READY -> R.string.result_stage_ready
 }
 
 private enum class PhaseVisual {

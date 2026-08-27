@@ -44,6 +44,7 @@ class AndroidLanzouWebViewHost(
     private var folderFailureCallback: ((ArtifactFailure) -> Unit)? = null
     private var operation: Operation = Operation.NONE
     private var folderPassword: String? = null
+    private var folderSnapshotStabilizer: FolderEntrySnapshotStabilizer? = null
     private var triggerAttempts = 0
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -72,6 +73,7 @@ class AndroidLanzouWebViewHost(
     override fun startFolder(
         folderUrl: String,
         password: String,
+        expectedArchiveFileNames: Set<String>,
         onEntries: (List<LanzouFolderEntry>) -> Unit,
         onFailure: (ArtifactFailure) -> Unit,
     ) {
@@ -83,6 +85,7 @@ class AndroidLanzouWebViewHost(
             folderEntriesCallback = onEntries
             folderFailureCallback = onFailure
             folderPassword = password
+            folderSnapshotStabilizer = FolderEntrySnapshotStabilizer(expectedArchiveFileNames)
             operation = Operation.FOLDER
             currentPageUrl = folderUrl
             triggerAttempts = 0
@@ -256,7 +259,16 @@ class AndroidLanzouWebViewHost(
     private fun triggerFolderPageAction(view: WebView) {
         if (destroyed) return
         if (triggerAttempts++ >= MAX_TRIGGER_ATTEMPTS) {
-            reportFolderFailure("lanzou_folder_parse_timeout", retryable = true)
+            when (val decision = folderSnapshotStabilizer?.completeAtDeadline()) {
+                is FolderSnapshotDecision.Complete -> {
+                    folderEntriesCallback?.invoke(decision.entries)
+                    destroyNow()
+                }
+
+                FolderSnapshotDecision.Wait,
+                null,
+                -> reportFolderFailure("lanzou_folder_parse_timeout", retryable = true)
+            }
             return
         }
         val passwordLiteral = JSONObject.quote(folderPassword.orEmpty())
@@ -299,11 +311,18 @@ class AndroidLanzouWebViewHost(
             if (destroyed) return@evaluateJavascript
             when (val parsed = parseFolderResult(rawResult)) {
                 is FolderPageResult.Entries -> {
-                    if (parsed.entries.isEmpty()) {
-                        mainHandler.postDelayed({ triggerFolderPageAction(view) }, TRIGGER_RETRY_DELAY_MILLIS)
-                    } else {
-                        folderEntriesCallback?.invoke(parsed.entries)
-                        destroyNow()
+                    when (val decision = folderSnapshotStabilizer?.observe(parsed.entries)) {
+                        is FolderSnapshotDecision.Complete -> {
+                            folderEntriesCallback?.invoke(decision.entries)
+                            destroyNow()
+                        }
+
+                        FolderSnapshotDecision.Wait,
+                        null,
+                        -> mainHandler.postDelayed(
+                            { triggerFolderPageAction(view) },
+                            TRIGGER_RETRY_DELAY_MILLIS,
+                        )
                     }
                 }
 
@@ -432,6 +451,7 @@ class AndroidLanzouWebViewHost(
         folderEntriesCallback = null
         folderFailureCallback = null
         folderPassword = null
+        folderSnapshotStabilizer = null
         operation = Operation.NONE
         webView?.let { view ->
             view.stopLoading()

@@ -496,3 +496,30 @@ F2 Debug APK 已按用户授权安装到指定手机。该段记录的是 F2 交
 1. 使用 JDK17 强制重跑 `:app:testDebugUnitTest --rerun-tasks`，全量 `181` 项 JVM 单测通过（0 failures / 0 errors / 0 skipped）；`:app:lintDebug`、`:app:assembleDebug`、`:app:assembleDebugAndroidTest`、项目文档、Skills、本机环境和 `git diff --check` 均通过。
 2. 显式测试手机上的 `InstallAppActivitySmokeTest` 2/2 通过；随后再次保留数据覆盖安装最新 Debug 主包并启动核对。最终包为 `com.ninepointnine.helper`、`0.1.0 (1)`、入口 `.MainActivity`，主包 SHA-256 为 `3be3b00cf833f7ecafbed5458723d825b75c178648cb039083782ab7b0007659`。
 3. 本轮未清数据、未卸载、未降级、未重启设备，未对目标车机写入；不提交、不推送、不发布。
+
+## 2026-08-26 施工方案审查与边界收口
+
+1. 复核当前实现后保留既有主架构：`InstallationSession` 仍是唯一状态 owner，`InstallationBatchPlan` 冻结一次批次，`InstallerRuntime` 只编排适配器，设备协调器只消费已验证产物；没有引入第二套状态机或推倒重写。
+2. 修正准备结果边界：`InstallerRuntime` 现在会把 typed component failure 归一为会话事件，并要求新鲜组件集合与已成功准备集合一致；缺失且未标记失败的组件以 `artifact_preparation_incomplete` fail closed，设备执行回调不会被调用。新增回归覆盖该契约。
+3. 修正维护快照边界：`MaintenanceSessionStore` 继续严格解析旧路由字段，但不在冷启动恢复没有完整页面 wire model 的二级路由，始终回到维护首页；新增存档回归覆盖安装应用路由。
+4. 指定 JDK17 顺序化执行 `:app:clean :app:testDebugUnitTest`，全量 `202` 项 JVM 单测通过（0 failures / 0 errors / 0 skipped）；随后 `:app:compileDebugKotlin`、`:app:compileDebugAndroidTestKotlin`、`:app:lintDebug`、`:app:assembleDebug` 和 `:app:assembleDebugAndroidTest` 全部通过。项目文档、Skills、本机环境和 `git diff --check` 通过。
+5. 最新 Debug 主包已核对为 `com.ninepointnine.helper`、`versionName=0.1.0`、`versionCode=1`、入口 `.MainActivity`，v2 签名验证通过；主包 SHA-256 为 `d4406f624f03118f46a25afe46c9f23f4b919c66fe4353395a6e44958d69e770`，AndroidTest 包 SHA-256 为 `e7d46eff4e1930d9e7a297398e50b63c5615eec303af2916deaae2ae34fc0f5d`。显式测试手机保留数据覆盖安装两次均返回 `Success`，instrumentation smoke `2/2` 通过，最终主包启动返回 `Status: ok`。
+6. `check-03app-repository.mjs --strict` 仅因当前未提交工作树 HEAD 与登记快照不一致而 fail closed；未修改登记库。目标车机仍不可用，真实车机安装、授权、库存和维护写入继续保留为人工主测阻断；本轮未清数据、未卸载、未降级、未重启设备，不提交、不推送、不发布。
+
+## 2026-08-27 Android 9 真实车机授权根因修复与闭环
+
+1. 真实故障不是 ADB 连接失败，而是四个边界叠加：Android 9 `mksh` 会把原动态授权解析中的 `${spec%%|*}` 误按模式分支处理，导致动作类型为空并返回 `authorization_action_invalid`；安装身份回读成功后没有在同一领域事件内固化受信 manifest，临时批次清单清空后旧会话无法重建授权计划；授权阶段失败错误覆盖了已经成功的实时库存状态，页面因此误报“暂时无法读取车机应用”；03投屏的合法零动作授权计划又被额外的非空 evidence 门禁误判为失败。
+2. 修复保持 `InstallationSession` 为唯一状态 owner：动态授权动作改为 Android 9 兼容的固定 `IFS='|'` 字段解析并严格校验字段数、非空值和动作白名单；安装身份验证通过时原子合并 `installedManifests`；维护库存与授权流分别持有状态，授权失败不再污染已为 `READY` 的库存；授权成功统一投影领域完成态；成功门禁只委托版本化授权计划校验证据，因此零动作计划允许空 evidence。旧会话仅在实时回读证明全部已授权时走无写入的幂等完成路径；若仍有未授权项且缺少受信 manifest，继续 fail closed，不猜包名或签名身份。
+3. 自动验证已通过：安装身份固化与冷启动、库存和授权状态分离、初始库存失败、授权完成、零动作授权、Android 9 shell 兼容及旧会话幂等恢复等四个聚焦测试类共 `94` 项通过；随后 `testDebugUnitTest`、Debug Kotlin / AndroidTest 编译、Debug Lint、主包与 AndroidTest 构建全部通过，项目文档、Skills 和 `git diff --check` 护栏通过。
+4. 在 `S56_HQX`、Android 9 真实车机上进入“修复授权”后，首轮实时库存同时显示 03投屏 `0.1.0`、03桌面 `0.1.0`、03歌词 `1.14-icar03`，三项均为“授权正常”，页面显示“检查完成，所有应用授权正常”，没有再出现“暂时无法读取车机应用”。点击“重新授权”后页面显示“授权完成，所有应用授权正常”，库存保持完整。
+5. 真实授权回读前后，`accessibility_enabled=1`，无障碍列表完整保留原第三方 `com.mengbo.monitor/.service.KeyEventService`、03桌面和03歌词服务，通知监听仍为03歌词；桌面与歌词相关 AppOps 模式保持 `allow`，03投屏保持合法的零动作状态。AppOps 输出中仅“距上次使用时间”的相对文本自然变化，没有授权值变化；该旧会话因此完成幂等恢复，未覆盖第三方条目。
+6. 最终 Debug APK 为 `com.ninepointnine.helper`、`versionName=0.1.0`、`versionCode=1`、入口 `.MainActivity`，SHA-256 为 `00c04ecc29d9f9fbbec1e2c5dc3b7fbc6cc1d0cacc20cbd1c6768f8d9d0de72a`；单一 Debug signer，证书 SHA-256 为 `2990047fddf6d6ec1eb7f83731fcc1398616e5fb83aec97542a4f132c35a1a27`，APK Signature Scheme v2 验证通过。真实 smoke 结束后已对显式测试手机执行最后一次保留数据覆盖安装，系统返回 `Success`；冷启动返回 `Status: ok`，正式入口处于 resumed，旧维护会话仍恢复为已连接 `S56_HQX` 的维护首页。
+7. `check-03app-repository.mjs` 唯一阻断仍是共享登记中的仓库 HEAD 快照 `53898143ab42a08ded0c68431e523312a4ec61fd` 落后于当前 HEAD `d6ee6a0b05c616e5384977fb986c58b42893b21f`；这不是包名、版本、签名或产物身份冲突，未擅自改写 Cloud 登记。本轮未清数据、卸载、降级、重启、安装 Release、提交、推送或发布。
+
+## 2026-08-27 单一会话架构文档固化与人工主测交接
+
+1. 将本轮根因收口为长期边界：`InstallationBatchPlan.batchId` 只表示业务安装尝试，`InstallationSessionSnapshot.sessionId` 只表示适配器事件代次；`FolderEntrySnapshotStabilizer` 只在目标条目齐全或既有有界截止点固化目录快照；结果页只读取当前批次 `resultComponentIds`；维护基线保存独立使用 `NOT_ATTEMPTED / SAVING / SAVED / FAILED`；Android 9 Service 回读统一由 `BoundServiceEvidenceParser` 兼容完整名和 `package/.ShortClassName` 缩写。
+2. 上一轮已完成的代码、全量工程验证、手机 instrumentation smoke 和目标车机只读实证作为本次交接基线复用，本次没有重复运行这些项目。最终 Debug APK 为 `com.ninepointnine.helper`、`0.1.0 (1)`、入口 `.MainActivity`，SHA-256 为 `fcd7af50ed2dc5be44941198fef965b69912711f6713b75611bdee14bb734e93`；Debug 证书摘要为 `2990047fddf6d6ec1eb7f83731fcc1398616e5fb83aec97542a4f132c35a1a27`，APK Signature Scheme v2 已通过。
+3. 最终手机交付使用显式 serial `adb-RFCX412AN1X-gWfMRD._adb-tls-connect._tcp` 保留数据覆盖安装，安装返回 `Success`，包身份、版本和启动入口核对一致；`.codex/local-context.properties` 已同步为该 serial。历史进度中的旧 serial 文本保留作审计，不再作为当前设备配置。
+4. 当前样本车机 `S56_HQX`（Android 9，`192.168.0.203:5555`）只读回读已确认 03桌面、03歌词和 03投屏库存，授权状态为正常；Android 9 缩写 Service 证据为 `requested=true`、`received=true`、`hasBound=true`。本轮没有对车机执行安装、授权写入、清数据、卸载、降级或重启。
+5. 文档长期总纲、验证矩阵和代码规则已同步上述边界；`check-project-docs.mjs`、`check-skills.mjs` 和 `git diff --check` 通过。当前交给用户的最小手测是完整“安装应用”主链及连续批次结果、授权结果和维护基线保存警告，不能把车机只读证据扩写为车机写入已通过。本轮不提交、不推送、不发布。

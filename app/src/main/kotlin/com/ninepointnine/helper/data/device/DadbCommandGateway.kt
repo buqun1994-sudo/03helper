@@ -19,6 +19,7 @@ import com.ninepointnine.helper.domain.device.DeviceShortcutFailureStage
 import com.ninepointnine.helper.domain.device.DeviceShortcutResult
 import com.ninepointnine.helper.domain.device.DeviceAvailabilityEvidence
 import com.ninepointnine.helper.domain.device.DeviceInstallResult
+import com.ninepointnine.helper.domain.device.DeviceInstallWarning
 import com.ninepointnine.helper.domain.device.InstallableArtifact
 import com.ninepointnine.helper.domain.device.InstalledArtifactEvidence
 import com.ninepointnine.helper.domain.device.ManagedApplicationProbe
@@ -103,30 +104,6 @@ internal class DadbCommandGateway(
             emptyMap()
         }
 
-        // Validate every artifact that may be written. An already-installed
-        // package does not need a local APK at all: its live APK is pulled and
-        // verified below, so a stale or absent local cache cannot block a
-        // missing-only batch.
-        artifacts.forEach { artifact ->
-            val packagePresent = artifact.manifest.packageName in installedInventory
-            // The domain session only marks an application reusable when the
-            // live inventory contains the exact catalog version. Keep that
-            // invariant at the device boundary too: an older (or unknown)
-            // version must receive the verified APK instead of being silently
-            // treated as a no-op.
-            val alreadyInstalled = packagePresent &&
-                installedInventory[artifact.manifest.packageName] == artifact.manifest.apkVersion.code
-            if (!alreadyInstalled || strategy == InstallationStrategy.REINSTALL_SELECTED) {
-                validateInstallableArtifact(artifact)?.let { failure ->
-                    return@withLease DeviceInstallResult.Failed(failure)
-                }
-            } else if (ArtifactManifestValidator.validate(artifact.manifest) !is ManifestValidation.Valid) {
-                return@withLease DeviceInstallResult.Failed(
-                    DeviceActionFailure("install_manifest_invalid", artifact.manifest.componentId, retryable = false),
-                )
-            }
-        }
-
         // A recognized staging/production alias without the exact manifest
         // package is an identity conflict, not a missing package. Refuse to
         // write anything rather than install beside or over an unknown app.
@@ -147,11 +124,66 @@ internal class DadbCommandGateway(
             }
         }
 
+        val reusableMissingOnlyIds = mutableSetOf<String>()
+        val writeConfirmedComponentIds = mutableSetOf<String>()
+        val installationWarnings = mutableListOf<DeviceInstallWarning>()
+        // Validate every artifact that may be written. An already-installed
+        // package does not need a local APK at all: its live APK is pulled and
+        // verified below, so a stale or absent local cache cannot block a
+        // missing-only batch.
+        artifacts.forEach { artifact ->
+            val packagePresent = artifact.manifest.packageName in installedInventory
+            // The domain session passes a null APK only for a reusable
+            // missing-only prerequisite. Presence is still required here;
+            // when the legacy inventory cannot expose a versionCode, the live
+            // APK identity readback below remains the final proof.
+            if (strategy == InstallationStrategy.INSTALL_MISSING_ONLY && artifact.apkFile == null) {
+                if (!packagePresent) {
+                    return@withLease DeviceInstallResult.Failed(
+                        DeviceActionFailure(
+                            "installation_reused_package_missing",
+                            artifact.manifest.componentId,
+                            retryable = true,
+                        ),
+                    )
+                }
+                val installedVersion = installedInventory[artifact.manifest.packageName]
+                if (installedVersion != null && installedVersion != artifact.manifest.apkVersion.code) {
+                    return@withLease DeviceInstallResult.Failed(
+                        DeviceActionFailure(
+                            "installation_reused_version_mismatch",
+                            artifact.manifest.componentId,
+                            retryable = false,
+                        ),
+                    )
+                }
+                if (ArtifactManifestValidator.validate(artifact.manifest) !is ManifestValidation.Valid) {
+                    return@withLease DeviceInstallResult.Failed(
+                        DeviceActionFailure("install_manifest_invalid", artifact.manifest.componentId, retryable = false),
+                    )
+                }
+                reusableMissingOnlyIds += artifact.manifest.componentId
+                return@forEach
+            }
+            val alreadyInstalled = packagePresent &&
+                installedInventory[artifact.manifest.packageName] == artifact.manifest.apkVersion.code
+            if (!alreadyInstalled || strategy == InstallationStrategy.REINSTALL_SELECTED) {
+                validateInstallableArtifact(artifact)?.let { failure ->
+                    return@withLease DeviceInstallResult.Failed(failure)
+                }
+            } else if (ArtifactManifestValidator.validate(artifact.manifest) !is ManifestValidation.Valid) {
+                return@withLease DeviceInstallResult.Failed(
+                    DeviceActionFailure("install_manifest_invalid", artifact.manifest.componentId, retryable = false),
+                )
+            }
+        }
+
         // Installation never launches an application. The only launch occurs
         // during the versioned authorization plan after every package has been installed.
         artifacts.forEach { artifact ->
-            if (strategy == InstallationStrategy.INSTALL_MISSING_ONLY &&
-                installedInventory[artifact.manifest.packageName] == artifact.manifest.apkVersion.code
+            if (artifact.manifest.componentId in reusableMissingOnlyIds ||
+                (strategy == InstallationStrategy.INSTALL_MISSING_ONLY &&
+                    installedInventory[artifact.manifest.packageName] == artifact.manifest.apkVersion.code)
             ) {
                 // The package is already present. The identity readback below
                 // remains mandatory; presence alone is never accepted as proof.
@@ -174,7 +206,7 @@ internal class DadbCommandGateway(
                     apkFile.lastModified().coerceAtLeast(1L),
                 )
                 val installResponse = adb.shell("pm install -r $remotePath")
-                if (!isSuccessful(installResponse) || !installResponse.output.trim().startsWith("Success")) {
+                if (!isPmInstallSuccessful(installResponse)) {
                     failure = DeviceActionFailure("adb_pm_install_failed", artifact.manifest.componentId, retryable = true)
                 }
             } catch (_: IOException) {
@@ -183,14 +215,25 @@ internal class DadbCommandGateway(
                 failure = DeviceActionFailure("adb_install_failed", artifact.manifest.componentId, retryable = true)
             } finally {
                 if (!deleteRemoteStagingFile(remotePath)) {
-                    failure = DeviceActionFailure(
-                        "adb_remote_staging_cleanup_failed",
-                        artifact.manifest.componentId,
-                        retryable = true,
+                    // Staging cleanup is housekeeping. It must never replace a
+                    // successful PackageManager result with a user-visible
+                    // installation failure; the next attempt safely reuses the
+                    // deterministic path and overwrites it.
+                    Log.w(TAG, "remote staging cleanup failed component=${artifact.manifest.componentId}")
+                    installationWarnings += DeviceInstallWarning(
+                        reasonCode = "remote_staging_cleanup_failed",
+                        componentId = artifact.manifest.componentId,
                     )
                 }
             }
-            if (failure != null) return@withLease DeviceInstallResult.Failed(checkNotNull(failure))
+            if (failure != null) {
+                return@withLease DeviceInstallResult.Failed(
+                    failure = checkNotNull(failure),
+                    writeConfirmedComponentIds = writeConfirmedComponentIds.toSet(),
+                    warnings = installationWarnings.toList(),
+                )
+            }
+            writeConfirmedComponentIds += artifact.manifest.componentId
         }
 
         // Read back every installed APK only after the entire install batch is
@@ -199,11 +242,28 @@ internal class DadbCommandGateway(
         artifacts.forEach { artifact ->
             when (val identity = verifyInstalledArtifactIdentity(artifact, metadataReader, verificationDirectory)) {
                 is InstalledArtifactIdentityResult.Verified -> installed += identity.evidence
-                is InstalledArtifactIdentityResult.Failed ->
-                    return@withLease DeviceInstallResult.Failed(identity.failure)
+                is InstalledArtifactIdentityResult.Failed -> {
+                    if (writeConfirmedComponentIds.isNotEmpty()) {
+                        return@withLease DeviceInstallResult.WrittenButUnverified(
+                            writeConfirmedComponentIds = writeConfirmedComponentIds.toSet(),
+                            failure = identity.failure,
+                            verifiedEvidence = installed.toList(),
+                            warnings = installationWarnings.toList(),
+                        )
+                    }
+                    return@withLease DeviceInstallResult.Failed(
+                        failure = identity.failure,
+                        verifiedEvidence = installed.toList(),
+                        warnings = installationWarnings.toList(),
+                    )
+                }
             }
         }
-        DeviceInstallResult.Installed(installed)
+        DeviceInstallResult.Installed(
+            evidence = installed,
+            warnings = installationWarnings,
+            writeConfirmedComponentIds = writeConfirmedComponentIds.toSet(),
+        )
     }
 
     override suspend fun runShortcut(
@@ -212,7 +272,10 @@ internal class DadbCommandGateway(
     ): DeviceShortcutResult {
         val components = AuthorizationPlanFactory.allManagedComponents()
             .filter { it.componentId in selectedComponentIds }
-        val plan = when (val result = AuthorizationPlanFactory.createForComponents(components)) {
+        val plan = when (val result = AuthorizationPlanFactory.createForComponents(
+            components,
+            requireDesktop = shortcut == DeviceShortcut.CONFIGURE_ALL_INSTALLED_APPS_AND_START_DESKTOP,
+        )) {
             is AuthorizationPlanBuildResult.Ready -> result.plan
             is AuthorizationPlanBuildResult.Rejected -> return DeviceShortcutResult.Failed(
                 stage = DeviceShortcutFailureStage.AUTHORIZATION,
@@ -238,7 +301,12 @@ internal class DadbCommandGateway(
             failure = DeviceActionFailure("adb_connection_closed", retryable = true),
         ),
     ) {
-        if (shortcut != DeviceShortcut.CONFIGURE_ALL_INSTALLED_APPS_AND_START_DESKTOP) {
+        val launchDesktop = shortcut == DeviceShortcut.CONFIGURE_ALL_INSTALLED_APPS_AND_START_DESKTOP
+        if (shortcut !in setOf(
+                DeviceShortcut.CONFIGURE_ALL_INSTALLED_APPS_AND_START_DESKTOP,
+                DeviceShortcut.CONFIGURE_SELECTED_APPS,
+            )
+        ) {
             return@withLease DeviceShortcutResult.Failed(
                 stage = DeviceShortcutFailureStage.AUTHORIZATION,
                 failure = DeviceActionFailure("device_shortcut_unavailable", retryable = false),
@@ -260,13 +328,27 @@ internal class DadbCommandGateway(
             )
         }
         val response = try {
-            adb.shell(CombinedAuthorizationCommand.build(authorizationPlan))
+            adb.shell(
+                CombinedAuthorizationCommand.build(
+                    authorizationPlan,
+                    launchDesktop = launchDesktop,
+                ),
+            )
         } catch (_: IOException) {
             null
         } catch (_: Exception) {
             null
         }
-        val result = CombinedAuthorizationResponseParser.parse(response, authorizationPlan)
+        val parsed = CombinedAuthorizationResponseParser.parse(
+            response,
+            authorizationPlan,
+            launchDesktop = launchDesktop,
+        )
+        val result = if (launchDesktop && parsed is DeviceShortcutResult.Completed) {
+            verifyDesktopRuntime(parsed, authorizationPlan)
+        } else {
+            parsed
+        }
         Log.d(
             TAG,
             when (result) {
@@ -277,6 +359,80 @@ internal class DadbCommandGateway(
         )
         result
     }
+
+    private suspend fun verifyDesktopRuntime(
+        completed: DeviceShortcutResult.Completed,
+        plan: com.ninepointnine.helper.domain.device.AuthorizationPlan,
+    ): DeviceShortcutResult {
+        val desktop = plan.components.firstOrNull {
+            it.componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
+        } ?: return completed.toVerificationFailure(
+            reasonCode = "desktop_missing",
+            retryable = false,
+        )
+        val service = AuthorizationPlanFactory.requiredRuntimeService(desktop)
+            ?: return completed.toVerificationFailure(
+                reasonCode = "desktop_service_missing",
+                retryable = false,
+            )
+        val processRunning = waitForProcess(desktop.packageName)
+        if (!processRunning) {
+            return completed.toVerificationFailure(
+                reasonCode = "desktop_process_not_running",
+                retryable = true,
+                availability = desktopAvailability(desktop, processRunning = false, serviceBound = null),
+            )
+        }
+        return when (waitForBoundService(desktop.packageName, service)) {
+            BoundServiceProbe.BOUND -> completed.copy(
+                availabilityEvidence = listOf(
+                    desktopAvailability(desktop, processRunning = true, serviceBound = true),
+                ),
+            )
+
+            BoundServiceProbe.UNBOUND -> completed.toVerificationFailure(
+                reasonCode = "desktop_service_not_bound",
+                retryable = true,
+                availability = desktopAvailability(desktop, processRunning = true, serviceBound = false),
+            )
+
+            BoundServiceProbe.READ_FAILED -> completed.toVerificationFailure(
+                reasonCode = "desktop_service_readback_failed",
+                retryable = true,
+                availability = desktopAvailability(desktop, processRunning = true, serviceBound = null),
+            )
+        }
+    }
+
+    private fun DeviceShortcutResult.Completed.toVerificationFailure(
+        reasonCode: String,
+        retryable: Boolean,
+        availability: com.ninepointnine.helper.domain.device.ManagedApplicationAvailabilityEvidence? = null,
+    ): DeviceShortcutResult.Failed = DeviceShortcutResult.Failed(
+        stage = DeviceShortcutFailureStage.VERIFICATION,
+        failure = DeviceActionFailure(
+            reasonCode = reasonCode,
+            componentId = AuthorizationPlanFactory.DESKTOP_COMPONENT_ID,
+            retryable = retryable,
+        ),
+        configuredComponentIds = configuredComponentIds,
+        skippedComponentIds = skippedComponentIds,
+        authorizationEvidence = authorizationEvidence,
+        availabilityEvidence = listOfNotNull(availability),
+    )
+
+    private fun desktopAvailability(
+        desktop: ManagedComponent,
+        processRunning: Boolean,
+        serviceBound: Boolean?,
+    ) = com.ninepointnine.helper.domain.device.ManagedApplicationAvailabilityEvidence(
+        componentId = desktop.componentId,
+        packageName = desktop.packageName,
+        launchAttempted = true,
+        launcherResolved = true,
+        processRunning = processRunning,
+        requiredServiceBound = serviceBound,
+    )
 
     private suspend fun probeAuthorizationCapacity(
         plan: com.ninepointnine.helper.domain.device.AuthorizationPlan,
@@ -947,10 +1103,41 @@ internal class DadbCommandGateway(
         if (metadata.certificateSha256s.none { it.equals(artifact.manifest.certificateSha256, ignoreCase = true) }) {
             return DeviceActionFailure("install_apk_certificate_mismatch", artifact.manifest.componentId, retryable = false)
         }
+        if (
+            metadata.version.code != artifact.manifest.apkVersion.code ||
+            (artifact.manifest.apkVersion.name.isNotBlank() &&
+                metadata.version.name != artifact.manifest.apkVersion.name)
+        ) {
+            return DeviceActionFailure("install_apk_version_mismatch", artifact.manifest.componentId, retryable = false)
+        }
         return null
     }
 
-    private fun verifyInstalledArtifactIdentity(
+    private suspend fun verifyInstalledArtifactIdentity(
+        artifact: InstallableArtifact,
+        metadataReader: ApkMetadataReader,
+        verificationDirectory: File,
+    ): InstalledArtifactIdentityResult {
+        var lastResult: InstalledArtifactIdentityResult =
+            InstalledArtifactIdentityResult.Failed(
+                DeviceActionFailure(
+                    "installation_package_path_missing",
+                    artifact.manifest.componentId,
+                    retryable = true,
+                ),
+            )
+        READBACK_RETRY_DELAYS_MILLIS.forEachIndexed { index, delayMillis ->
+            val result = verifyInstalledArtifactIdentityOnce(artifact, metadataReader, verificationDirectory)
+            if (result is InstalledArtifactIdentityResult.Verified) return result
+            lastResult = result
+            val failure = (result as InstalledArtifactIdentityResult.Failed).failure
+            if (!failure.retryable || index == READBACK_RETRY_DELAYS_MILLIS.lastIndex) return result
+            delay(delayMillis)
+        }
+        return lastResult
+    }
+
+    private fun verifyInstalledArtifactIdentityOnce(
         artifact: InstallableArtifact,
         metadataReader: ApkMetadataReader,
         verificationDirectory: File,
@@ -978,13 +1165,28 @@ internal class DadbCommandGateway(
             val certificate = metadata.certificateSha256s.firstOrNull { candidate ->
                 candidate.equals(manifest.certificateSha256, ignoreCase = true)
             }
-            if (
-                metadata.packageName != manifest.packageName ||
-                certificate == null
-            ) {
+            val versionMatches = metadata.version.code == manifest.apkVersion.code &&
+                (manifest.apkVersion.name.isBlank() || metadata.version.name == manifest.apkVersion.name)
+            if (metadata.packageName != manifest.packageName) {
                 InstalledArtifactIdentityResult.Failed(
                     DeviceActionFailure(
-                        "installation_installed_identity_mismatch",
+                        "installation_installed_package_mismatch",
+                        manifest.componentId,
+                        retryable = false,
+                    ),
+                )
+            } else if (certificate == null) {
+                InstalledArtifactIdentityResult.Failed(
+                    DeviceActionFailure(
+                        "installation_installed_certificate_mismatch",
+                        manifest.componentId,
+                        retryable = false,
+                    ),
+                )
+            } else if (!versionMatches) {
+                InstalledArtifactIdentityResult.Failed(
+                    DeviceActionFailure(
+                        "installation_installed_version_mismatch",
                         manifest.componentId,
                         retryable = false,
                     ),
@@ -1041,13 +1243,28 @@ internal class DadbCommandGateway(
             val certificateMatches = metadata.certificateSha256s.any { candidate ->
                 candidate.equals(manifest.certificateSha256, ignoreCase = true)
             }
-            if (
-                metadata.packageName != manifest.packageName ||
-                !certificateMatches
-            ) {
+            val versionMatches = metadata.version.code == manifest.apkVersion.code &&
+                (manifest.apkVersion.name.isBlank() || metadata.version.name == manifest.apkVersion.name)
+            if (metadata.packageName != manifest.packageName) {
                 MaintenanceInstalledIdentity.Failed(
                     DeviceActionFailure(
-                        "maintenance_installed_identity_mismatch",
+                        "maintenance_installed_package_mismatch",
+                        manifest.componentId,
+                        retryable = false,
+                    ),
+                )
+            } else if (!certificateMatches) {
+                MaintenanceInstalledIdentity.Failed(
+                    DeviceActionFailure(
+                        "maintenance_installed_certificate_mismatch",
+                        manifest.componentId,
+                        retryable = false,
+                    ),
+                )
+            } else if (!versionMatches) {
+                MaintenanceInstalledIdentity.Failed(
+                    DeviceActionFailure(
+                        "maintenance_installed_version_mismatch",
                         manifest.componentId,
                         retryable = false,
                     ),
@@ -1198,7 +1415,9 @@ internal class DadbCommandGateway(
 
     private fun readInstalledApkPath(packageName: String): String? {
         val response = shell("pm path $packageName") ?: return null
-        if (!isSuccessful(response)) return null
+        // A framework warning on stderr does not invalidate a structured path
+        // response. Exit code and stdout are authoritative for this readback.
+        if (response.exitCode != 0) return null
         val paths = response.output.lineSequence()
             .map(String::trim)
             .filter { it.startsWith("package:") }
@@ -1220,8 +1439,14 @@ internal class DadbCommandGateway(
         null
     }
 
+    /** Shell stderr may contain framework diagnostics even when the typed command succeeded. */
     private fun isSuccessful(response: AdbShellResponse?): Boolean =
-        response != null && response.exitCode == 0 && response.errorOutput.isBlank()
+        response != null && response.exitCode == 0
+
+    private fun isPmInstallSuccessful(response: AdbShellResponse?): Boolean =
+        response != null && response.exitCode == 0 && response.output.lineSequence()
+            .map(String::trim)
+            .any { it.startsWith("Success", ignoreCase = true) }
 
     private fun isLaunchAccepted(response: AdbShellResponse?): Boolean {
         if (!isSuccessful(response)) return false
@@ -1233,12 +1458,27 @@ internal class DadbCommandGateway(
     }
 
     private suspend fun waitForProcess(packageName: String): Boolean {
-        repeat(10) {
+        repeat(PROCESS_READBACK_ATTEMPTS) {
             val process = shell("pidof ${shellArgument(packageName)}")
             if (isSuccessful(process) && !process?.output?.trim().isNullOrBlank()) return true
-            delay(150L)
+            delay(PROCESS_READBACK_DELAY_MILLIS)
         }
         return false
+    }
+
+    private suspend fun waitForBoundService(packageName: String, component: String): BoundServiceProbe {
+        var readSucceeded = false
+        repeat(SERVICE_READBACK_ATTEMPTS) { attempt ->
+            val response = shell("dumpsys activity services ${shellArgument(packageName)}")
+            if (isSuccessful(response)) {
+                readSucceeded = true
+                if (BoundServiceEvidenceParser.isBound(response?.output.orEmpty(), component)) {
+                    return BoundServiceProbe.BOUND
+                }
+            }
+            if (attempt < SERVICE_READBACK_ATTEMPTS - 1) delay(SERVICE_READBACK_DELAY_MILLIS)
+        }
+        return if (readSucceeded) BoundServiceProbe.UNBOUND else BoundServiceProbe.READ_FAILED
     }
 
     private fun shellArgument(value: String): String =
@@ -1305,6 +1545,17 @@ internal class DadbCommandGateway(
         val COMPONENT_NAME_PATTERN = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)*/[A-Za-z0-9_.$]+$")
         val DIGEST_PREFIX_PATTERN = Regex("^[0-9a-f]{16}$")
         val INSTALLED_APK_PATH_PATTERN = Regex("^/data/app/[A-Za-z0-9_./=+\\-]+\\.apk$")
+        val READBACK_RETRY_DELAYS_MILLIS = longArrayOf(150L, 300L, 500L, 750L, 750L, 750L, 750L, 750L)
+        const val PROCESS_READBACK_ATTEMPTS = 13
+        const val PROCESS_READBACK_DELAY_MILLIS = 250L
+        const val SERVICE_READBACK_ATTEMPTS = 10
+        const val SERVICE_READBACK_DELAY_MILLIS = 1_000L
+    }
+
+    private enum class BoundServiceProbe {
+        BOUND,
+        UNBOUND,
+        READ_FAILED,
     }
 }
 
@@ -1312,6 +1563,9 @@ internal object CombinedAuthorizationResponseParser {
     fun parse(
         response: AdbShellResponse?,
         plan: com.ninepointnine.helper.domain.device.AuthorizationPlan,
+        launchDesktop: Boolean = plan.components.any {
+            it.componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
+        },
     ): DeviceShortcutResult {
         if (response == null) {
             return DeviceShortcutResult.Failed(
@@ -1324,6 +1578,15 @@ internal object CombinedAuthorizationResponseParser {
             .filter { it.startsWith(CombinedAuthorizationCommand.MARKER) }
             .toList()
         val failure = lines.firstOrNull { it.startsWith("${CombinedAuthorizationCommand.MARKER}|FAIL|") }
+        val authorizationEvidence = lines.mapNotNull(::parseAuthorizationEvidence)
+        val skippedIds = parseSkippedComponentIds(lines)
+        val partialEvidenceValid = AuthorizationPlanFactory.validateEvidenceSubset(plan, authorizationEvidence)
+        val configuredIds = if (partialEvidenceValid) {
+            AuthorizationPlanFactory.configuredComponentIdsForEvidence(plan, authorizationEvidence)
+        } else {
+            emptySet()
+        }
+        val availabilityEvidence = emptyList<com.ninepointnine.helper.domain.device.ManagedApplicationAvailabilityEvidence>()
         // The Android shell may write harmless framework warnings to stderr while
         // still returning structured markers; exit code and markers are authoritative.
         if (failure != null || response.exitCode != 0) {
@@ -1331,7 +1594,7 @@ internal object CombinedAuthorizationResponseParser {
             val reasonCode = parts.getOrNull(2).takeUnless { it.isNullOrBlank() } ?: "adb_combined_command_failed"
             val componentId = parts.getOrNull(3).takeUnless { it.isNullOrBlank() }
             return DeviceShortcutResult.Failed(
-                stage = if (reasonCode.startsWith("desktop_")) {
+                stage = if (isVerificationFailureReason(reasonCode)) {
                     DeviceShortcutFailureStage.VERIFICATION
                 } else {
                     DeviceShortcutFailureStage.AUTHORIZATION
@@ -1341,28 +1604,61 @@ internal object CombinedAuthorizationResponseParser {
                     componentId = componentId,
                     retryable = reasonCode !in setOf("desktop_missing", "selected_component_missing"),
                 ),
+                configuredComponentIds = configuredIds,
+                skippedComponentIds = skippedIds,
+                authorizationEvidence = if (partialEvidenceValid) authorizationEvidence else emptyList(),
+                availabilityEvidence = availabilityEvidence,
             )
         }
         if (lines.none { it == "${CombinedAuthorizationCommand.MARKER}|DONE|OK" }) {
             return DeviceShortcutResult.Failed(
                 stage = DeviceShortcutFailureStage.AUTHORIZATION,
                 failure = DeviceActionFailure("combined_command_result_missing", retryable = false),
+                configuredComponentIds = configuredIds,
+                skippedComponentIds = skippedIds,
+                authorizationEvidence = if (partialEvidenceValid) authorizationEvidence else emptyList(),
+                availabilityEvidence = availabilityEvidence,
             )
         }
 
-        val authorizationEvidence = lines.mapNotNull(::parseAuthorizationEvidence)
         if (!AuthorizationPlanFactory.validateEvidence(plan, authorizationEvidence)) {
             return DeviceShortcutResult.Failed(
                 stage = DeviceShortcutFailureStage.AUTHORIZATION,
                 failure = DeviceActionFailure("authorization_evidence_invalid", retryable = false),
+                configuredComponentIds = configuredIds,
+                skippedComponentIds = skippedIds,
+                authorizationEvidence = if (partialEvidenceValid) authorizationEvidence else emptyList(),
+                availabilityEvidence = availabilityEvidence,
             )
         }
         val launch = lines.firstOrNull { it.startsWith("${CombinedAuthorizationCommand.MARKER}|LAUNCH|") }
             ?.split('|')
+        if (!launchDesktop) {
+            if (launch != null) {
+                return DeviceShortcutResult.Failed(
+                    stage = DeviceShortcutFailureStage.VERIFICATION,
+                    failure = DeviceActionFailure("unexpected_desktop_launch", retryable = false),
+                    configuredComponentIds = configuredIds,
+                    skippedComponentIds = skippedIds,
+                    authorizationEvidence = if (partialEvidenceValid) authorizationEvidence else emptyList(),
+                    availabilityEvidence = availabilityEvidence,
+                )
+            }
+            return DeviceShortcutResult.Completed(
+                configuredComponentIds = plan.components.map { it.componentId }.toSet() - skippedIds,
+                skippedComponentIds = skippedIds,
+                authorizationEvidence = authorizationEvidence,
+                availabilityEvidence = availabilityEvidence,
+            )
+        }
         val desktop = plan.components.firstOrNull { it.componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID }
             ?: return DeviceShortcutResult.Failed(
                 stage = DeviceShortcutFailureStage.VERIFICATION,
                 failure = DeviceActionFailure("desktop_missing", retryable = false),
+                configuredComponentIds = configuredIds,
+                skippedComponentIds = skippedIds,
+                authorizationEvidence = if (partialEvidenceValid) authorizationEvidence else emptyList(),
+                availabilityEvidence = availabilityEvidence,
             )
         if (launch?.getOrNull(2) != desktop.componentId ||
             launch.getOrNull(3) != "OK"
@@ -1370,28 +1666,32 @@ internal object CombinedAuthorizationResponseParser {
             return DeviceShortcutResult.Failed(
                 stage = DeviceShortcutFailureStage.VERIFICATION,
                 failure = DeviceActionFailure("desktop_launch_evidence_invalid", retryable = false),
+                configuredComponentIds = configuredIds,
+                skippedComponentIds = skippedIds,
+                authorizationEvidence = if (partialEvidenceValid) authorizationEvidence else emptyList(),
+                availabilityEvidence = availabilityEvidence,
             )
         }
         val selectedIds = plan.components.map { it.componentId }.toSet()
-        val skippedIds = lines.mapNotNull { line ->
-            line.split('|').takeIf { it.size >= 3 && it[1] == "SKIP" }?.get(2)
-        }.toSet()
         return DeviceShortcutResult.Completed(
             configuredComponentIds = selectedIds - skippedIds,
             skippedComponentIds = skippedIds,
             authorizationEvidence = authorizationEvidence,
-            availabilityEvidence = listOf(
-                com.ninepointnine.helper.domain.device.ManagedApplicationAvailabilityEvidence(
-                    componentId = AuthorizationPlanFactory.DESKTOP_COMPONENT_ID,
-                    packageName = desktop.packageName,
-                    launchAttempted = true,
-                    launcherResolved = true,
-                    processRunning = launch.getOrNull(4) == "RUNNING",
-                    requiredServiceBound = launch.getOrNull(5) == "BOUND",
-                ),
-            ),
+            availabilityEvidence = availabilityEvidence,
         )
     }
+
+    private fun parseSkippedComponentIds(lines: List<String>): Set<String> = lines.mapNotNull { line ->
+        line.split('|').takeIf { it.size >= 3 && it[1] == "SKIP" }?.get(2)
+    }.toSet()
+
+    private fun isVerificationFailureReason(reasonCode: String): Boolean = reasonCode in setOf(
+        "desktop_launch_failed",
+        "desktop_process_not_running",
+        "desktop_service_not_bound",
+        "desktop_launch_evidence_invalid",
+        "desktop_verification_not_completed",
+    )
 
     fun parseRepair(
         response: AdbShellResponse?,
@@ -1472,9 +1772,13 @@ internal object CombinedAuthorizationCommand {
     fun build(
         plan: com.ninepointnine.helper.domain.device.AuthorizationPlan,
         repairOnly: Boolean = false,
+        launchDesktop: Boolean = true,
     ): String {
         require(AuthorizationPlanFactory.validate(plan)) { "invalid_authorization_plan" }
-        val dynamic = plan.components.any { component ->
+        val desktop = plan.components.firstOrNull {
+            it.componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
+        }
+        val dynamic = desktop == null || plan.components.any { component ->
             component.setup != null || component.componentId !in setOf(
                 AuthorizationPlanFactory.DESKTOP_COMPONENT_ID,
                 AuthorizationPlanFactory.LYRICS_COMPONENT_ID,
@@ -1482,13 +1786,17 @@ internal object CombinedAuthorizationCommand {
             ) || (component.componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID &&
                 component.packageName != AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME)
         }
-        val desktopPackage = plan.components
-            .first { it.componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID }
-            .packageName
+        val desktopPackage = desktop?.packageName
+        val desktopLaunchComponent = desktop?.let(AuthorizationPlanFactory::fixedLaunchComponent)
+        require(
+            !launchDesktop || !dynamic || desktopLaunchComponent != null,
+        ) { "desktop_runtime_contract_missing" }
         val arguments = buildList {
             if (repairOnly) add("--repair")
+            if (!launchDesktop) add("--no-desktop")
             if (dynamic) add("--dynamic")
-            if (dynamic) add("--desktop-package=$desktopPackage")
+            if (dynamic && desktopPackage != null) add("--desktop-package=$desktopPackage")
+            if (dynamic && desktopLaunchComponent != null) add("--desktop-launch=$desktopLaunchComponent")
             addAll(plan.components.map { it.componentId })
             if (dynamic) plan.actions.forEach { action -> add("--action=${action.toWireToken()}") }
         }.joinToString(" ") { shellQuote(it) }
@@ -1532,11 +1840,17 @@ internal object CombinedAuthorizationCommand {
         marker='03HELPER'
         repair_only=0
         if [ "${'$'}{1:-}" = --repair ]; then repair_only=1; shift; fi
+        launch_desktop=1
+        if [ "${'$'}{1:-}" = --no-desktop ]; then launch_desktop=0; shift; fi
         dynamic_mode=0
         if [ "${'$'}{1:-}" = --dynamic ]; then dynamic_mode=1; shift; fi
         desktop_package='${AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME}'
         case "${'$'}{1:-}" in
           --desktop-package=*) desktop_package="${'$'}{1#--desktop-package=}"; shift;;
+        esac
+        desktop_launch_component=''
+        case "${'$'}{1:-}" in
+          --desktop-launch=*) desktop_launch_component="${'$'}{1#--desktop-launch=}"; shift;;
         esac
         selected() { wanted="${'$'}1"; shift; for value in "${'$'}@"; do [ "${'$'}value" = "${'$'}wanted" ] && return 0; done; return 1; }
         emit() { printf '%s|%s\n' "${'$'}marker" "${'$'}*"; }
@@ -1641,50 +1955,6 @@ internal object CombinedAuthorizationCommand {
           list_preserved "${'$'}before_raw" "${'$'}after_raw" || fail authorization_component_list_not_preserved "${'$'}component"
           emit_auth "${'$'}component" "${'$'}action" "${'$'}before_state" "${'$'}changed" COMPONENT_PRESENT "${'$'}(list_count "${'$'}before_normalized")"
         }
-        # APK declarations are validated locally before this command is sent.
-        # The car only needs to report the runtime binding, and Android 9 builds
-        # do not consistently implement the package-service query command.
-        service_bound() {
-          primary="${'$'}1"; alternate="${'$'}{2:-}"
-          # Android 9's vendor text parser can segfault on this bounded state
-          # scan. Keep the parser in POSIX shell so the probe cannot turn a
-          # bound service into a false failure on the target device.
-          dumpsys activity services 2>/dev/null | {
-            in_target=0
-            remaining=0
-            while IFS= read -r line; do
-              case "${'$'}line" in
-                *"${'$'}primary"*) in_target=1; remaining=80; continue ;;
-              esac
-              if [ "${'$'}in_target" -eq 0 ] && [ -n "${'$'}alternate" ]; then
-                case "${'$'}line" in
-                  *"${'$'}alternate"*) in_target=1; remaining=80; continue ;;
-                esac
-              fi
-              if [ "${'$'}in_target" -eq 1 ]; then
-                case "${'$'}line" in
-                  *"ServiceRecord{"*) in_target=0 ;;
-                esac
-                case "${'$'}line" in
-                  *"requested=true"*"received=true"*"hasBound=true"*) exit 0 ;;
-                esac
-                remaining=${'$'}((remaining - 1))
-                if [ "${'$'}remaining" -le 0 ]; then in_target=0; fi
-              fi
-            done
-            exit 1
-          }
-        }
-        wait_for_service_bound() {
-          primary="${'$'}1"; alternate="${'$'}{2:-}"
-          attempt=1
-          while [ "${'$'}attempt" -le 10 ]; do
-            service_bound "${'$'}primary" "${'$'}alternate" && return 0
-            [ "${'$'}attempt" -lt 10 ] && sleep 1
-            attempt=${'$'}((attempt + 1))
-          done
-          return 1
-        }
         ensure_notification_listener() {
           component='lyrics'; target='com.tcrrry.desktoplyrics/com.tcrrry.desktoplyrics.MediaListenerService'
           append_component enabled_notification_listeners "${'$'}target" "${'$'}component" lyrics-notification-listener-v1
@@ -1698,28 +1968,38 @@ internal object CombinedAuthorizationCommand {
 
         apply_dynamic_action() {
           spec="${'$'}1"
-          old_ifs="${'$'}IFS"; IFS='|'; set -- ${'$'}spec; IFS="${'$'}old_ifs"
+          # Android 9's mksh treats an unescaped `|` in parameter-removal
+          # patterns as alternation. Parse the bounded wire tuple through IFS
+          # with pathname expansion disabled so values can never become files.
+          old_ifs="${'$'}IFS"; IFS='|'; set -f
+          set -- ${'$'}spec
+          set +f; IFS="${'$'}old_ifs"
+          [ "${'$'}#" -eq 4 ] || [ "${'$'}#" -eq 5 ] || fail authorization_action_invalid
           type="${'$'}{1:-}"; component="${'$'}{2:-}"; action="${'$'}{3:-}"
+          value4="${'$'}{4:-}"; value5="${'$'}{5:-}"
+          [ -n "${'$'}type" ] && [ -n "${'$'}component" ] && [ -n "${'$'}action" ] && [ -n "${'$'}value4" ] || fail authorization_action_invalid
           case "${'$'}type" in
             APP_OP)
-              package="${'$'}{4:-}"; operation="${'$'}{5:-}"
-              ensure_appop "${'$'}package" "${'$'}operation" "${'$'}component" "${'$'}action";;
+              [ -n "${'$'}value5" ] || fail authorization_action_invalid
+              ensure_appop "${'$'}value4" "${'$'}value5" "${'$'}component" "${'$'}action";;
             RUNTIME)
-              package="${'$'}{4:-}"; permission="${'$'}{5:-}"
-              ensure_runtime_permission "${'$'}package" "${'$'}permission" "${'$'}component" "${'$'}action";;
+              [ -n "${'$'}value5" ] || fail authorization_action_invalid
+              ensure_runtime_permission "${'$'}value4" "${'$'}value5" "${'$'}component" "${'$'}action";;
             SECURE_FLAG)
-              setting="${'$'}{4:-}"
-              ensure_secure_flag "${'$'}setting" "${'$'}component" "${'$'}action";;
+              [ -z "${'$'}value5" ] || fail authorization_action_invalid
+              ensure_secure_flag "${'$'}value4" "${'$'}component" "${'$'}action";;
             SECURE_COMPONENT)
-              setting="${'$'}{4:-}"; target="${'$'}{5:-}"
-              append_component "${'$'}setting" "${'$'}target" "${'$'}component" "${'$'}action";;
+              [ -n "${'$'}value5" ] || fail authorization_action_invalid
+              append_component "${'$'}value4" "${'$'}value5" "${'$'}component" "${'$'}action";;
             *) fail authorization_action_invalid "${'$'}component";;
           esac
         }
 
         skipped=0
-        if ! selected desktop "${'$'}@"; then fail desktop_missing desktop; fi
-        if ! package_present "${'$'}desktop_package"; then fail desktop_missing desktop; fi
+        if [ "${'$'}launch_desktop" -eq 1 ]; then
+          if ! selected desktop "${'$'}@"; then fail desktop_missing desktop; fi
+          if ! package_present "${'$'}desktop_package"; then fail desktop_missing desktop; fi
+        fi
         if [ "${'$'}dynamic_mode" -eq 0 ]; then
           ensure_appop com.tcrrry.desktop SYSTEM_ALERT_WINDOW desktop desktop-overlay-v1
           ensure_appop com.tcrrry.desktop REQUEST_INSTALL_PACKAGES desktop desktop-install-packages-v1
@@ -1748,6 +2028,9 @@ internal object CombinedAuthorizationCommand {
             fi
           fi
         else
+          if [ "${'$'}launch_desktop" -eq 1 ]; then
+            [ -n "${'$'}desktop_launch_component" ] || fail desktop_launch_component_missing desktop
+          fi
           for argument in "${'$'}@"; do
             case "${'$'}argument" in
               --action=*) apply_dynamic_action "${'$'}{argument#--action=}";;
@@ -1757,23 +2040,15 @@ internal object CombinedAuthorizationCommand {
 
         [ "${'$'}skipped" -eq 0 ] || fail selected_component_missing
         if [ "${'$'}repair_only" -eq 1 ]; then emit "DONE|OK"; exit 0; fi
+        if [ "${'$'}launch_desktop" -eq 0 ]; then emit "DONE|OK"; exit 0; fi
         if [ "${'$'}dynamic_mode" -eq 0 ]; then
           launch_component='${AuthorizationPlanFactory.DESKTOP_MAIN_ACTIVITY}'
           am start -n "${'$'}launch_component" >/dev/null 2>&1 || fail desktop_launch_failed desktop
-          process_state=STOPPED; attempt=1
-          while [ "${'$'}attempt" -le 13 ]; do if pidof com.tcrrry.desktop >/dev/null 2>&1; then process_state=RUNNING; break; fi; [ "${'$'}attempt" -lt 13 ] && sleep 0.25; attempt=${'$'}((attempt + 1)); done
-          [ "${'$'}process_state" = RUNNING ] || fail desktop_process_not_running desktop
-          wait_for_service_bound "com.tcrrry.desktop/.debug.NavigationDemoAccessibilityService" "com.tcrrry.desktop/com.tcrrry.desktop.debug.NavigationDemoAccessibilityService" && service_state=BOUND || service_state=UNBOUND
         else
-          launch_component="${'$'}desktop_package/.MainActivity"
+          launch_component="${'$'}desktop_launch_component"
           am start -n "${'$'}launch_component" >/dev/null 2>&1 || fail desktop_launch_failed desktop
-          process_state=STOPPED; attempt=1
-          while [ "${'$'}attempt" -le 13 ]; do if pidof "${'$'}desktop_package" >/dev/null 2>&1; then process_state=RUNNING; break; fi; [ "${'$'}attempt" -lt 13 ] && sleep 0.25; attempt=${'$'}((attempt + 1)); done
-          [ "${'$'}process_state" = RUNNING ] || fail desktop_process_not_running desktop
-          wait_for_service_bound "${'$'}desktop_package/.debug.NavigationDemoAccessibilityService" "${'$'}desktop_package/${'$'}desktop_package.debug.NavigationDemoAccessibilityService" && service_state=BOUND || service_state=UNBOUND
         fi
-        [ "${'$'}service_state" = BOUND ] || fail desktop_service_not_bound desktop
-        emit "LAUNCH|desktop|OK|${'$'}process_state|${'$'}service_state"
+        emit "LAUNCH|desktop|OK"
         emit "DONE|OK"
     """.trimIndent()
 }

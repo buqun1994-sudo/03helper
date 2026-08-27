@@ -12,12 +12,15 @@ import com.ninepointnine.helper.domain.artifact.ApkExtractionEvidence
 import com.ninepointnine.helper.domain.artifact.ArchiveDownloadEvidence
 import com.ninepointnine.helper.domain.artifact.ArchiveVerificationEvidence
 import com.ninepointnine.helper.domain.artifact.ArtifactManifest
+import com.ninepointnine.helper.domain.artifact.ArtifactFailure
+import com.ninepointnine.helper.domain.artifact.ArtifactFailurePhase
 import com.ninepointnine.helper.domain.artifact.ArtifactSource
 import com.ninepointnine.helper.domain.artifact.ArtifactSourceKind
 import com.ninepointnine.helper.domain.artifact.ArtifactVerification
 import com.ninepointnine.helper.domain.artifact.ArtifactVersion
 import com.ninepointnine.helper.domain.artifact.CompatibilityRange
 import com.ninepointnine.helper.domain.artifact.SourceSelectionEvidence
+import com.ninepointnine.helper.domain.artifact.toComponentDescriptor
 import com.ninepointnine.helper.domain.device.ConnectedDevice
 import com.ninepointnine.helper.domain.device.DeviceCapability
 import com.ninepointnine.helper.domain.device.DeviceConnectionAttempt
@@ -32,11 +35,14 @@ import com.ninepointnine.helper.domain.session.ComponentCheck
 import com.ninepointnine.helper.domain.session.ComponentDescriptor
 import com.ninepointnine.helper.domain.session.DeviceConnectionStatus
 import com.ninepointnine.helper.domain.session.InstallationSession
+import com.ninepointnine.helper.domain.session.InstallationBatchPlan
 import com.ninepointnine.helper.domain.session.InstallationSessionCommand
 import com.ninepointnine.helper.domain.session.InstallationSessionEvent
 import com.ninepointnine.helper.domain.session.InstallationSessionSnapshot
 import com.ninepointnine.helper.domain.session.InstallationSessionState
 import com.ninepointnine.helper.domain.session.InstallationStrategy
+import com.ninepointnine.helper.domain.session.InstallationFlow
+import com.ninepointnine.helper.domain.session.ArtifactCatalogStage
 import com.ninepointnine.helper.domain.session.MaintenanceInstallationOption
 import com.ninepointnine.helper.domain.session.MaintenanceInstallationSelection
 import com.ninepointnine.helper.domain.session.MaintenanceInventoryState
@@ -392,6 +398,68 @@ class InstallerRuntimeTest {
     }
 
     @Test
+    fun `runtime refuses to execute when prepared result omits an unfailed selected component`() = runTest {
+        val manifests = listOf(manifest("lyrics"), manifest("desktop"))
+        val lease = TrackingConnectionLease()
+        var executionCount = 0
+        val runtime = InstallerRuntime(
+            session = InstallationSession(),
+            createDiscoveryAdapter = { port -> DeviceDiscoverySessionAdapter(fakeDiscovery(), port) },
+            createConnectionAdapter = { port ->
+                DeviceConnectionSessionAdapter(
+                    connectionFactory = DeviceConnectionFactory {
+                        DeviceConnectionAttempt.Connected(lease)
+                    },
+                    eventPort = port,
+                )
+            },
+            loadCatalog = { port ->
+                port.emit(
+                    InstallationSessionEvent.CatalogResolved(
+                        catalogVersion = "android-v1",
+                        keyId = "test-key",
+                        signatureAlgorithm = "SHA256withECDSA",
+                        manifests = manifests,
+                    ),
+                )
+            },
+            prepareArtifactsWithResult = { selected, port ->
+                emitArtifactPreparationEvidence(selected, port)
+                ArtifactPreparationResult.Prepared(
+                    artifacts = listOf(
+                        PreparedArtifact(
+                            manifest = selected.first { it.componentId == "desktop" },
+                            sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                            finalApk = File("desktop.apk"),
+                        ),
+                    ),
+                )
+            },
+            executeDeviceInstallationWithBatch = { _, _, _, _ -> executionCount += 1 },
+            coroutineContext = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        runtime.dispatch(InstallationSessionCommand.StartDiscovery)
+        advanceUntilIdle()
+        runtime.dispatch(
+            InstallationSessionCommand.SelectDevice(
+                runtime.session.currentSnapshot().discoveredDevices.single().id,
+            ),
+        )
+        advanceUntilIdle()
+        runtime.dispatch(InstallationSessionCommand.ToggleOptionalComponent("lyrics", selected = true))
+        runtime.dispatch(InstallationSessionCommand.StartInstallation)
+        advanceUntilIdle()
+
+        val failed = runtime.session.currentSnapshot()
+        assertEquals(0, executionCount)
+        assertEquals(InstallationSessionState.FAILED, failed.state)
+        assertEquals("artifact_preparation_incomplete", failed.failure?.reasonCode)
+        assertTrue("lyrics" in failed.failedComponentIds)
+        runtime.close()
+    }
+
+    @Test
     fun `maintenance runtime prepares only missing apps and passes installed prerequisite without an apk`() = runTest {
         val desktop = manifest("desktop")
         val lyrics = manifest("lyrics")
@@ -411,6 +479,7 @@ class InstallerRuntimeTest {
         var skippedCatalogIds: Set<String> = emptySet()
         var executedArtifacts: List<PreparedArtifact> = emptyList()
         var executedStrategy: InstallationStrategy? = null
+        var executedBatch: InstallationBatchPlan? = null
         val runtime = InstallerRuntime(
             session = InstallationSession(
                 initialSnapshot = InstallationSessionSnapshot(
@@ -510,9 +579,10 @@ class InstallerRuntimeTest {
                     },
                 )
             },
-            executeDeviceInstallationWithStrategy = { _, artifacts, strategy, _ ->
+            executeDeviceInstallationWithBatch = { _, artifacts, batch, _ ->
                 executedArtifacts = artifacts
-                executedStrategy = strategy
+                executedStrategy = batch.strategy
+                executedBatch = batch
             },
             coroutineContext = UnconfinedTestDispatcher(testScheduler),
         )
@@ -529,10 +599,197 @@ class InstallerRuntimeTest {
         assertEquals(null, runtime.session.currentSnapshot().components.single { it.id == "desktop" }.errorReason)
         assertEquals(listOf("lyrics"), preparedIds)
         assertEquals(InstallationStrategy.INSTALL_MISSING_ONLY, executedStrategy)
+        assertEquals(InstallationFlow.MAINTENANCE_INSTALL, executedBatch?.flow)
+        assertEquals(setOf("desktop", "lyrics"), executedBatch?.selectedComponentIds)
+        assertEquals(setOf("desktop"), executedBatch?.reusableComponentIds)
+        assertEquals(setOf("lyrics"), executedBatch?.preparationComponentIds)
         assertEquals(setOf("desktop", "lyrics"), executedArtifacts.map { it.manifest.componentId }.toSet())
         assertTrue(executedArtifacts.single { it.manifest.componentId == "desktop" }.finalApk == null)
         assertTrue(executedArtifacts.single { it.manifest.componentId == "lyrics" }.finalApk != null)
         runtime.close()
+    }
+
+    @Test
+    fun `maintenance runtime terminal artifact failure contains only the current batch`() = runTest {
+        val desktop = manifest("desktop")
+        val cast = manifest("cast")
+        val descriptors = listOf(desktop, cast).map { manifest ->
+            ComponentDescriptor(
+                id = manifest.componentId,
+                displayName = manifest.displayName,
+                required = manifest.required,
+                versionLabel = "1.0.0",
+                sizeLabel = "50 B",
+                compatibilityLabel = "compatible",
+            )
+        }
+        val runtime = InstallerRuntime(
+            session = InstallationSession(
+                initialSnapshot = InstallationSessionSnapshot(
+                    state = InstallationSessionState.MAINTENANCE,
+                    device = fakeVehicle().toDeviceSummary().copy(
+                        connectionStatus = DeviceConnectionStatus.DISCONNECTED,
+                    ),
+                    components = descriptors,
+                    maintenance = MaintenanceSnapshot(
+                        managedApplicationsState = MaintenanceInventoryState.READY,
+                        managedApplications = listOf(
+                            ManagedApplicationStatus(
+                                componentId = desktop.componentId,
+                                packageName = desktop.packageName,
+                                installed = true,
+                                versionCode = desktop.apkVersion.code,
+                            ),
+                        ),
+                        availableComponents = descriptors,
+                        installedManifests = listOf(desktop),
+                        availableManifests = emptyList(),
+                        catalogControlPlaneOnly = true,
+                        installationSelection = MaintenanceInstallationSelection(
+                            actionId = com.ninepointnine.helper.domain.session.MaintenanceActionId.INSTALL_APPLICATIONS,
+                            options = descriptors.map { descriptor ->
+                                MaintenanceInstallationOption(
+                                    componentId = descriptor.id,
+                                    displayName = descriptor.displayName,
+                                    installed = descriptor.id == desktop.componentId,
+                                    required = descriptor.required,
+                                )
+                            },
+                            selectedComponentIds = setOf(cast.componentId),
+                        ),
+                    ),
+                ),
+            ),
+            createDiscoveryAdapter = { port -> DeviceDiscoverySessionAdapter(fakeDiscovery(), port) },
+            createConnectionAdapter = { port -> fakeConnectionAdapter(port) },
+            loadCatalog = {},
+            prepareSelectedCatalogWithSkipped = { selected, skipped, port ->
+                assertEquals(setOf(desktop.componentId, cast.componentId), selected)
+                assertEquals(setOf(desktop.componentId), skipped)
+                port.emit(
+                    InstallationSessionEvent.SelectedCatalogResolved(
+                        catalogVersion = "catalog-3",
+                        keyId = "key-1",
+                        signatureAlgorithm = "Ed25519",
+                        manifests = listOf(cast),
+                        apps = descriptors,
+                    ),
+                )
+                CatalogLoadResult.Success(
+                    TrustedArtifactCatalog(
+                        catalogVersion = "catalog-3",
+                        keyId = "key-1",
+                        signatureAlgorithm = "Ed25519",
+                        manifests = listOf(cast),
+                    ),
+                )
+            },
+            prepareArtifactsWithResult = { selected, _ ->
+                assertEquals(listOf(cast.componentId), selected.map { it.componentId })
+                ArtifactPreparationResult.Failed(
+                    ArtifactFailure(
+                        phase = ArtifactFailurePhase.ARCHIVE_VERIFICATION,
+                        componentId = cast.componentId,
+                        reasonCode = "distribution_archive_invalid",
+                        retryable = true,
+                    ),
+                )
+            },
+            coroutineContext = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        runtime.dispatch(InstallationSessionCommand.Reconnect)
+        advanceUntilIdle()
+        runtime.dispatch(InstallationSessionCommand.StartMaintenanceInstallation)
+        advanceUntilIdle()
+
+        val failed = runtime.session.currentSnapshot()
+        assertEquals(InstallationSessionState.FAILED, failed.state)
+        assertEquals("distribution_archive_invalid", failed.failure?.reasonCode)
+        assertEquals(listOf(cast.componentId), failed.componentResults.map { it.componentId })
+        assertEquals("distribution_archive_invalid", failed.componentResults.single().failureReason)
+        assertTrue(failed.componentResults.none { it.componentId == desktop.componentId })
+        runtime.close()
+    }
+
+    @Test
+    fun `catalog identity and component drift stop before artifact or device work`() = runTest {
+        val desktop = manifest("desktop")
+        val cast = manifest("cast")
+        val driftCases = listOf(
+            "version" to "selected_catalog_identity_mismatch",
+            "revision" to "selected_catalog_identity_mismatch",
+            "key" to "selected_catalog_identity_mismatch",
+            "algorithm" to "selected_catalog_identity_mismatch",
+            "components" to "selected_catalog_component_set_mismatch",
+        )
+
+        driftCases.forEach { (drift, expectedReason) ->
+            var artifactPreparationCalls = 0
+            var deviceWriteCalls = 0
+            val runtime = InstallerRuntime(
+                session = InstallationSession(
+                    initialSnapshot = InstallationSessionSnapshot(
+                        state = InstallationSessionState.CONNECTED,
+                        device = fakeVehicle().toDeviceSummary(),
+                        components = listOf(desktop.toComponentDescriptor(28)),
+                        artifactCatalogStage = ArtifactCatalogStage.CONTROL_PLANE_READY,
+                        catalogVersion = "catalog-1",
+                        catalogRevision = 1L,
+                        catalogKeyId = "key-1",
+                        catalogSignatureAlgorithm = "Ed25519",
+                    ),
+                ),
+                createDiscoveryAdapter = { error("discovery must not start") },
+                createConnectionAdapter = { error("connection must not start") },
+                loadCatalog = {},
+                prepareSelectedCatalogWithBatch = { batch, port ->
+                    val manifests = if (drift == "components") listOf(desktop, cast) else listOf(desktop)
+                    val version = if (drift == "version") "catalog-2" else "catalog-1"
+                    val revision = if (drift == "revision") 2L else 1L
+                    val keyId = if (drift == "key") "key-2" else "key-1"
+                    val algorithm = if (drift == "algorithm") "SHA256withECDSA" else "Ed25519"
+                    port.emit(
+                        InstallationSessionEvent.SelectedCatalogResolved(
+                            catalogVersion = version,
+                            keyId = keyId,
+                            signatureAlgorithm = algorithm,
+                            manifests = manifests,
+                            apps = manifests.map { it.toComponentDescriptor(28) },
+                            catalogRevision = revision,
+                            batch = batch,
+                        ),
+                    )
+                    CatalogLoadResult.Success(
+                        TrustedArtifactCatalog(
+                            catalogVersion = version,
+                            keyId = keyId,
+                            signatureAlgorithm = algorithm,
+                            manifests = manifests,
+                            catalogRevision = revision,
+                        ),
+                    )
+                },
+                prepareArtifactsWithResult = { _, _ ->
+                    artifactPreparationCalls += 1
+                    error("artifact preparation must not start for $drift drift")
+                },
+                executeDeviceInstallationWithBatch = { _, _, _, _ ->
+                    deviceWriteCalls += 1
+                },
+                coroutineContext = UnconfinedTestDispatcher(testScheduler),
+            )
+
+            runtime.dispatch(InstallationSessionCommand.StartInstallation)
+            advanceUntilIdle()
+
+            val failed = runtime.session.currentSnapshot()
+            assertEquals("$drift drift", InstallationSessionState.FAILED, failed.state)
+            assertEquals("$drift drift", expectedReason, failed.failure?.reasonCode)
+            assertEquals("$drift drift", 0, artifactPreparationCalls)
+            assertEquals("$drift drift", 0, deviceWriteCalls)
+            runtime.close()
+        }
     }
 
     @Test

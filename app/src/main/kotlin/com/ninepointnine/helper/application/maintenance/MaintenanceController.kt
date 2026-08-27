@@ -60,8 +60,10 @@ class MaintenanceController(
                 MaintenanceActionId.CHECK_UPDATES -> checkUpdates(actionId, snapshot, connection, eventPort)
                 MaintenanceActionId.REPAIR_CONFIGURATION -> repairConfiguration(actionId, snapshot, connection, eventPort)
                 MaintenanceActionId.MANAGE_APPS -> inspectApplications(actionId, snapshot, connection, eventPort)
-                MaintenanceActionId.INSTALL_FILE_MANAGER ->
-                    prepareMaintenanceInstallation(actionId, snapshot, connection, eventPort)
+                MaintenanceActionId.INSTALL_APPLICATIONS,
+                MaintenanceActionId.INSTALL_FILE_MANAGER,
+                ->
+                    prepareMaintenanceApplications(actionId, snapshot, connection, eventPort)
                 MaintenanceActionId.LAUNCH_LYRICS -> launch(actionId, "lyrics", snapshot, connection, eventPort)
                 MaintenanceActionId.LAUNCH_DESKTOP -> launch(actionId, "desktop", snapshot, connection, eventPort)
                 MaintenanceActionId.CLEANUP -> {
@@ -254,6 +256,7 @@ class MaintenanceController(
                         catalogRevision = result.catalog.catalogRevision,
                         apps = result.catalog.toComponentDescriptors(snapshot.device?.androidSdk),
                         appFailures = result.catalog.appFailures.associate { it.componentId to it.reasonCode },
+                        appFailureRetryable = result.catalog.appFailures.associate { it.componentId to it.retryable },
                         updateStatuses = updateStatuses,
                         controlPlaneOnly = loadDistributionConfig != null,
                     ),
@@ -406,6 +409,13 @@ class MaintenanceController(
             complete(actionId, "authorization_checked", eventPort)
             return
         }
+        if (effectiveStatuses.isNotEmpty() && effectiveStatuses.all { it.authorized == true }) {
+            // The repair action is idempotent. A live readback that already
+            // satisfies every installed component needs no historical manifest
+            // or device write, which also recovers older persisted sessions.
+            complete(actionId, "authorization_repaired", eventPort)
+            return
+        }
         val verifiedManifests = maintenanceCatalogManifests(snapshot)
         val manifests = verifiedManifests.filter { it.componentId in installedById }
         if (manifests.map { it.componentId }.toSet() != installedById.keys) {
@@ -448,15 +458,15 @@ class MaintenanceController(
         }
     }
 
-    private suspend fun prepareMaintenanceInstallation(
+    private suspend fun prepareMaintenanceApplications(
         actionId: MaintenanceActionId,
         snapshot: InstallationSessionSnapshot,
         connection: com.ninepointnine.helper.domain.device.DeviceConnectionLease?,
         eventPort: InstallationSessionEventPort,
     ) {
-        // Resolve the complete signed configuration first. This operation only
-        // reads the config and folder index; ZIP/APK preparation still waits
-        // for the user's explicit selection.
+        // Resolve the signed configuration and local APK inventory first.
+        // Remote folder resolution and ZIP/APK preparation wait for the user's
+        // explicit selection.
         val loader = loadDistributionSelection
         var effectiveSnapshot = snapshot
         if (loader != null) {
@@ -474,15 +484,16 @@ class MaintenanceController(
                     )
                     eventPort.emit(
                         InstallationSessionEvent.MaintenanceCatalogRefreshed(
-                        catalogVersion = result.catalog.catalogVersion,
-                        keyId = result.catalog.keyId,
-                        signatureAlgorithm = result.catalog.signatureAlgorithm,
-                        manifests = result.catalog.manifests,
-                        catalogRevision = result.catalog.catalogRevision,
-                        apps = descriptors,
-                        appFailures = result.catalog.appFailures.associate { it.componentId to it.reasonCode },
-                        updateStatuses = emptyList(),
-                        controlPlaneOnly = true,
+                            catalogVersion = result.catalog.catalogVersion,
+                            keyId = result.catalog.keyId,
+                            signatureAlgorithm = result.catalog.signatureAlgorithm,
+                            manifests = result.catalog.manifests,
+                            catalogRevision = result.catalog.catalogRevision,
+                            apps = descriptors,
+                            appFailures = result.catalog.appFailures.associate { it.componentId to it.reasonCode },
+                            appFailureRetryable = result.catalog.appFailures.associate { it.componentId to it.retryable },
+                            updateStatuses = emptyList(),
+                            controlPlaneOnly = true,
                         ),
                     )
                 }

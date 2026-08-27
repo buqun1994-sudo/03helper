@@ -129,27 +129,14 @@ object ProductionInstallerRuntimeFactory {
                     selectionLoader = { folderCatalogAdapter.loadSelection() },
                 ).loadSelection()
             },
-            prepareSelectedCatalog = { selectedIds, eventPort ->
+            prepareSelectedCatalogWithBatch = { batch, eventPort ->
                 ArtifactCatalogSessionAdapter(
                     catalogLoader = catalogLoader,
                     eventPort = eventPort,
-                    selectedCatalogLoader = { ids, onProgress ->
-                        folderCatalogAdapter.prepareSelected(ids, onProgress)
+                    selectedCatalogLoaderWithBatch = { immutableBatch, onProgress ->
+                        folderCatalogAdapter.prepareSelected(immutableBatch, onProgress)
                     },
-                ).prepareSelected(selectedIds)
-            },
-            prepareSelectedCatalogWithSkipped = { selectedIds, skippedIds, eventPort ->
-                ArtifactCatalogSessionAdapter(
-                    catalogLoader = catalogLoader,
-                    eventPort = eventPort,
-                    selectedCatalogLoaderWithSkipped = { ids, skipped, onProgress ->
-                        folderCatalogAdapter.prepareSelected(
-                            selectedIds = ids,
-                            onProgress = onProgress,
-                            skippedIds = skipped,
-                        )
-                    },
-                ).prepareSelected(selectedIds, skippedIds)
+                ).prepareSelected(batch)
             },
             prepareArtifactsWithResult = { manifests, eventPort ->
                 ArtifactPreparationCoordinator(
@@ -187,12 +174,14 @@ object ProductionInstallerRuntimeFactory {
                     }
                 }
             },
-            executeDeviceInstallationWithStrategy = { connection, artifacts, strategy, eventPort ->
+            executeDeviceInstallationWithBatch = { connection, artifacts, batchPlan, eventPort ->
                 try {
                     DeviceInstallationCoordinator(eventPort).execute(
                         connection = connection,
                         artifacts = artifacts,
-                        strategy = strategy,
+                        strategy = batchPlan.strategy,
+                        flow = batchPlan.flow,
+                        batchPlan = batchPlan,
                     )
                 } finally {
                     // Every install attempt, including a partial failure, ends
@@ -212,7 +201,9 @@ object ProductionInstallerRuntimeFactory {
                 selfVersion = ArtifactVersion(BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE.toLong()),
             ),
             persistMaintenanceSnapshot = { snapshot ->
-                withContext(Dispatchers.IO) { maintenanceSessionStore.save(snapshot) }
+                withContext(Dispatchers.IO) {
+                    check(maintenanceSessionStore.save(snapshot)) { "maintenance_baseline_rejected" }
+                }
             },
             coroutineContext = Dispatchers.Main.immediate,
             apkIconRepository = apkIconRepository,
