@@ -28,6 +28,7 @@
 | 权限、签名、密钥、下载源、发布 | `docs/security/安全与密钥边界.md` |
 | 任务输入、范围、完成标准 | `docs/plans/codex-task-intake-template.md` |
 | 当前事实、最近验证、未完成事项 | `docs/progress.md` |
+| 安装主链根因、批次收据与真实复测证据 | `docs/audits/安装应用单一会话审计-2026-08-28.md` |
 | 可复用代码、设计、产品、验证、安全、运维或 AI 协作规则 | `docs/architecture/rules/README.md` |
 | 规则沉淀 | `.agents/skills/rule-discovery/SKILL.md` |
 | 任务收尾 | `.agents/skills/task-closeout/SKILL.md` |

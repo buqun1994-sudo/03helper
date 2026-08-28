@@ -5,6 +5,11 @@ import com.ninepointnine.helper.domain.artifact.ArtifactSource
 import com.ninepointnine.helper.domain.artifact.ArtifactSourceKind
 import com.ninepointnine.helper.domain.artifact.ArtifactVersion
 import com.ninepointnine.helper.domain.artifact.CompatibilityRange
+import com.ninepointnine.helper.domain.device.InstalledArtifactEvidence
+import com.ninepointnine.helper.domain.session.AuthorizationStageReceipt
+import com.ninepointnine.helper.domain.session.AuthorizationStageReceiptStatus
+import com.ninepointnine.helper.domain.session.AvailabilityStageReceipt
+import com.ninepointnine.helper.domain.session.AvailabilityStageReceiptStatus
 import com.ninepointnine.helper.domain.session.ComponentDescriptor
 import com.ninepointnine.helper.domain.session.DeviceConnectionStatus
 import com.ninepointnine.helper.domain.session.DeviceSummary
@@ -13,7 +18,11 @@ import com.ninepointnine.helper.domain.session.InstallPhase
 import com.ninepointnine.helper.domain.session.InstallationSessionSnapshot
 import com.ninepointnine.helper.domain.session.InstallationSessionState
 import com.ninepointnine.helper.domain.session.InstallationBatchPlan
+import com.ninepointnine.helper.domain.session.InstallationBatchReceipt
+import com.ninepointnine.helper.domain.session.InstallationComponentReceipt
 import com.ninepointnine.helper.domain.session.InstallationFlow
+import com.ninepointnine.helper.domain.session.InstallationStageReceipt
+import com.ninepointnine.helper.domain.session.InstallationStageReceiptStatus
 import com.ninepointnine.helper.domain.session.InstallationStrategy
 import com.ninepointnine.helper.domain.session.MaintenanceActionId
 import com.ninepointnine.helper.domain.session.MaintenanceActionRecord
@@ -370,6 +379,72 @@ class InstallUiStateMapperTest {
             com.ninepointnine.helper.domain.session.ComponentResultStatus.READY,
             state.componentResults.single().status,
         )
+    }
+
+    @Test
+    fun `committed batch receipt is the only UI result source`() {
+        val manifest = resultManifest("cast", required = false)
+        val receipt = InstallationBatchReceipt(
+            batchId = 12L,
+            components = listOf(
+                InstallationComponentReceipt(
+                    componentId = "cast",
+                    installation = InstallationStageReceipt(
+                        status = InstallationStageReceiptStatus.VERIFIED,
+                        evidence = InstalledArtifactEvidence(
+                            componentId = "cast",
+                            packageName = manifest.packageName,
+                            version = manifest.apkVersion,
+                            apkSizeBytes = manifest.apkSizeBytes,
+                            apkSha256 = manifest.apkSha256,
+                            certificateSha256 = manifest.certificateSha256,
+                        ),
+                    ),
+                    authorization = AuthorizationStageReceipt(
+                        status = AuthorizationStageReceiptStatus.NOT_REQUIRED,
+                    ),
+                    availability = AvailabilityStageReceipt(
+                        status = AvailabilityStageReceiptStatus.NOT_REQUIRED,
+                    ),
+                ),
+            ),
+        )
+        val state = InstallUiStateMapper.map(
+            InstallationSessionSnapshot(
+                state = InstallationSessionState.COMPLETED_WITH_ERRORS,
+                installationBatch = singleResultBatch("cast"),
+                installationBatchReceipt = receipt,
+                components = listOf(component("cast", required = false, size = null)),
+                artifactManifests = listOf(manifest),
+                failedComponentIds = setOf("cast"),
+                evidence = com.ninepointnine.helper.domain.session.SessionEvidence(),
+                failure = SessionFailure(
+                    category = FailureCategory.INSTALLATION,
+                    reasonCode = "installation_failed",
+                ),
+                componentResults = listOf(
+                    com.ninepointnine.helper.domain.session.ComponentResult(
+                        componentName = "03投屏",
+                        installed = false,
+                        configured = false,
+                        available = false,
+                        componentId = "cast",
+                        failureReason = "authorization_component_not_present",
+                    ),
+                ),
+            ),
+        ) as InstallUiState.Result
+
+        assertEquals(ResultKind.SUCCESS, state.kind)
+        assertEquals(
+            com.ninepointnine.helper.domain.session.ComponentResultStatus.READY,
+            state.componentResults.single().status,
+        )
+        assertTrue(state.componentResults.single().installed)
+        assertTrue(state.componentResults.single().configured)
+        assertTrue(state.componentResults.single().available)
+        assertNull(state.componentResults.single().errorReason)
+        assertNull(state.failureReason)
     }
 
     @Test

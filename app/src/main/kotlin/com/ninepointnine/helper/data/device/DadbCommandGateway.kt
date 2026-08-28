@@ -14,6 +14,7 @@ import com.ninepointnine.helper.domain.device.AuthorizationCapacityPolicy
 import com.ninepointnine.helper.domain.device.ManagedSecureComponentList
 import com.ninepointnine.helper.domain.device.AuthorizationValueState
 import com.ninepointnine.helper.domain.device.DeviceActionFailure
+import com.ninepointnine.helper.domain.device.DeviceAuthorizationConfirmation
 import com.ninepointnine.helper.domain.device.DeviceShortcut
 import com.ninepointnine.helper.domain.device.DeviceShortcutFailureStage
 import com.ninepointnine.helper.domain.device.DeviceShortcutResult
@@ -49,7 +50,7 @@ import kotlinx.coroutines.withContext
 
 /**
  * DADB-backed device port. The install batch is separate from the single
- * post-install command: no package is launched during [install], and all
+ * post-install command: no package is launched during [installBatch], and all
  * authorization plus the desktop launch happen in one shell invocation.
  */
 internal class DadbCommandGateway(
@@ -62,10 +63,7 @@ internal class DadbCommandGateway(
     /** Cached per lease so older Android package-manager builds are probed once. */
     private var versionedPackageInventorySupported: Boolean? = null
 
-    override suspend fun install(artifacts: List<InstallableArtifact>): DeviceInstallResult =
-        install(artifacts, InstallationStrategy.REINSTALL_SELECTED)
-
-    override suspend fun install(
+    override suspend fun installBatch(
         artifacts: List<InstallableArtifact>,
         strategy: InstallationStrategy,
     ): DeviceInstallResult = withLease(
@@ -145,41 +143,54 @@ internal class DadbCommandGateway(
             if (strategy == InstallationStrategy.INSTALL_MISSING_ONLY && artifact.apkFile == null) {
                 if (!packagePresent) {
                     return@withLease DeviceInstallResult.Failed(
-                        DeviceActionFailure(
+                        failure = DeviceActionFailure(
                             "installation_reused_package_missing",
                             artifact.manifest.componentId,
                             retryable = true,
                         ),
+                        operationConfirmedComponentIds = operationConfirmedComponentIds.toSet(),
                     )
                 }
                 val installedVersion = installedInventory[artifact.manifest.packageName]
                 if (installedVersion != null && installedVersion != artifact.manifest.apkVersion.code) {
                     return@withLease DeviceInstallResult.Failed(
-                        DeviceActionFailure(
+                        failure = DeviceActionFailure(
                             "installation_reused_version_mismatch",
                             artifact.manifest.componentId,
                             retryable = false,
                         ),
+                        operationConfirmedComponentIds = operationConfirmedComponentIds.toSet(),
                     )
                 }
                 if (ArtifactManifestValidator.validate(artifact.manifest) !is ManifestValidation.Valid) {
                     return@withLease DeviceInstallResult.Failed(
-                        DeviceActionFailure("install_manifest_invalid", artifact.manifest.componentId, retryable = false),
+                        failure = DeviceActionFailure("install_manifest_invalid", artifact.manifest.componentId, retryable = false),
+                        operationConfirmedComponentIds = operationConfirmedComponentIds.toSet(),
                     )
                 }
                 reusableMissingOnlyIds += artifact.manifest.componentId
+                // A trusted inventory hit is an operation-level confirmation,
+                // even though no fresh PackageManager write is performed.
+                operationConfirmedComponentIds += artifact.manifest.componentId
                 return@forEach
             }
             val alreadyInstalled = packagePresent &&
                 installedInventory[artifact.manifest.packageName] == artifact.manifest.apkVersion.code
             if (!alreadyInstalled || strategy == InstallationStrategy.REINSTALL_SELECTED) {
                 validateInstallableArtifact(artifact)?.let { failure ->
-                    return@withLease DeviceInstallResult.Failed(failure)
+                    return@withLease DeviceInstallResult.Failed(
+                        failure = failure,
+                        operationConfirmedComponentIds = operationConfirmedComponentIds.toSet(),
+                    )
                 }
             } else if (ArtifactManifestValidator.validate(artifact.manifest) !is ManifestValidation.Valid) {
                 return@withLease DeviceInstallResult.Failed(
-                    DeviceActionFailure("install_manifest_invalid", artifact.manifest.componentId, retryable = false),
+                    failure = DeviceActionFailure("install_manifest_invalid", artifact.manifest.componentId, retryable = false),
+                    operationConfirmedComponentIds = operationConfirmedComponentIds.toSet(),
                 )
+            }
+            if (alreadyInstalled) {
+                operationConfirmedComponentIds += artifact.manifest.componentId
             }
         }
 
@@ -197,11 +208,13 @@ internal class DadbCommandGateway(
             }
             val remotePath = remoteApkPath(artifact)
                 ?: return@withLease DeviceInstallResult.Failed(
-                    DeviceActionFailure("remote_staging_path_invalid", artifact.manifest.componentId, retryable = false),
+                    failure = DeviceActionFailure("remote_staging_path_invalid", artifact.manifest.componentId, retryable = false),
+                    operationConfirmedComponentIds = operationConfirmedComponentIds.toSet(),
                 )
             val apkFile = artifact.apkFile
                 ?: return@withLease DeviceInstallResult.Failed(
-                    DeviceActionFailure("install_apk_file_invalid", artifact.manifest.componentId, retryable = false),
+                    failure = DeviceActionFailure("install_apk_file_invalid", artifact.manifest.componentId, retryable = false),
+                    operationConfirmedComponentIds = operationConfirmedComponentIds.toSet(),
                 )
             var failure: DeviceActionFailure? = null
             try {
@@ -236,6 +249,7 @@ internal class DadbCommandGateway(
                 return@withLease DeviceInstallResult.Failed(
                     failure = checkNotNull(failure),
                     writeConfirmedComponentIds = writeConfirmedComponentIds.toSet(),
+                    operationConfirmedComponentIds = operationConfirmedComponentIds.toSet(),
                     warnings = installationWarnings.toList(),
                 )
             }
@@ -258,6 +272,7 @@ internal class DadbCommandGateway(
                         return@withLease DeviceInstallResult.WrittenButUnverified(
                             writeConfirmedComponentIds = writeConfirmedComponentIds.toSet(),
                             failure = identity.failure,
+                            operationConfirmedComponentIds = operationConfirmedComponentIds.toSet(),
                             verifiedEvidence = installed.toList(),
                             warnings = installationWarnings.toList(),
                             confirmationPendingComponentIds = operationConfirmedComponentIds
@@ -278,6 +293,7 @@ internal class DadbCommandGateway(
             evidence = installed,
             warnings = installationWarnings,
             writeConfirmedComponentIds = writeConfirmedComponentIds.toSet(),
+            operationConfirmedComponentIds = operationConfirmedComponentIds.toSet(),
         )
     }
 
@@ -359,23 +375,22 @@ internal class DadbCommandGateway(
             authorizationPlan,
             launchDesktop = launchDesktop,
         )
-        val result = when (val postcondition = readAuthorizationPostcondition(authorizationPlan)) {
+        val structuralFailure = (parsed as? DeviceShortcutResult.Failed)
+            ?.takeIf { isNonMaskableAuthorizationFailure(it.failure.reasonCode) }
+        val result = if (structuralFailure != null) {
+            structuralFailure
+        } else when (val postcondition = readAuthorizationPostcondition(authorizationPlan)) {
             is AuthorizationPostcondition.Satisfied -> {
-                val structuralFailure = (parsed as? DeviceShortcutResult.Failed)
-                    ?.takeIf { isNonMaskableAuthorizationFailure(it.failure.reasonCode) }
-                if (structuralFailure != null) {
-                    structuralFailure
-                } else {
-                    val completed = DeviceShortcutResult.Completed(
-                        configuredComponentIds = postcondition.configuredComponentIds -
-                            (parsed as? DeviceShortcutResult.Failed)?.skippedComponentIds.orEmpty(),
-                        skippedComponentIds = (parsed as? DeviceShortcutResult.Failed)
-                            ?.skippedComponentIds.orEmpty(),
-                        authorizationEvidence = postcondition.evidence,
-                        availabilityEvidence = parsed.availabilityEvidenceOrEmpty(),
-                    )
-                    if (launchDesktop) verifyDesktopRuntime(completed, authorizationPlan) else completed
-                }
+                val completed = DeviceShortcutResult.Completed(
+                    configuredComponentIds = postcondition.configuredComponentIds -
+                        (parsed as? DeviceShortcutResult.Failed)?.skippedComponentIds.orEmpty(),
+                    skippedComponentIds = (parsed as? DeviceShortcutResult.Failed)
+                        ?.skippedComponentIds.orEmpty(),
+                    authorizationEvidence = postcondition.evidence,
+                    availabilityEvidence = parsed.availabilityEvidenceOrEmpty(),
+                    authorizationConfirmation = DeviceAuthorizationConfirmation.CONFIRMED,
+                )
+                if (launchDesktop) verifyDesktopRuntime(completed, authorizationPlan) else completed
             }
 
             is AuthorizationPostcondition.NotSatisfied -> DeviceShortcutResult.Failed(
@@ -390,20 +405,22 @@ internal class DadbCommandGateway(
                 skippedComponentIds = parsed.skippedComponentIdsOrEmpty(),
                 authorizationEvidence = postcondition.evidence,
                 availabilityEvidence = parsed.availabilityEvidenceOrEmpty(),
+                authorizationConfirmation = DeviceAuthorizationConfirmation.CONFIRMED,
             )
 
-            is AuthorizationPostcondition.Unavailable -> DeviceShortcutResult.Failed(
-                stage = DeviceShortcutFailureStage.AUTHORIZATION,
-                failure = DeviceActionFailure(
-                    reasonCode = "authorization_confirmation_unavailable",
-                    componentId = postcondition.action?.componentId,
-                    retryable = true,
-                ),
-                configuredComponentIds = postcondition.configuredComponentIds,
-                skippedComponentIds = parsed.skippedComponentIdsOrEmpty(),
-                authorizationEvidence = postcondition.evidence,
-                availabilityEvidence = parsed.availabilityEvidenceOrEmpty(),
-            )
+            is AuthorizationPostcondition.Unavailable -> when (parsed) {
+                is DeviceShortcutResult.Completed -> {
+                    // The combined command already emitted a complete, validated
+                    // receipt. A separate readback outage lowers confidence but
+                    // cannot rewrite that command into an authorization failure.
+                    val completed = parsed.copy(
+                        authorizationConfirmation = DeviceAuthorizationConfirmation.UNKNOWN,
+                    )
+                    if (launchDesktop) verifyDesktopRuntime(completed, authorizationPlan) else completed
+                }
+
+                is DeviceShortcutResult.Failed -> parsed
+            }
         }
         Log.d(
             TAG,
@@ -475,6 +492,7 @@ internal class DadbCommandGateway(
         skippedComponentIds = skippedComponentIds,
         authorizationEvidence = authorizationEvidence,
         availabilityEvidence = listOfNotNull(availability),
+        authorizationConfirmation = authorizationConfirmation,
     )
 
     private fun desktopAvailability(
@@ -1652,10 +1670,7 @@ internal class DadbCommandGateway(
     private fun isSuccessful(response: AdbShellResponse?): Boolean =
         response != null && response.exitCode == 0
 
-    private fun isPmInstallSuccessful(response: AdbShellResponse?): Boolean =
-        response != null && response.exitCode == 0 && response.output.lineSequence()
-            .map(String::trim)
-            .any { it.startsWith("Success", ignoreCase = true) }
+    private fun isPmInstallSuccessful(response: AdbShellResponse?): Boolean = isInstallAccepted(response)
 
     private fun isLaunchAccepted(response: AdbShellResponse?): Boolean {
         if (!isSuccessful(response)) return false
@@ -1866,9 +1881,11 @@ internal object CombinedAuthorizationResponseParser {
             emptySet()
         }
         val availabilityEvidence = emptyList<com.ninepointnine.helper.domain.device.ManagedApplicationAvailabilityEvidence>()
-        // The Android shell may write harmless framework warnings to stderr while
-        // still returning structured markers; exit code and markers are authoritative.
-        if (failure != null || response.exitCode != 0) {
+        // An explicit marker is the command's structured failure receipt. A
+        // non-zero transport/shell exit without that marker is only a loss of
+        // confidence when the complete, validated receipt is present (Android
+        // 9 can append framework diagnostics after the script emits DONE).
+        if (failure != null) {
             val parts = failure?.split('|').orEmpty()
             val reasonCode = parts.getOrNull(2).takeUnless { it.isNullOrBlank() } ?: "adb_combined_command_failed"
             val componentId = parts.getOrNull(3).takeUnless { it.isNullOrBlank() }
@@ -1889,10 +1906,18 @@ internal object CombinedAuthorizationResponseParser {
                 availabilityEvidence = availabilityEvidence,
             )
         }
-        if (lines.none { it == "${CombinedAuthorizationCommand.MARKER}|DONE|OK" }) {
+        val done = lines.any { it == "${CombinedAuthorizationCommand.MARKER}|DONE|OK" }
+        if (!done) {
             return DeviceShortcutResult.Failed(
                 stage = DeviceShortcutFailureStage.AUTHORIZATION,
-                failure = DeviceActionFailure("combined_command_result_missing", retryable = false),
+                failure = DeviceActionFailure(
+                    reasonCode = if (response.exitCode != 0) {
+                        "adb_combined_command_failed"
+                    } else {
+                        "combined_command_result_missing"
+                    },
+                    retryable = response.exitCode != 0,
+                ),
                 configuredComponentIds = configuredIds,
                 skippedComponentIds = skippedIds,
                 authorizationEvidence = if (partialEvidenceValid) authorizationEvidence else emptyList(),
@@ -1928,6 +1953,11 @@ internal object CombinedAuthorizationResponseParser {
                 skippedComponentIds = skippedIds,
                 authorizationEvidence = authorizationEvidence,
                 availabilityEvidence = availabilityEvidence,
+                authorizationConfirmation = if (response.exitCode == 0) {
+                    DeviceAuthorizationConfirmation.CONFIRMED
+                } else {
+                    DeviceAuthorizationConfirmation.UNKNOWN
+                },
             )
         }
         val desktop = plan.components.firstOrNull { it.componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID }
@@ -1957,6 +1987,11 @@ internal object CombinedAuthorizationResponseParser {
             skippedComponentIds = skippedIds,
             authorizationEvidence = authorizationEvidence,
             availabilityEvidence = availabilityEvidence,
+            authorizationConfirmation = if (response.exitCode == 0) {
+                DeviceAuthorizationConfirmation.CONFIRMED
+            } else {
+                DeviceAuthorizationConfirmation.UNKNOWN
+            },
         )
     }
 
@@ -1986,7 +2021,7 @@ internal object CombinedAuthorizationResponseParser {
             .filter { it.startsWith(CombinedAuthorizationCommand.MARKER) }
             .toList()
         val failure = lines.firstOrNull { it.startsWith("${CombinedAuthorizationCommand.MARKER}|FAIL|") }
-        if (failure != null || response.exitCode != 0) {
+        if (failure != null) {
             val parts = failure?.split('|').orEmpty()
             val reasonCode = parts.getOrNull(2).takeUnless { it.isNullOrBlank() }
                 ?: "adb_combined_command_failed"
@@ -1999,9 +2034,17 @@ internal object CombinedAuthorizationResponseParser {
                 ),
             )
         }
-        if (lines.none { it == "${CombinedAuthorizationCommand.MARKER}|DONE|OK" }) {
+        val done = lines.any { it == "${CombinedAuthorizationCommand.MARKER}|DONE|OK" }
+        if (!done) {
             return MaintenanceDeviceResult.Failed(
-                DeviceActionFailure("combined_command_result_missing", retryable = false),
+                DeviceActionFailure(
+                    reasonCode = if (response.exitCode != 0) {
+                        "adb_combined_command_failed"
+                    } else {
+                        "combined_command_result_missing"
+                    },
+                    retryable = response.exitCode != 0,
+                ),
             )
         }
         val evidence = lines.mapNotNull(::parseAuthorizationEvidence)
@@ -2062,8 +2105,7 @@ internal object CombinedAuthorizationCommand {
                 AuthorizationPlanFactory.DESKTOP_COMPONENT_ID,
                 AuthorizationPlanFactory.LYRICS_COMPONENT_ID,
                 AuthorizationPlanFactory.FILE_MANAGER_COMPONENT_ID,
-            ) || (component.componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID &&
-                component.packageName != AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME)
+            ) || component.packageName != staticPackageName(component.componentId)
         }
         val desktopPackage = desktop?.packageName
         val desktopLaunchComponent = desktop?.let(AuthorizationPlanFactory::fixedLaunchComponent)
@@ -2113,6 +2155,14 @@ internal object CombinedAuthorizationCommand {
 
     private fun shellQuote(value: String): String =
         "'" + value.replace("'", "'\"'\"'") + "'"
+
+    /** Package identities understood by the legacy static script branch. */
+    private fun staticPackageName(componentId: String): String? = when (componentId) {
+        AuthorizationPlanFactory.DESKTOP_COMPONENT_ID -> AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME
+        AuthorizationPlanFactory.LYRICS_COMPONENT_ID -> AuthorizationPlanFactory.LYRICS_PACKAGE_NAME
+        AuthorizationPlanFactory.FILE_MANAGER_COMPONENT_ID -> AuthorizationPlanFactory.FILE_MANAGER_PACKAGE_NAME
+        else -> null
+    }
 
     private val SCRIPT = """
         set -u
@@ -2443,4 +2493,28 @@ internal fun isUninstallAccepted(response: AdbShellResponse?): Boolean {
     // stdout) after completing an uninstall, so requiring literal "Success"
     // would turn a real uninstall into a false failure.
     return !hasFailure
+}
+
+/** `pm install` may complete with only framework diagnostics on Android 9. */
+internal fun isInstallAccepted(response: AdbShellResponse?): Boolean {
+    if (response == null) return false
+    val lines = (response.output + "\n" + response.errorOutput)
+        .lineSequence()
+        .map(String::trim)
+        .filter(String::isNotEmpty)
+        .toList()
+    val hasFailure = lines.any { line ->
+        line.startsWith("Failure", ignoreCase = true) ||
+            line.contains("INSTALL_FAILED", ignoreCase = true) ||
+            line.startsWith("Error:", ignoreCase = true) ||
+            line.startsWith("Error ", ignoreCase = true)
+    }
+    if (hasFailure) return false
+    val hasExplicitSuccess = lines.any { it.equals("Success", ignoreCase = true) }
+    // Installed package identity is read back immediately after the batch, so
+    // literal stdout "Success" is not required as a second success signal
+    // when the wrapper reports exitCode=0. A few Android 9/vendor wrappers
+    // emit that same unambiguous marker and still return a non-zero status;
+    // accept only that narrow exception, never an arbitrary non-zero warning.
+    return response.exitCode == 0 || hasExplicitSuccess
 }

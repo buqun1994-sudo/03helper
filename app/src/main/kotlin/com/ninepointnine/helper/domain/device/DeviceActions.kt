@@ -21,16 +21,11 @@ interface DeviceActionConnectionLease : DeviceConnectionLease {
 }
 
 interface AdbCommandGateway {
-    suspend fun install(artifacts: List<InstallableArtifact>): DeviceInstallResult
-
-    /**
-     * Installs a verified batch according to the session's explicit intent.
-     * Existing gateways remain source-compatible through the legacy overload.
-     */
-    suspend fun install(
+    /** Installs exactly one verified business batch with its frozen intent. */
+    suspend fun installBatch(
         artifacts: List<InstallableArtifact>,
         strategy: InstallationStrategy,
-    ): DeviceInstallResult = install(artifacts)
+    ): DeviceInstallResult
 
     /**
      * Runs the one versioned authorization plan for the selected components.
@@ -241,12 +236,16 @@ sealed interface DeviceInstallResult {
         val warnings: List<DeviceInstallWarning> = emptyList(),
         /** Components for which PackageManager accepted a fresh device write. */
         val writeConfirmedComponentIds: Set<String> = emptySet(),
+        /** Components whose fresh write or trusted reuse operation was accepted. */
+        val operationConfirmedComponentIds: Set<String> = emptySet(),
     ) : DeviceInstallResult
 
     data class Failed(
         val failure: DeviceActionFailure,
         /** Confirmed writes that happened before a later command failed. */
         val writeConfirmedComponentIds: Set<String> = emptySet(),
+        /** Fresh writes or trusted reuse operations accepted before failure. */
+        val operationConfirmedComponentIds: Set<String> = emptySet(),
         /** Verified identities collected before a later command failed. */
         val verifiedEvidence: List<InstalledArtifactEvidence> = emptyList(),
         val warnings: List<DeviceInstallWarning> = emptyList(),
@@ -261,6 +260,8 @@ sealed interface DeviceInstallResult {
     data class WrittenButUnverified(
         val writeConfirmedComponentIds: Set<String>,
         val failure: DeviceActionFailure,
+        /** Fresh writes or trusted reuse operations accepted before readback stopped. */
+        val operationConfirmedComponentIds: Set<String> = emptySet(),
         val verifiedEvidence: List<InstalledArtifactEvidence> = emptyList(),
         val warnings: List<DeviceInstallWarning> = emptyList(),
         val confirmationPendingComponentIds: Set<String> = emptySet(),
@@ -303,12 +304,19 @@ enum class DeviceShortcut {
     CONFIGURE_SELECTED_APPS,
 }
 
+/** Confidence of the independent readback after the typed authorization command. */
+enum class DeviceAuthorizationConfirmation {
+    CONFIRMED,
+    UNKNOWN,
+}
+
 sealed interface DeviceShortcutResult {
     data class Completed(
         val configuredComponentIds: Set<String>,
         val skippedComponentIds: Set<String>,
         val authorizationEvidence: List<AuthorizationActionEvidence>,
         val availabilityEvidence: List<ManagedApplicationAvailabilityEvidence>,
+        val authorizationConfirmation: DeviceAuthorizationConfirmation = DeviceAuthorizationConfirmation.CONFIRMED,
     ) : DeviceShortcutResult
 
     data class Failed(
@@ -319,6 +327,7 @@ sealed interface DeviceShortcutResult {
         val skippedComponentIds: Set<String> = emptySet(),
         val authorizationEvidence: List<AuthorizationActionEvidence> = emptyList(),
         val availabilityEvidence: List<ManagedApplicationAvailabilityEvidence> = emptyList(),
+        val authorizationConfirmation: DeviceAuthorizationConfirmation = DeviceAuthorizationConfirmation.UNKNOWN,
     ) : DeviceShortcutResult
 }
 

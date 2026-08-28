@@ -27,21 +27,31 @@ import com.ninepointnine.helper.domain.device.DeviceConnectionAttempt
 import com.ninepointnine.helper.domain.device.DeviceConnectionCheck
 import com.ninepointnine.helper.domain.device.DeviceConnectionFactory
 import com.ninepointnine.helper.domain.device.DeviceConnectionLease
+import com.ninepointnine.helper.domain.device.DeviceActionFailure
 import com.ninepointnine.helper.domain.device.DeviceDiscovery
 import com.ninepointnine.helper.domain.device.DeviceDiscoveryResult
 import com.ninepointnine.helper.domain.device.DeviceEndpoint
 import com.ninepointnine.helper.domain.device.DeviceIdentity
+import com.ninepointnine.helper.domain.device.InstalledArtifactEvidence
 import com.ninepointnine.helper.domain.session.ComponentCheck
 import com.ninepointnine.helper.domain.session.ComponentDescriptor
 import com.ninepointnine.helper.domain.session.DeviceConnectionStatus
 import com.ninepointnine.helper.domain.session.InstallationSession
 import com.ninepointnine.helper.domain.session.InstallationBatchPlan
+import com.ninepointnine.helper.domain.session.InstallationBatchReceipt
+import com.ninepointnine.helper.domain.session.InstallationComponentReceipt
 import com.ninepointnine.helper.domain.session.InstallationSessionCommand
 import com.ninepointnine.helper.domain.session.InstallationSessionEvent
 import com.ninepointnine.helper.domain.session.InstallationSessionSnapshot
 import com.ninepointnine.helper.domain.session.InstallationSessionState
 import com.ninepointnine.helper.domain.session.InstallationStrategy
 import com.ninepointnine.helper.domain.session.InstallationFlow
+import com.ninepointnine.helper.domain.session.InstallationStageReceipt
+import com.ninepointnine.helper.domain.session.InstallationStageReceiptStatus
+import com.ninepointnine.helper.domain.session.AuthorizationStageReceipt
+import com.ninepointnine.helper.domain.session.AuthorizationStageReceiptStatus
+import com.ninepointnine.helper.domain.session.AvailabilityStageReceipt
+import com.ninepointnine.helper.domain.session.AvailabilityStageReceiptStatus
 import com.ninepointnine.helper.domain.session.ArtifactCatalogStage
 import com.ninepointnine.helper.domain.session.MaintenanceInstallationOption
 import com.ninepointnine.helper.domain.session.MaintenanceInstallationSelection
@@ -284,7 +294,10 @@ class InstallerRuntimeTest {
 
     @Test
     fun `runtime composes discovery catalog and artifact preparation through one session generation`() = runTest {
-        val manifests = listOf(manifest("lyrics"), manifest("desktop"))
+        val manifests = listOf(
+            manifest("lyrics").copy(packageName = "com.tcrrry.desktoplyrics"),
+            manifest("desktop").copy(packageName = "com.tcrrry.desktop"),
+        )
         val preparedIds = mutableListOf<String>()
         val runtime = InstallerRuntime(
             session = InstallationSession(),
@@ -369,10 +382,10 @@ class InstallerRuntimeTest {
                     },
                 )
             },
-            executeDeviceInstallationWithStrategy = { connection, artifacts, strategy, _ ->
+            executeDeviceInstallationWithBatch = { connection, artifacts, batch, _ ->
                 installationConnection = connection
                 installationComponentIds = artifacts.map { it.manifest.componentId }
-                installationStrategy = strategy
+                installationStrategy = batch.strategy
             },
             coroutineContext = UnconfinedTestDispatcher(testScheduler),
         )
@@ -398,10 +411,15 @@ class InstallerRuntimeTest {
     }
 
     @Test
-    fun `runtime refuses to execute when prepared result omits an unfailed selected component`() = runTest {
-        val manifests = listOf(manifest("lyrics"), manifest("desktop"))
+    fun `runtime executes prepared components and records preparation failures in one batch receipt`() = runTest {
+        val manifests = listOf(
+            manifest("lyrics").copy(packageName = "com.tcrrry.desktoplyrics"),
+            manifest("desktop").copy(packageName = "com.tcrrry.desktop"),
+        )
         val lease = TrackingConnectionLease()
         var executionCount = 0
+        var executedIds = emptySet<String>()
+        var observedPreparationFailures = emptyMap<String, DeviceActionFailure>()
         val runtime = InstallerRuntime(
             session = InstallationSession(),
             createDiscoveryAdapter = { port -> DeviceDiscoverySessionAdapter(fakeDiscovery(), port) },
@@ -424,7 +442,15 @@ class InstallerRuntimeTest {
                 )
             },
             prepareArtifactsWithResult = { selected, port ->
-                emitArtifactPreparationEvidence(selected, port)
+                port.emit(
+                    InstallationSessionEvent.ArtifactUnavailable(
+                        componentId = "lyrics",
+                        reasonCode = "lyrics_download_failed",
+                        sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                        retryable = true,
+                    ),
+                )
+                emitArtifactPreparationEvidence(selected.filter { it.componentId == "desktop" }, port)
                 ArtifactPreparationResult.Prepared(
                     artifacts = listOf(
                         PreparedArtifact(
@@ -433,9 +459,46 @@ class InstallerRuntimeTest {
                             finalApk = File("desktop.apk"),
                         ),
                     ),
+                    failures = listOf(
+                        ArtifactFailure(
+                            phase = ArtifactFailurePhase.DOWNLOAD,
+                            componentId = "lyrics",
+                            sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                            reasonCode = "lyrics_download_failed",
+                            retryable = true,
+                        ),
+                    ),
                 )
             },
-            executeDeviceInstallationWithBatch = { _, _, _, _ -> executionCount += 1 },
+            executeDeviceInstallationWithBatch = object : InstallationBatchExecutor {
+                override suspend fun execute(
+                    connection: DeviceConnectionLease,
+                    artifacts: List<PreparedArtifact>,
+                    batchPlan: InstallationBatchPlan,
+                    eventPort: InstallationSessionEventPort,
+                ) = error("the production adapter must receive the extended preparation receipt")
+
+                override suspend fun executeWithPreparationFailures(
+                    connection: DeviceConnectionLease,
+                    artifacts: List<PreparedArtifact>,
+                    batchPlan: InstallationBatchPlan,
+                    preparationFailures: Map<String, DeviceActionFailure>,
+                    eventPort: InstallationSessionEventPort,
+                ) {
+                    executionCount += 1
+                    executedIds = artifacts.mapTo(linkedSetOf()) { it.manifest.componentId }
+                    observedPreparationFailures = preparationFailures
+                    // The fake is intentionally a batch boundary only: it
+                    // returns one receipt with the prepared desktop identity
+                    // and leaves lyrics explicitly not attempted.
+                    emitBatchStartAndReceipt(
+                        artifacts = artifacts,
+                        batchPlan = batchPlan,
+                        preparationFailures = preparationFailures,
+                        eventPort = eventPort,
+                    )
+                }
+            },
             coroutineContext = UnconfinedTestDispatcher(testScheduler),
         )
 
@@ -452,10 +515,127 @@ class InstallerRuntimeTest {
         advanceUntilIdle()
 
         val failed = runtime.session.currentSnapshot()
-        assertEquals(0, executionCount)
-        assertEquals(InstallationSessionState.FAILED, failed.state)
-        assertEquals("artifact_preparation_incomplete", failed.failure?.reasonCode)
-        assertTrue("lyrics" in failed.failedComponentIds)
+        assertEquals(1, executionCount)
+        assertEquals(setOf("desktop"), executedIds)
+        assertEquals("lyrics_download_failed", observedPreparationFailures["lyrics"]?.reasonCode)
+        assertEquals(InstallationSessionState.COMPLETED_WITH_ERRORS, failed.state)
+        assertTrue(failed.installationBatchReceipt != null)
+        assertEquals(
+            InstallationStageReceiptStatus.NOT_ATTEMPTED,
+            failed.installationBatchReceipt?.components?.single { it.componentId == "lyrics" }
+                ?.installation?.status,
+        )
+        assertEquals(
+            InstallationStageReceiptStatus.VERIFIED,
+            failed.installationBatchReceipt?.components?.single { it.componentId == "desktop" }
+                ?.installation?.status,
+        )
+        assertEquals(InstallationSessionState.COMPLETED_WITH_ERRORS, failed.state)
+        runtime.close()
+    }
+
+    @Test
+    fun `runtime commits a complete receipt without device write when every preparation fails`() = runTest {
+        val manifests = listOf(
+            manifest("lyrics").copy(packageName = "com.tcrrry.desktoplyrics"),
+            manifest("desktop").copy(packageName = "com.tcrrry.desktop"),
+        )
+        var executionCount = 0
+        var executedIds = emptySet<String>()
+        val runtime = InstallerRuntime(
+            session = InstallationSession(),
+            createDiscoveryAdapter = { port -> DeviceDiscoverySessionAdapter(fakeDiscovery(), port) },
+            createConnectionAdapter = { port ->
+                DeviceConnectionSessionAdapter(
+                    connectionFactory = DeviceConnectionFactory {
+                        DeviceConnectionAttempt.Connected(TrackingConnectionLease())
+                    },
+                    eventPort = port,
+                )
+            },
+            loadCatalog = { port ->
+                port.emit(
+                    InstallationSessionEvent.CatalogResolved(
+                        catalogVersion = "android-v1",
+                        keyId = "test-key",
+                        signatureAlgorithm = "SHA256withECDSA",
+                        manifests = manifests,
+                    ),
+                )
+            },
+            prepareArtifactsWithResult = { selected, port ->
+                selected.forEach { manifest ->
+                    port.emit(
+                        InstallationSessionEvent.ArtifactUnavailable(
+                            componentId = manifest.componentId,
+                            reasonCode = "${manifest.componentId}_download_failed",
+                            sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                            retryable = true,
+                        ),
+                    )
+                }
+                emitArtifactPreparationEvidence(emptyList(), port)
+                ArtifactPreparationResult.Prepared(
+                    artifacts = emptyList(),
+                    failures = selected.map { manifest ->
+                        ArtifactFailure(
+                            phase = ArtifactFailurePhase.DOWNLOAD,
+                            componentId = manifest.componentId,
+                            sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                            reasonCode = "${manifest.componentId}_download_failed",
+                            retryable = true,
+                        )
+                    },
+                )
+            },
+            executeDeviceInstallationWithBatch = object : InstallationBatchExecutor {
+                override suspend fun execute(
+                    connection: DeviceConnectionLease,
+                    artifacts: List<PreparedArtifact>,
+                    batchPlan: InstallationBatchPlan,
+                    eventPort: InstallationSessionEventPort,
+                ) = error("unexpected legacy execution")
+
+                override suspend fun executeWithPreparationFailures(
+                    connection: DeviceConnectionLease,
+                    artifacts: List<PreparedArtifact>,
+                    batchPlan: InstallationBatchPlan,
+                    preparationFailures: Map<String, DeviceActionFailure>,
+                    eventPort: InstallationSessionEventPort,
+                ) {
+                    executionCount += 1
+                    executedIds = artifacts.mapTo(linkedSetOf()) { it.manifest.componentId }
+                    emitBatchStartAndReceipt(
+                        artifacts = artifacts,
+                        batchPlan = batchPlan,
+                        preparationFailures = preparationFailures,
+                        eventPort = eventPort,
+                    )
+                }
+            },
+            coroutineContext = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        runtime.dispatch(InstallationSessionCommand.StartDiscovery)
+        advanceUntilIdle()
+        runtime.dispatch(
+            InstallationSessionCommand.SelectDevice(
+                runtime.session.currentSnapshot().discoveredDevices.single().id,
+            ),
+        )
+        advanceUntilIdle()
+        runtime.dispatch(InstallationSessionCommand.ToggleOptionalComponent("lyrics", selected = true))
+        runtime.dispatch(InstallationSessionCommand.StartInstallation)
+        advanceUntilIdle()
+
+        val completed = runtime.session.currentSnapshot()
+        assertEquals(1, executionCount)
+        assertTrue(executedIds.isEmpty())
+        assertEquals(InstallationSessionState.COMPLETED_WITH_ERRORS, completed.state)
+        assertEquals(2, completed.installationBatchReceipt?.components?.size)
+        assertTrue(completed.installationBatchReceipt?.components?.all {
+            it.installation.status == InstallationStageReceiptStatus.NOT_ATTEMPTED
+        } == true)
         runtime.close()
     }
 
@@ -971,6 +1151,63 @@ class InstallerRuntimeTest {
                     )
                 },
                 archiveDeleted = true,
+            ),
+        )
+    }
+
+    private fun emitBatchStartAndReceipt(
+        artifacts: List<PreparedArtifact>,
+        batchPlan: InstallationBatchPlan,
+        preparationFailures: Map<String, DeviceActionFailure>,
+        eventPort: InstallationSessionEventPort,
+    ) {
+        eventPort.emit(
+            InstallationSessionEvent.InstallationStarted(
+                artifacts.map { it.manifest.componentId }.sorted(),
+            ),
+        )
+        val artifactsById = artifacts.associateBy { it.manifest.componentId }
+        val components = batchPlan.selectedComponentIds.sorted().map { componentId ->
+            val preparationFailure = preparationFailures[componentId]
+            val installation = if (preparationFailure != null) {
+                InstallationStageReceipt(
+                    status = InstallationStageReceiptStatus.NOT_ATTEMPTED,
+                    reasonCode = preparationFailure.reasonCode,
+                    retryable = preparationFailure.retryable,
+                )
+            } else {
+                val manifest = checkNotNull(artifactsById[componentId]).manifest
+                InstallationStageReceipt(
+                    status = InstallationStageReceiptStatus.VERIFIED,
+                    evidence = InstalledArtifactEvidence(
+                        componentId = componentId,
+                        packageName = manifest.packageName,
+                        version = manifest.apkVersion,
+                        apkSizeBytes = manifest.apkSizeBytes,
+                        apkSha256 = manifest.apkSha256,
+                        certificateSha256 = manifest.certificateSha256,
+                    ),
+                )
+            }
+            InstallationComponentReceipt(
+                componentId = componentId,
+                installation = installation,
+                authorization = AuthorizationStageReceipt(
+                    status = AuthorizationStageReceiptStatus.NOT_ATTEMPTED,
+                    reasonCode = "authorization_not_attempted",
+                ),
+                availability = AvailabilityStageReceipt(
+                    status = AvailabilityStageReceiptStatus.NOT_ATTEMPTED,
+                    reasonCode = "availability_not_attempted",
+                ),
+            )
+        }
+        eventPort.emit(
+            InstallationSessionEvent.InstallationBatchCompleted(
+                InstallationBatchReceipt(
+                    batchId = batchPlan.batchId,
+                    components = components,
+                ),
             ),
         )
     }

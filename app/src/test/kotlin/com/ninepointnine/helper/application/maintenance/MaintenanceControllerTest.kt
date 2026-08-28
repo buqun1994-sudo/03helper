@@ -30,6 +30,7 @@ import com.ninepointnine.helper.domain.session.DeviceConnectionStatus
 import com.ninepointnine.helper.domain.session.InstallationSessionEvent
 import com.ninepointnine.helper.domain.session.InstallationSessionSnapshot
 import com.ninepointnine.helper.domain.session.InstallationSessionState
+import com.ninepointnine.helper.domain.session.InstallationStrategy
 import com.ninepointnine.helper.domain.session.MaintenanceActionId
 import com.ninepointnine.helper.domain.session.MaintenanceAuthorizationFlowState
 import com.ninepointnine.helper.domain.session.MaintenanceAuthorizationSnapshot
@@ -553,7 +554,10 @@ class MaintenanceControllerTest {
         var repairResult: MaintenanceDeviceResult = MaintenanceDeviceResult.Completed("authorization_repaired")
         var repairManifests: List<ArtifactManifest> = emptyList()
 
-        override suspend fun install(artifacts: List<InstallableArtifact>): DeviceInstallResult =
+        override suspend fun installBatch(
+            artifacts: List<InstallableArtifact>,
+            strategy: InstallationStrategy,
+        ): DeviceInstallResult =
             DeviceInstallResult.Failed(com.ninepointnine.helper.domain.device.DeviceActionFailure("unused", retryable = false))
 
         override suspend fun runShortcut(

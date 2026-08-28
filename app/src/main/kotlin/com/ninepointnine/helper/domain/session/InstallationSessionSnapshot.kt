@@ -61,6 +61,8 @@ data class InstallationSessionSnapshot(
     val installationFlow: InstallationFlow = InstallationFlow.INITIAL_INSTALL,
     /** Immutable component decisions for the current installation attempt. */
     val installationBatch: InstallationBatchPlan? = null,
+    /** Immutable device receipt committed once for the current batch. */
+    val installationBatchReceipt: InstallationBatchReceipt? = null,
 )
 
 data class DeviceSummary(
@@ -261,6 +263,9 @@ internal fun InstallationSessionSnapshot.confirmationPendingComponentIds(): Set<
 }
 
 fun InstallationSessionSnapshot.resolveInstallationResult(): InstallationResultSummary {
+    installationBatchReceipt?.let { receipt ->
+        return receipt.toResultSummary(this)
+    }
     val batch = installationBatch
     val resultIds = batch?.resultComponentIds
     val rows = if (resultIds == null) {
@@ -360,7 +365,7 @@ fun InstallationSessionSnapshot.resolveInstallationResult(): InstallationResultS
         AuthorizationPlanFactory.DESKTOP_COMPONENT_ID !in failedIds
     return InstallationResultSummary(
         kind = kind,
-        componentResults = rows,
+        componentResults = rows.map { row -> row.copy(status = row.derivedStatus) },
         failureReasonCode = failureReasonCode,
         installationFlow = installationFlow,
         failureStage = failureStage,
@@ -704,4 +709,5 @@ data class SessionCheckpoint(
     val artifactCatalogStage: ArtifactCatalogStage = ArtifactCatalogStage.NOT_LOADED,
     val installationFlow: InstallationFlow = InstallationFlow.INITIAL_INSTALL,
     val installationBatch: InstallationBatchPlan? = null,
+    val installationBatchReceipt: InstallationBatchReceipt? = null,
 )

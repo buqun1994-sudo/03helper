@@ -6,10 +6,12 @@ import com.ninepointnine.helper.BuildConfig
 import com.ninepointnine.helper.application.artifact.ArtifactCatalogSessionAdapter
 import com.ninepointnine.helper.application.artifact.ArtifactPreparationCoordinator
 import com.ninepointnine.helper.application.artifact.ArtifactPreparationResult
+import com.ninepointnine.helper.application.artifact.PreparedArtifact
 import com.ninepointnine.helper.application.artifact.InstallerCatalogLoader
 import com.ninepointnine.helper.application.device.DeviceConnectionSessionAdapter
 import com.ninepointnine.helper.application.device.DeviceDiscoverySessionAdapter
 import com.ninepointnine.helper.application.device.DeviceInstallationCoordinator
+import com.ninepointnine.helper.application.session.InstallationSessionEventPort
 import com.ninepointnine.helper.application.maintenance.MaintenanceController
 import com.ninepointnine.helper.application.maintenance.MaintenanceDiagnosticStore
 import com.ninepointnine.helper.application.maintenance.MaintenanceSessionStore
@@ -35,7 +37,10 @@ import com.ninepointnine.helper.data.web.LanzouWebSourceAdapter
 import com.ninepointnine.helper.data.web.LanzouWebViewHostFactory
 import com.ninepointnine.helper.domain.artifact.ReleaseSourcePolicy
 import com.ninepointnine.helper.domain.artifact.ArtifactVersion
+import com.ninepointnine.helper.domain.device.DeviceActionFailure
+import com.ninepointnine.helper.domain.device.DeviceConnectionLease
 import com.ninepointnine.helper.domain.session.InstallationSession
+import com.ninepointnine.helper.domain.session.InstallationBatchPlan
 import com.ninepointnine.helper.domain.session.InstallationSessionSnapshot
 import com.ninepointnine.helper.domain.session.InstallationSessionState
 import java.io.File
@@ -174,21 +179,44 @@ object ProductionInstallerRuntimeFactory {
                     }
                 }
             },
-            executeDeviceInstallationWithBatch = { connection, artifacts, batchPlan, eventPort ->
-                try {
-                    DeviceInstallationCoordinator(eventPort).execute(
-                        connection = connection,
-                        artifacts = artifacts,
-                        strategy = batchPlan.strategy,
-                        flow = batchPlan.flow,
-                        batchPlan = batchPlan,
-                    )
-                } finally {
-                    // Every install attempt, including a partial failure, ends
-                    // with disposal of private transfer and extraction files.
-                    artifactCache.clearPrivateCache()
+            executeDeviceInstallationWithBatch = object : InstallationBatchExecutor {
+                override suspend fun execute(
+                    connection: DeviceConnectionLease,
+                    artifacts: List<PreparedArtifact>,
+                    batchPlan: InstallationBatchPlan,
+                    eventPort: InstallationSessionEventPort,
+                ) {
+                    try {
+                        DeviceInstallationCoordinator(eventPort).executeBatch(
+                            connection = connection,
+                            artifacts = artifacts,
+                            batchPlan = batchPlan,
+                        )
+                    } finally {
+                        artifactCache.clearPrivateCache()
+                    }
                 }
-                Unit
+
+                override suspend fun executeWithPreparationFailures(
+                    connection: DeviceConnectionLease,
+                    artifacts: List<PreparedArtifact>,
+                    batchPlan: InstallationBatchPlan,
+                    preparationFailures: Map<String, DeviceActionFailure>,
+                    eventPort: InstallationSessionEventPort,
+                ) {
+                    try {
+                        DeviceInstallationCoordinator(eventPort).executeBatch(
+                            connection = connection,
+                            artifacts = artifacts,
+                            batchPlan = batchPlan,
+                            preparationFailures = preparationFailures,
+                        )
+                    } finally {
+                        // Every install attempt, including a partial failure, ends
+                        // with disposal of private transfer and extraction files.
+                        artifactCache.clearPrivateCache()
+                    }
+                }
             },
             maintenanceController = MaintenanceController(
                 artifactCache = artifactCache,

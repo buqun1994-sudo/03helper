@@ -10,11 +10,37 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.collectAsState
+import com.ninepointnine.helper.domain.artifact.ApkExtractionEvidence
+import com.ninepointnine.helper.domain.artifact.ArchiveDownloadEvidence
+import com.ninepointnine.helper.domain.artifact.ArchiveVerificationEvidence
+import com.ninepointnine.helper.domain.artifact.ArtifactManifest
+import com.ninepointnine.helper.domain.artifact.ArtifactSource
+import com.ninepointnine.helper.domain.artifact.ArtifactSourceKind
+import com.ninepointnine.helper.domain.artifact.ArtifactVerification
+import com.ninepointnine.helper.domain.artifact.ArtifactVersion
+import com.ninepointnine.helper.domain.artifact.CompatibilityRange
+import com.ninepointnine.helper.domain.artifact.SourceSelectionEvidence
+import com.ninepointnine.helper.domain.device.AuthorizationAction
+import com.ninepointnine.helper.domain.device.AuthorizationActionEvidence
+import com.ninepointnine.helper.domain.device.AuthorizationPlanBuildResult
+import com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
+import com.ninepointnine.helper.domain.device.AuthorizationValueState
+import com.ninepointnine.helper.domain.device.DeviceAvailabilityEvidence
+import com.ninepointnine.helper.domain.device.InstalledArtifactEvidence
+import com.ninepointnine.helper.domain.session.ArtifactCatalogStage
+import com.ninepointnine.helper.domain.session.AuthorizationStageReceipt
+import com.ninepointnine.helper.domain.session.AuthorizationStageReceiptStatus
+import com.ninepointnine.helper.domain.session.AvailabilityStageReceipt
+import com.ninepointnine.helper.domain.session.AvailabilityStageReceiptStatus
 import com.ninepointnine.helper.domain.session.ComponentCheck
 import com.ninepointnine.helper.domain.session.ComponentDescriptor
 import com.ninepointnine.helper.domain.session.DeviceConnectionStatus
 import com.ninepointnine.helper.domain.session.DeviceSummary
 import com.ninepointnine.helper.domain.session.InstallationSession
+import com.ninepointnine.helper.domain.session.InstallationBatchReceipt
+import com.ninepointnine.helper.domain.session.InstallationComponentReceipt
+import com.ninepointnine.helper.domain.session.InstallationStageReceipt
+import com.ninepointnine.helper.domain.session.InstallationStageReceiptStatus
 import com.ninepointnine.helper.domain.session.InstallationSessionCommand
 import com.ninepointnine.helper.domain.session.InstallationSessionEvent
 import com.ninepointnine.helper.domain.session.InstallationSessionSnapshot
@@ -56,7 +82,15 @@ private fun DebugScenarioRoot(scenario: String) {
                 ),
             )
         } else {
-            InstallationSession(componentCatalog = DebugScenarioFixtures.components)
+            InstallationSession(
+                componentCatalog = DebugScenarioFixtures.components,
+                initialSnapshot = InstallationSessionSnapshot(
+                    state = InstallationSessionState.IDLE,
+                    components = DebugScenarioFixtures.components,
+                    artifactManifests = DebugScenarioFixtures.manifests,
+                    artifactCatalogStage = ArtifactCatalogStage.PREPARED,
+                ),
+            )
         }
     }
     val snapshot by session.snapshots.collectAsState()
@@ -192,6 +226,37 @@ internal object DebugScenarioFixtures {
         ),
     )
 
+    val manifests = components.mapIndexed { index, component ->
+        val versionCode = (index + 1).toLong()
+        ArtifactManifest(
+            schemaVersion = 1,
+            componentId = component.id,
+            displayName = component.displayName,
+            required = component.required,
+            version = ArtifactVersion(component.versionLabel ?: "1.0", versionCode),
+            compatibility = CompatibilityRange(minAndroidSdk = 26, maxAndroidSdk = 30),
+            archiveFileName = "${component.id}.zip",
+            archiveSizeBytes = (index + 1) * 1_024L,
+            archiveSha256 = "1${index + 1}".repeat(32),
+            apkEntryName = "${component.id}.apk",
+            apkSizeBytes = (index + 1) * 512L,
+            apkSha256 = "2${index + 1}".repeat(32),
+            packageName = when (component.id) {
+                AuthorizationPlanFactory.DESKTOP_COMPONENT_ID -> AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME
+                AuthorizationPlanFactory.LYRICS_COMPONENT_ID -> AuthorizationPlanFactory.LYRICS_PACKAGE_NAME
+                else -> AuthorizationPlanFactory.FILE_MANAGER_PACKAGE_NAME
+            },
+            apkVersion = ArtifactVersion(component.versionLabel ?: "1.0", versionCode),
+            certificateSha256 = "33".repeat(32),
+            sources = listOf(
+                ArtifactSource(
+                    kind = ArtifactSourceKind.LANZOU_SHARE,
+                    url = "https://wwatl.lanzouw.com/i${component.id}",
+                ),
+            ),
+        )
+    }
+
     internal val connectedDevice = DeviceSummary(
         id = "icar-03-demo",
         displayName = "iCAR 03",
@@ -318,15 +383,16 @@ internal object DebugScenarioFixtures {
     ) {
         driver.connect(selectOptional = includeOptional, animated = animated)
         driver.beginInstallation(animated)
-        driver.event(InstallationSessionEvent.SourceResolved("debug-source"), animated)
-        driver.event(InstallationSessionEvent.ArchiveDownloaded(1024L, "debug-archive-sha"), animated)
-        driver.event(InstallationSessionEvent.ArchiveVerified(verified = true), animated)
-        driver.event(InstallationSessionEvent.ApkExtracted("component.apk", 512L, "debug-apk-sha"), animated)
-        driver.event(InstallationSessionEvent.ArtifactsVerified(driver.checks()), animated)
+        driver.sourceResolved(animated)
+        driver.archivesDownloaded(animated)
+        driver.archivesVerified(animated)
+        driver.apksExtracted(animated)
+        driver.artifactsVerified(animated)
         driver.event(InstallationSessionEvent.InstallationStarted(), animated)
-        driver.event(InstallationSessionEvent.InstallationCompleted(driver.checks()), animated)
-        driver.event(InstallationSessionEvent.AuthorizationCompleted(driver.checks()), animated)
-        driver.event(InstallationSessionEvent.DeviceVerified(driver.checks()), animated)
+        driver.event(
+            InstallationSessionEvent.InstallationBatchCompleted(driver.successfulReceipt()),
+            animated,
+        )
     }
 }
 
@@ -351,6 +417,10 @@ private class FakeSessionDriver(
     suspend fun connect(selectOptional: Boolean, animated: Boolean = false) {
         discover(animated)
         command(InstallationSessionCommand.SelectDevice(DebugScenarioFixtures.connectedDevice.id), animated)
+        event(
+            InstallationSessionEvent.DeviceConnectionConfirmed(DebugScenarioFixtures.connectedDevice),
+            animated,
+        )
         if (selectOptional) {
             command(
                 InstallationSessionCommand.ToggleOptionalComponent("lyrics", selected = true),
@@ -366,6 +436,193 @@ private class FakeSessionDriver(
     suspend fun beginInstallation(animated: Boolean = false) {
         command(InstallationSessionCommand.StartInstallation, animated)
         command(InstallationSessionCommand.BeginPipeline, animated)
+    }
+
+    suspend fun sourceResolved(animated: Boolean) {
+        event(
+            InstallationSessionEvent.SourceResolved(
+                sourceId = "debug-source",
+                selections = preparationManifests().map {
+                    SourceSelectionEvidence(it.componentId, ArtifactSourceKind.LANZOU_SHARE)
+                },
+            ),
+            animated,
+        )
+    }
+
+    suspend fun archivesDownloaded(animated: Boolean) {
+        val manifests = preparationManifests()
+        event(
+            InstallationSessionEvent.ArchiveDownloaded(
+                sizeBytes = manifests.sumOf { it.archiveSizeBytes },
+                sha256 = manifests.first().archiveSha256,
+                archives = manifests.map {
+                    ArchiveDownloadEvidence(it.componentId, it.archiveSizeBytes, it.archiveSha256)
+                },
+            ),
+            animated,
+        )
+    }
+
+    suspend fun archivesVerified(animated: Boolean) {
+        val manifests = preparationManifests()
+        event(
+            InstallationSessionEvent.ArchiveVerified(
+                verified = true,
+                verifications = manifests.map {
+                    ArchiveVerificationEvidence(it.componentId, it.archiveSizeBytes, it.archiveSha256)
+                },
+            ),
+            animated,
+        )
+    }
+
+    suspend fun apksExtracted(animated: Boolean) {
+        val manifests = preparationManifests()
+        event(
+            InstallationSessionEvent.ApkExtracted(
+                entryName = manifests.first().apkEntryName,
+                sizeBytes = manifests.sumOf { it.apkSizeBytes },
+                sha256 = manifests.first().apkSha256,
+                extractions = manifests.map {
+                    ApkExtractionEvidence(it.componentId, it.apkEntryName, it.apkSizeBytes, it.apkSha256)
+                },
+            ),
+            animated,
+        )
+    }
+
+    suspend fun artifactsVerified(animated: Boolean) {
+        val manifests = preparationManifests()
+        event(
+            InstallationSessionEvent.ArtifactsVerified(
+                checks = manifests.map { ComponentCheck(it.componentId, passed = true) },
+                verifications = manifests.map { manifest ->
+                    ArtifactVerification(
+                        componentId = manifest.componentId,
+                        sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                        archiveSizeBytes = manifest.archiveSizeBytes,
+                        archiveSha256 = manifest.archiveSha256,
+                        apkSizeBytes = manifest.apkSizeBytes,
+                        apkSha256 = manifest.apkSha256,
+                        packageName = manifest.packageName,
+                        apkVersion = manifest.apkVersion,
+                        certificateSha256 = manifest.certificateSha256,
+                        archiveDeleted = true,
+                    )
+                },
+            ),
+            animated,
+        )
+    }
+
+    fun successfulReceipt(): InstallationBatchReceipt {
+        val snapshot = session.currentSnapshot()
+        val batch = checkNotNull(snapshot.installationBatch)
+        val manifests = snapshot.artifactManifests
+            .filter { it.componentId in batch.selectedComponentIds }
+        val plan = when (val result = AuthorizationPlanFactory.createForManifests(
+            manifests = manifests,
+            requireDesktop = false,
+        )) {
+            is AuthorizationPlanBuildResult.Ready -> result.plan
+            is AuthorizationPlanBuildResult.Rejected -> error(result.reasonCode)
+        }
+        val authorizationEvidence = plan.actions.map(::authorizationEvidence)
+        val manifestsById = manifests.associateBy { it.componentId }
+        return InstallationBatchReceipt(
+            batchId = batch.batchId,
+            components = snapshot.components
+                .map { it.id }
+                .filter { it in batch.selectedComponentIds }
+                .map { componentId ->
+                    val manifest = checkNotNull(manifestsById[componentId])
+                    val componentAuthorization = authorizationEvidence.filter {
+                        it.componentId == componentId
+                    }
+                    InstallationComponentReceipt(
+                        componentId = componentId,
+                        installation = InstallationStageReceipt(
+                            status = InstallationStageReceiptStatus.VERIFIED,
+                            evidence = InstalledArtifactEvidence(
+                                componentId = componentId,
+                                packageName = manifest.packageName,
+                                version = manifest.apkVersion,
+                                apkSizeBytes = manifest.apkSizeBytes,
+                                apkSha256 = manifest.apkSha256,
+                                certificateSha256 = manifest.certificateSha256,
+                            ),
+                            writeConfirmed = true,
+                        ),
+                        authorization = if (componentAuthorization.isEmpty()) {
+                            AuthorizationStageReceipt(AuthorizationStageReceiptStatus.NOT_REQUIRED)
+                        } else {
+                            AuthorizationStageReceipt(
+                                status = AuthorizationStageReceiptStatus.VERIFIED,
+                                evidence = componentAuthorization,
+                            )
+                        },
+                        availability = if (componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID) {
+                            AvailabilityStageReceipt(
+                                status = AvailabilityStageReceiptStatus.VERIFIED,
+                                evidence = DeviceAvailabilityEvidence(
+                                    componentId = componentId,
+                                    packageName = manifest.packageName,
+                                    version = manifest.apkVersion,
+                                    installedArchiveVerified = true,
+                                    launchAttempted = true,
+                                    launcherResolved = true,
+                                    processRunning = true,
+                                    requiredServiceBound = true,
+                                ),
+                            )
+                        } else {
+                            AvailabilityStageReceipt(AvailabilityStageReceiptStatus.NOT_REQUIRED)
+                        },
+                    )
+                },
+        )
+    }
+
+    private fun preparationManifests(): List<ArtifactManifest> {
+        val snapshot = session.currentSnapshot()
+        val preparationIds = checkNotNull(snapshot.installationBatch).preparationComponentIds
+        return snapshot.artifactManifests.filter { it.componentId in preparationIds }
+    }
+
+    private fun authorizationEvidence(action: AuthorizationAction): AuthorizationActionEvidence = when (action) {
+        is AuthorizationAction.EnsureAppOpAllowed -> AuthorizationActionEvidence(
+            componentId = action.componentId,
+            actionId = action.id,
+            before = AuthorizationValueState.DEFAULT,
+            writeApplied = true,
+            after = AuthorizationValueState.ALLOWED,
+        )
+
+        is AuthorizationAction.EnsureRuntimePermissionGranted -> AuthorizationActionEvidence(
+            componentId = action.componentId,
+            actionId = action.id,
+            before = AuthorizationValueState.DENIED,
+            writeApplied = true,
+            after = AuthorizationValueState.GRANTED,
+        )
+
+        is AuthorizationAction.EnsureSecureSettingEnabled -> AuthorizationActionEvidence(
+            componentId = action.componentId,
+            actionId = action.id,
+            before = AuthorizationValueState.DISABLED,
+            writeApplied = true,
+            after = AuthorizationValueState.ENABLED,
+        )
+
+        is AuthorizationAction.AppendSecureComponent -> AuthorizationActionEvidence(
+            componentId = action.componentId,
+            actionId = action.id,
+            before = AuthorizationValueState.COMPONENT_ABSENT,
+            writeApplied = true,
+            after = AuthorizationValueState.COMPONENT_PRESENT,
+            preservedEntryCount = 0,
+        )
     }
 
     fun checks(): List<ComponentCheck> = session.currentSnapshot().components

@@ -66,54 +66,18 @@ class InstallationSessionTest {
             packageName = "com.ninepointnine.desktopcast",
             required = false,
         )
-        val availability = DeviceAvailabilityEvidence(
-            componentId = cast.componentId,
-            packageName = cast.packageName,
-            version = cast.apkVersion,
-            installedArchiveVerified = true,
-            launchAttempted = false,
-            launcherResolved = false,
-            processRunning = false,
-            requiredServiceBound = null,
-        )
-        val session = InstallationSession(
-            initialSnapshot = InstallationSessionSnapshot(
-                state = InstallationSessionState.VERIFYING_DEVICE,
-                device = confirmedDevice.copy(
-                    androidSdk = 28,
-                    capabilities = setOf(DeviceCapability.ADB_TCP, DeviceCapability.IDENTITY_READ),
-                ),
-                components = listOf(cast.toComponentDescriptor()),
-                selectedOptionalComponentIds = setOf(cast.componentId),
-                artifactManifests = listOf(cast),
-                artifactCatalogStage = ArtifactCatalogStage.PREPARED,
-                evidence = SessionEvidence(
-                    artifactsVerified = setOf(cast.componentId),
-                    installed = setOf(cast.componentId),
-                    configured = setOf(cast.componentId),
-                    installation = mapOf(
-                        cast.componentId to InstalledArtifactEvidence(
-                            componentId = cast.componentId,
-                            packageName = cast.packageName,
-                            version = cast.apkVersion,
-                            apkSizeBytes = cast.apkSizeBytes,
-                            apkSha256 = cast.apkSha256,
-                            certificateSha256 = cast.certificateSha256,
-                        ),
-                    ),
-                    authorizationActions = emptyList(),
-                ),
-            ),
-        )
+        val session = batchReceiptSession(listOf(cast))
+        val receipt = successfulReceipt(session)
 
         session.dispatchEvent(
-            InstallationSessionEvent.DeviceVerified(
-                checks = listOf(ComponentCheck(cast.componentId, passed = true)),
-                evidence = listOf(availability),
-            ),
+            InstallationSessionEvent.InstallationBatchCompleted(receipt),
         )
 
         assertEquals(InstallationSessionState.SUCCEEDED, session.currentSnapshot().state)
+        assertEquals(
+            AuthorizationStageReceiptStatus.NOT_REQUIRED,
+            receipt.components.single().authorization.status,
+        )
         assertTrue(session.currentSnapshot().evidence.authorizationActions.isEmpty())
     }
 
@@ -128,49 +92,10 @@ class InstallationSessionTest {
             status = ComponentStatus.DIRECTORY_MISSING,
             errorReason = "lanzou_folder_missing_cast",
         )
-        val installedEvidence = InstalledArtifactEvidence(
-            componentId = cast.componentId,
-            packageName = cast.packageName,
-            version = cast.apkVersion,
-            apkSizeBytes = cast.apkSizeBytes,
-            apkSha256 = cast.apkSha256,
-            certificateSha256 = cast.certificateSha256,
-        )
-        val availability = DeviceAvailabilityEvidence(
-            componentId = cast.componentId,
-            packageName = cast.packageName,
-            version = cast.apkVersion,
-            installedArchiveVerified = true,
-            launchAttempted = false,
-            launcherResolved = false,
-            processRunning = false,
-            requiredServiceBound = null,
-        )
-        val session = InstallationSession(
-            initialSnapshot = InstallationSessionSnapshot(
-                state = InstallationSessionState.VERIFYING_DEVICE,
-                device = confirmedDevice.copy(
-                    androidSdk = 28,
-                    capabilities = setOf(DeviceCapability.ADB_TCP, DeviceCapability.IDENTITY_READ),
-                ),
-                components = listOf(descriptor),
-                selectedOptionalComponentIds = setOf(cast.componentId),
-                artifactManifests = listOf(cast),
-                artifactCatalogStage = ArtifactCatalogStage.PREPARED,
-                evidence = SessionEvidence(
-                    artifactsVerified = setOf(cast.componentId),
-                    installed = setOf(cast.componentId),
-                    configured = setOf(cast.componentId),
-                    installation = mapOf(cast.componentId to installedEvidence),
-                ),
-            ),
-        )
+        val session = batchReceiptSession(listOf(cast), descriptors = listOf(descriptor))
 
         session.dispatchEvent(
-            InstallationSessionEvent.DeviceVerified(
-                checks = listOf(ComponentCheck(cast.componentId, passed = true)),
-                evidence = listOf(availability),
-            ),
+            InstallationSessionEvent.InstallationBatchCompleted(successfulReceipt(session)),
         )
 
         val snapshot = session.currentSnapshot()
@@ -181,7 +106,7 @@ class InstallationSessionTest {
     }
 
     @Test
-    fun `verified installed manifests are retained before authorization completes`() {
+    fun `batch receipt atomically retains installed manifests when authorization fails`() {
         val manifests = listOf(
             evidenceManifest(
                 componentId = "desktop",
@@ -194,46 +119,28 @@ class InstallationSessionTest {
                 required = false,
             ),
         )
-        val componentIds = manifests.map { it.componentId }.toSet()
-        val session = InstallationSession(
-            initialSnapshot = InstallationSessionSnapshot(
-                state = InstallationSessionState.INSTALLING,
-                device = confirmedDevice.copy(
-                    androidSdk = 28,
-                    capabilities = setOf(DeviceCapability.ADB_TCP, DeviceCapability.IDENTITY_READ),
+        val componentIds = manifests.mapTo(linkedSetOf()) { it.componentId }
+        val session = batchReceiptSession(manifests)
+        val receipt = successfulReceipt(session).mapComponent("lyrics") { component ->
+            component.copy(
+                authorization = AuthorizationStageReceipt(
+                    status = AuthorizationStageReceiptStatus.FAILED,
+                    reasonCode = "authorization_failed",
+                    retryable = true,
                 ),
-                components = manifests.map { it.toComponentDescriptor() },
-                selectedOptionalComponentIds = setOf("lyrics"),
-                artifactManifests = manifests,
-                artifactCatalogStage = ArtifactCatalogStage.PREPARED,
-                evidence = SessionEvidence(artifactsVerified = componentIds),
-            ),
-        )
+                availability = AvailabilityStageReceipt(
+                    status = AvailabilityStageReceiptStatus.NOT_ATTEMPTED,
+                    reasonCode = "availability_not_attempted_authorization_incomplete",
+                ),
+            )
+        }
 
         session.dispatchEvent(
-            InstallationSessionEvent.InstallationCompleted(
-                checks = componentIds.map { ComponentCheck(it, passed = true) },
-                evidence = manifests.map { manifest ->
-                    InstalledArtifactEvidence(
-                        componentId = manifest.componentId,
-                        packageName = manifest.packageName,
-                        version = manifest.apkVersion,
-                        apkSizeBytes = manifest.apkSizeBytes,
-                        apkSha256 = manifest.apkSha256,
-                        certificateSha256 = manifest.certificateSha256,
-                    )
-                },
-            ),
-        )
-        session.dispatchEvent(
-            InstallationSessionEvent.FatalError(
-                category = FailureCategory.CONFIGURATION,
-                reasonCode = "authorization_failed",
-            ),
+            InstallationSessionEvent.InstallationBatchCompleted(receipt),
         )
 
         val snapshot = session.currentSnapshot()
-        assertEquals(InstallationSessionState.FAILED, snapshot.state)
+        assertEquals(InstallationSessionState.COMPLETED_WITH_ERRORS, snapshot.state)
         assertEquals(componentIds, snapshot.maintenance.installedManifests.map { it.componentId }.toSet())
     }
 
@@ -244,16 +151,7 @@ class InstallationSessionTest {
             packageName = AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME,
             required = true,
         )
-        val session = InstallationSession(
-            initialSnapshot = InstallationSessionSnapshot(
-                state = InstallationSessionState.INSTALLING,
-                device = confirmedDevice,
-                components = listOf(manifest.toComponentDescriptor()),
-                artifactManifests = listOf(manifest),
-                artifactCatalogStage = ArtifactCatalogStage.PREPARED,
-                evidence = SessionEvidence(artifactsVerified = setOf("desktop")),
-            ),
-        )
+        val session = batchReceiptSession(listOf(manifest))
         val observed = InstalledArtifactEvidence(
             componentId = manifest.componentId,
             packageName = manifest.packageName,
@@ -265,16 +163,13 @@ class InstallationSessionTest {
             certificateSha256 = manifest.certificateSha256,
         )
 
-        session.dispatchEvent(
-            InstallationSessionEvent.InstallationCompleted(
-                checks = listOf(ComponentCheck("desktop", passed = true)),
-                evidence = listOf(observed),
-                writeConfirmedComponentIds = setOf("desktop"),
-            ),
-        )
+        val receipt = successfulReceipt(session).mapComponent("desktop") { component ->
+            component.copy(installation = component.installation.copy(evidence = observed))
+        }
+        session.dispatchEvent(InstallationSessionEvent.InstallationBatchCompleted(receipt))
 
         val snapshot = session.currentSnapshot()
-        assertEquals(InstallationSessionState.AUTHORIZING, snapshot.state)
+        assertEquals(InstallationSessionState.SUCCEEDED, snapshot.state)
         assertEquals(observed, snapshot.evidence.installation.getValue("desktop"))
         assertTrue(snapshot.componentResults.single().installed)
     }
@@ -286,63 +181,10 @@ class InstallationSessionTest {
             evidenceManifest("lyrics", AuthorizationPlanFactory.LYRICS_PACKAGE_NAME, required = false),
             evidenceManifest("file-manager", AuthorizationPlanFactory.FILE_MANAGER_PACKAGE_NAME, required = false),
         )
-        val selected = manifests.map { it.componentId }.toSet()
-        val plan = (AuthorizationPlanFactory.createForManifests(manifests) as AuthorizationPlanBuildResult.Ready).plan
-        val installation = manifests.associate { manifest ->
-            manifest.componentId to InstalledArtifactEvidence(
-                componentId = manifest.componentId,
-                packageName = manifest.packageName,
-                version = manifest.apkVersion,
-                apkSizeBytes = manifest.apkSizeBytes,
-                apkSha256 = manifest.apkSha256,
-                certificateSha256 = manifest.certificateSha256,
-            )
-        }
-        val availability = manifests.map { manifest ->
-            val desktop = manifest.componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
-            DeviceAvailabilityEvidence(
-                componentId = manifest.componentId,
-                packageName = manifest.packageName,
-                version = manifest.apkVersion,
-                installedArchiveVerified = true,
-                launchAttempted = desktop,
-                launcherResolved = desktop,
-                processRunning = desktop,
-                requiredServiceBound = if (desktop) true else null,
-            )
-        }
-        val device = DeviceSummary(
-            id = "evidence-device",
-            displayName = "Evidence device",
-            connectionStatus = DeviceConnectionStatus.CONFIRMED,
-            androidSdk = 28,
-            capabilities = setOf(DeviceCapability.ADB_TCP, DeviceCapability.IDENTITY_READ),
-        )
-        val session = InstallationSession(
-            initialSnapshot = InstallationSessionSnapshot(
-                state = InstallationSessionState.VERIFYING_DEVICE,
-                device = device,
-                components = manifests.map { it.toComponentDescriptor() },
-                selectedOptionalComponentIds = setOf("lyrics", "file-manager"),
-                artifactManifests = manifests,
-                artifactCatalogStage = ArtifactCatalogStage.PREPARED,
-                evidence = SessionEvidence(
-                    artifactsVerified = selected,
-                    installed = selected,
-                    configured = selected,
-                    available = selected,
-                    installation = installation,
-                    authorizationActions = validAuthorizationEvidence(plan),
-                    availability = availability.associateBy { it.componentId },
-                ),
-            ),
-        )
+        val session = batchReceiptSession(manifests)
 
         session.dispatchEvent(
-            InstallationSessionEvent.DeviceVerified(
-                checks = selected.map { ComponentCheck(it, passed = true) },
-                evidence = availability,
-            ),
+            InstallationSessionEvent.InstallationBatchCompleted(successfulReceipt(session)),
         )
 
         assertEquals(InstallationSessionState.SUCCEEDED, session.currentSnapshot().state)
@@ -350,32 +192,31 @@ class InstallationSessionTest {
     }
 
     @Test
-    fun `normal path follows every guarded stage and requires all evidence`() {
+    fun `normal path reaches one terminal receipt commit after all guarded preparation stages`() {
         val session = connectedSession(includeOptional = true)
 
         assertEquals(InstallationSessionState.CONNECTED, session.currentSnapshot().state)
+        resolveTrustedCatalog(session)
         session.dispatch(InstallationSessionCommand.StartInstallation)
         assertEquals(InstallationSessionState.SELECTION_CONFIRMED, session.currentSnapshot().state)
         session.dispatch(InstallationSessionCommand.BeginPipeline)
         assertEquals(InstallationSessionState.RESOLVING_SOURCE, session.currentSnapshot().state)
 
-        session.dispatchEvent(InstallationSessionEvent.SourceResolved("fixture"))
+        dispatchSourceResolved(session)
         assertEquals(InstallationSessionState.DOWNLOADING_ARCHIVE, session.currentSnapshot().state)
-        session.dispatchEvent(InstallationSessionEvent.ArchiveDownloaded(1024L, "archive-sha"))
+        dispatchArchivesDownloaded(session)
         assertEquals(InstallationSessionState.VERIFYING_ARCHIVE, session.currentSnapshot().state)
-        session.dispatchEvent(InstallationSessionEvent.ArchiveVerified(true))
+        dispatchArchivesVerified(session)
         assertEquals(InstallationSessionState.EXTRACTING_APK, session.currentSnapshot().state)
-        session.dispatchEvent(InstallationSessionEvent.ApkExtracted("component.apk", 512L, "apk-sha"))
+        dispatchApksExtracted(session)
         assertEquals(InstallationSessionState.VERIFYING_ARTIFACTS, session.currentSnapshot().state)
-        session.dispatchEvent(InstallationSessionEvent.ArtifactsVerified(checks(session)))
+        dispatchArtifactsVerified(session)
         assertEquals(InstallationSessionState.VERIFYING_ARTIFACTS, session.currentSnapshot().state)
         session.dispatchEvent(InstallationSessionEvent.InstallationStarted())
         assertEquals(InstallationSessionState.INSTALLING, session.currentSnapshot().state)
-        session.dispatchEvent(InstallationSessionEvent.InstallationCompleted(checks(session)))
-        assertEquals(InstallationSessionState.AUTHORIZING, session.currentSnapshot().state)
-        session.dispatchEvent(InstallationSessionEvent.AuthorizationCompleted(checks(session)))
-        assertEquals(InstallationSessionState.VERIFYING_DEVICE, session.currentSnapshot().state)
-        session.dispatchEvent(InstallationSessionEvent.DeviceVerified(checks(session)))
+        session.dispatchEvent(
+            InstallationSessionEvent.InstallationBatchCompleted(successfulReceipt(session)),
+        )
 
         val snapshot = session.currentSnapshot()
         assertEquals(InstallationSessionState.SUCCEEDED, snapshot.state)
@@ -638,7 +479,7 @@ class InstallationSessionTest {
     @Test
     fun `installation reconnect advances event generations without rebuilding the maintenance batch`() {
         val desktop = fullManifest("desktop", versionCode = 1)
-        val cast = fullManifest("cast", versionCode = 1)
+        val cast = evidenceManifest("cast", "com.ninepointnine.desktopcast", required = false)
         val descriptors = listOf(desktop, cast).map { it.toComponentDescriptor() }
         val vehicle = confirmedDevice.copy(
             androidSdk = 28,
@@ -843,54 +684,51 @@ class InstallationSessionTest {
     }
 
     @Test
-    fun `success evidence is rejected when any category is missing`() {
-        val expected = setOf("desktop")
-        val session = InstallationSession(
-            componentCatalog = components,
-            initialSnapshot = InstallationSessionSnapshot(
-                state = InstallationSessionState.VERIFYING_DEVICE,
-                device = confirmedDevice,
-                components = components,
-                progress = SessionProgress(completedCount = 0, totalCount = 2, indeterminate = true),
-                evidence = SessionEvidence(
-                    installed = expected,
-                    configured = expected,
-                ),
-            ),
+    fun `terminal receipt missing a selected component is rejected`() {
+        val session = batchReceiptSession(
+            listOf(fullManifest("desktop", versionCode = 1), fullManifest("lyrics", versionCode = 1)),
         )
-        session.dispatchEvent(
-            InstallationSessionEvent.DeviceVerified(
-                checks(session),
-            ),
+        val incomplete = successfulReceipt(session).copy(
+            components = successfulReceipt(session).components.filter { it.componentId == "desktop" },
         )
+
+        session.dispatchEvent(InstallationSessionEvent.InstallationBatchCompleted(incomplete))
+
         assertEquals(InstallationSessionState.FAILED, session.currentSnapshot().state)
-        assertEquals("success_evidence_incomplete", session.currentSnapshot().failure?.reasonCode)
+        assertEquals(
+            "installation_batch_receipt_component_set_mismatch",
+            session.currentSnapshot().failure?.reasonCode,
+        )
     }
 
     @Test
     fun `one failed component still reaches a partial result after the remaining app completes`() {
         val session = connectedSession(includeOptional = false)
         session.dispatch(InstallationSessionCommand.ToggleOptionalComponent("lyrics", selected = true))
-        startToDeviceVerification(session)
+        startToInstalling(session)
+        val receipt = successfulReceipt(session).mapComponent("lyrics") { component ->
+            component.copy(
+                availability = AvailabilityStageReceipt(
+                    status = AvailabilityStageReceiptStatus.FAILED,
+                    reasonCode = "availability_check_failed",
+                    retryable = true,
+                ),
+            )
+        }
 
         session.dispatchEvent(
-            InstallationSessionEvent.ComponentFailed(
-                componentId = "lyrics",
-                phase = InstallPhase.VERIFY,
-                reasonCode = "availability_check_failed",
-            ),
-        )
-        session.dispatchEvent(
-            InstallationSessionEvent.DeviceVerified(
-                checks = listOf(ComponentCheck("desktop", passed = true)),
-            ),
+            InstallationSessionEvent.InstallationBatchCompleted(receipt),
         )
 
         val snapshot = session.currentSnapshot()
         assertEquals(InstallationSessionState.COMPLETED_WITH_ERRORS, snapshot.state)
-        assertEquals(setOf("lyrics"), snapshot.failedComponentIds)
+        assertTrue(snapshot.failedComponentIds.isEmpty())
         assertTrue(snapshot.componentResults.first { it.componentId == "desktop" }.available)
         assertFalse(snapshot.componentResults.first { it.componentId == "lyrics" }.available)
+        assertEquals(
+            ComponentResultStatus.AVAILABILITY_INCOMPLETE,
+            snapshot.componentResults.first { it.componentId == "lyrics" }.status,
+        )
 
         session.dispatch(InstallationSessionCommand.EnterMaintenance)
         val maintenance = session.currentSnapshot()
@@ -902,38 +740,28 @@ class InstallationSessionTest {
     fun `written but unverified component is confirmation pending and not an install failure`() {
         val session = connectedSession(includeOptional = false)
         session.dispatch(InstallationSessionCommand.ToggleOptionalComponent("lyrics", selected = true))
-        session.dispatch(InstallationSessionCommand.StartInstallation)
-        session.dispatch(InstallationSessionCommand.BeginPipeline)
-        session.dispatchEvent(InstallationSessionEvent.SourceResolved("fixture"))
-        session.dispatchEvent(InstallationSessionEvent.ArchiveDownloaded(1024L, "archive-sha"))
-        session.dispatchEvent(InstallationSessionEvent.ArchiveVerified(true))
-        session.dispatchEvent(InstallationSessionEvent.ApkExtracted("component.apk", 512L, "apk-sha"))
-        session.dispatchEvent(InstallationSessionEvent.ArtifactsVerified(checks(session)))
-        session.dispatchEvent(InstallationSessionEvent.InstallationStarted())
+        startToInstalling(session)
+        val receipt = successfulReceipt(session).mapComponent("lyrics") { component ->
+            component.copy(
+                installation = InstallationStageReceipt(
+                    status = InstallationStageReceiptStatus.WRITE_CONFIRMED_PENDING_IDENTITY,
+                    reasonCode = "installation_identity_confirmation_pending",
+                    retryable = true,
+                    writeConfirmed = true,
+                ),
+                authorization = AuthorizationStageReceipt(
+                    status = AuthorizationStageReceiptStatus.NOT_ATTEMPTED,
+                    reasonCode = "authorization_not_attempted_installation_unverified",
+                ),
+                availability = AvailabilityStageReceipt(
+                    status = AvailabilityStageReceiptStatus.NOT_ATTEMPTED,
+                    reasonCode = "availability_not_attempted_installation_unverified",
+                ),
+            )
+        }
 
         session.dispatchEvent(
-            InstallationSessionEvent.InstallationCompleted(
-                checks = listOf(ComponentCheck("desktop", passed = true)),
-                writeConfirmedComponentIds = setOf("desktop", "lyrics"),
-                confirmationPendingComponentIds = setOf("lyrics"),
-            ),
-        )
-        assertEquals(InstallationSessionState.AUTHORIZING, session.currentSnapshot().state)
-        assertTrue(session.currentSnapshot().failedComponentIds.isEmpty())
-        assertEquals(
-            ComponentResultStatus.INSTALLATION_PENDING_CONFIRMATION,
-            session.currentSnapshot().componentResults.first { it.componentId == "lyrics" }.status,
-        )
-
-        session.dispatchEvent(
-            InstallationSessionEvent.AuthorizationCompleted(
-                checks = listOf(ComponentCheck("desktop", passed = true)),
-            ),
-        )
-        session.dispatchEvent(
-            InstallationSessionEvent.DeviceVerified(
-                checks = listOf(ComponentCheck("desktop", passed = true)),
-            ),
+            InstallationSessionEvent.InstallationBatchCompleted(receipt),
         )
 
         val snapshot = session.currentSnapshot()
@@ -947,172 +775,186 @@ class InstallationSessionTest {
     }
 
     @Test
-    fun `reused maintenance component may be pending without a fresh write receipt`() {
-        val desktop = fullManifest("desktop", versionCode = 1)
-        val lyrics = fullManifest("lyrics", versionCode = 1)
-        val desktopEvidence = InstalledArtifactEvidence(
-            componentId = desktop.componentId,
-            packageName = desktop.packageName,
-            version = desktop.apkVersion,
-            apkSizeBytes = desktop.apkSizeBytes,
-            apkSha256 = desktop.apkSha256,
-            certificateSha256 = desktop.certificateSha256,
-        )
-        val lyricsEvidence = InstalledArtifactEvidence(
-            componentId = lyrics.componentId,
-            packageName = lyrics.packageName,
-            version = lyrics.apkVersion,
-            apkSizeBytes = lyrics.apkSizeBytes,
-            apkSha256 = lyrics.apkSha256,
-            certificateSha256 = lyrics.certificateSha256,
-        )
-        val plan = InstallationBatchPlan(
-            batchId = 7L,
-            flow = InstallationFlow.MAINTENANCE_INSTALL,
-            strategy = InstallationStrategy.INSTALL_MISSING_ONLY,
-            selectedComponentIds = setOf("desktop", "lyrics"),
-            reusableComponentIds = setOf("desktop"),
-            preparationComponentIds = setOf("lyrics"),
-            resultComponentIds = setOf("lyrics"),
-        )
-        val session = InstallationSession(
-            initialSnapshot = InstallationSessionSnapshot(
-                state = InstallationSessionState.INSTALLING,
-                device = confirmedDevice.copy(
-                    androidSdk = 28,
-                    capabilities = setOf(DeviceCapability.ADB_TCP, DeviceCapability.IDENTITY_READ),
-                ),
-                components = listOf(desktop, lyrics).map { it.toComponentDescriptor() },
-                selectedOptionalComponentIds = setOf("lyrics"),
-                artifactManifests = listOf(desktop, lyrics),
-                artifactCatalogStage = ArtifactCatalogStage.PREPARED,
-                installationFlow = InstallationFlow.MAINTENANCE_INSTALL,
-                installationStrategy = InstallationStrategy.INSTALL_MISSING_ONLY,
-                installationBatch = plan,
-                maintenance = MaintenanceSnapshot(
-                    installedManifests = listOf(desktop),
-                    managedApplications = listOf(
-                        ManagedApplicationStatus(
-                            componentId = desktop.componentId,
-                            packageName = desktop.packageName,
-                            installed = true,
-                            versionCode = desktop.apkVersion.code,
-                        ),
-                    ),
-                    managedApplicationsState = MaintenanceInventoryState.READY,
-                ),
-                evidence = SessionEvidence(
-                    installed = setOf("desktop"),
-                    configured = setOf("desktop"),
-                    available = setOf("desktop"),
-                    installation = mapOf("desktop" to desktopEvidence),
-                ),
-            ),
-        )
+    fun `reused maintenance component is preserved without a fresh write or authorization`() {
+        val fixture = maintenanceReceiptFixture(fullManifest("lyrics", versionCode = 1))
+        val receipt = successfulMaintenanceReceipt(fixture)
 
-        session.dispatchEvent(
-            InstallationSessionEvent.InstallationCompleted(
-                checks = listOf(ComponentCheck("lyrics", passed = true)),
-                evidence = listOf(lyricsEvidence),
-                confirmationPendingComponentIds = setOf("desktop"),
-            ),
-        )
+        fixture.session.dispatchEvent(InstallationSessionEvent.InstallationBatchCompleted(receipt))
 
-        val snapshot = session.currentSnapshot()
-        assertEquals(InstallationSessionState.AUTHORIZING, snapshot.state)
-        assertEquals(setOf("desktop"), snapshot.evidence.confirmationPending)
-        assertFalse(snapshot.evidence.installed.contains("desktop"))
-        assertFalse(snapshot.maintenance.installedManifests.any { it.componentId == "desktop" })
+        val desktop = receipt.components.single { it.componentId == "desktop" }
+        val snapshot = fixture.session.currentSnapshot()
+        assertEquals(InstallationStageReceiptStatus.VERIFIED, desktop.installation.status)
+        assertFalse(desktop.installation.writeConfirmed)
+        assertEquals(AuthorizationStageReceiptStatus.PRESERVED, desktop.authorization.status)
+        assertEquals(AvailabilityStageReceiptStatus.PRESERVED, desktop.availability.status)
+        assertTrue(snapshot.evidence.installed.contains("desktop"))
+        assertTrue(snapshot.maintenance.installedManifests.any { it.componentId == "desktop" })
+    }
+
+    @Test
+    fun `reused component with unknown identity is accepted as batch pending`() {
+        val fixture = maintenanceReceiptFixture(fullManifest("lyrics", versionCode = 1))
+        val receipt = successfulMaintenanceReceipt(fixture).mapComponent("desktop") { component ->
+            component.copy(
+                installation = InstallationStageReceipt(
+                    status = InstallationStageReceiptStatus.WRITE_CONFIRMED_PENDING_IDENTITY,
+                    reasonCode = "installation_installed_apk_read_failed",
+                    retryable = true,
+                    operationConfirmed = true,
+                ),
+                authorization = AuthorizationStageReceipt(
+                    status = AuthorizationStageReceiptStatus.NOT_ATTEMPTED,
+                    reasonCode = "authorization_not_attempted_installation_unverified",
+                ),
+                availability = AvailabilityStageReceipt(
+                    status = AvailabilityStageReceiptStatus.NOT_ATTEMPTED,
+                    reasonCode = "availability_not_attempted_installation_unverified",
+                ),
+            )
+        }
+
+        fixture.session.dispatchEvent(InstallationSessionEvent.InstallationBatchCompleted(receipt))
+
+        val snapshot = fixture.session.currentSnapshot()
+        assertEquals(InstallationSessionState.COMPLETED_WITH_ERRORS, snapshot.state)
         assertEquals(ResultKind.CONFIRMATION_PENDING, snapshot.resolveInstallationResult().kind)
+        assertFalse(snapshot.resolveInstallationResult().canEnterMaintenance)
+        assertTrue(snapshot.failedComponentIds.isEmpty())
     }
 
     @Test
-    fun `installation completion rejects a pending outcome without a write receipt`() {
-        val session = connectedSession(includeOptional = false)
-        session.dispatch(InstallationSessionCommand.StartInstallation)
-        session.dispatch(InstallationSessionCommand.BeginPipeline)
-        session.dispatchEvent(InstallationSessionEvent.SourceResolved("fixture"))
-        session.dispatchEvent(InstallationSessionEvent.ArchiveDownloaded(1024L, "archive-sha"))
-        session.dispatchEvent(InstallationSessionEvent.ArchiveVerified(true))
-        session.dispatchEvent(InstallationSessionEvent.ApkExtracted("component.apk", 512L, "apk-sha"))
-        session.dispatchEvent(InstallationSessionEvent.ArtifactsVerified(checks(session)))
-        session.dispatchEvent(InstallationSessionEvent.InstallationStarted())
+    fun `batch receipt rejects a pending identity without a write receipt`() {
+        val session = batchReceiptSession(listOf(fullManifest("desktop", versionCode = 1)))
+        val invalid = successfulReceipt(session).mapComponent("desktop") { component ->
+            component.copy(
+                installation = InstallationStageReceipt(
+                    status = InstallationStageReceiptStatus.WRITE_CONFIRMED_PENDING_IDENTITY,
+                    reasonCode = "installation_identity_confirmation_pending",
+                ),
+                authorization = AuthorizationStageReceipt(
+                    status = AuthorizationStageReceiptStatus.NOT_ATTEMPTED,
+                    reasonCode = "authorization_not_attempted_installation_unverified",
+                ),
+                availability = AvailabilityStageReceipt(
+                    status = AvailabilityStageReceiptStatus.NOT_ATTEMPTED,
+                    reasonCode = "availability_not_attempted_installation_unverified",
+                ),
+            )
+        }
 
-        session.dispatchEvent(
-            InstallationSessionEvent.InstallationCompleted(
-                checks = emptyList(),
-                confirmationPendingComponentIds = setOf("desktop"),
-            ),
-        )
+        session.dispatchEvent(InstallationSessionEvent.InstallationBatchCompleted(invalid))
 
         assertEquals(InstallationSessionState.FAILED, session.currentSnapshot().state)
-        assertEquals("installation_write_receipt_invalid", session.currentSnapshot().failure?.reasonCode)
+        assertEquals(
+            "installation_batch_receipt_pending_without_write",
+            session.currentSnapshot().failure?.reasonCode,
+        )
     }
 
     @Test
-    fun `installation completion rejects overlapping failed and pending outcomes`() {
-        val session = connectedSession(includeOptional = false)
-        session.dispatch(InstallationSessionCommand.StartInstallation)
-        session.dispatch(InstallationSessionCommand.BeginPipeline)
-        session.dispatchEvent(InstallationSessionEvent.SourceResolved("fixture"))
-        session.dispatchEvent(InstallationSessionEvent.ArchiveDownloaded(1024L, "archive-sha"))
-        session.dispatchEvent(InstallationSessionEvent.ArchiveVerified(true))
-        session.dispatchEvent(InstallationSessionEvent.ApkExtracted("component.apk", 512L, "apk-sha"))
-        session.dispatchEvent(InstallationSessionEvent.ArtifactsVerified(checks(session)))
-        session.dispatchEvent(InstallationSessionEvent.InstallationStarted())
-        session.dispatchEvent(
-            InstallationSessionEvent.ComponentFailed(
-                componentId = "desktop",
-                phase = InstallPhase.VERIFY,
-                reasonCode = "installation_installed_certificate_mismatch",
-                retryable = false,
-            ),
-        )
+    fun `batch receipt rejects post-install stages after pending identity`() {
+        val session = batchReceiptSession(listOf(fullManifest("desktop", versionCode = 1)))
+        val invalid = successfulReceipt(session).mapComponent("desktop") { component ->
+            component.copy(
+                installation = InstallationStageReceipt(
+                    status = InstallationStageReceiptStatus.WRITE_CONFIRMED_PENDING_IDENTITY,
+                    reasonCode = "installation_identity_confirmation_pending",
+                    writeConfirmed = true,
+                ),
+                authorization = AuthorizationStageReceipt(AuthorizationStageReceiptStatus.NOT_REQUIRED),
+                availability = AvailabilityStageReceipt(AvailabilityStageReceiptStatus.NOT_REQUIRED),
+            )
+        }
 
-        session.dispatchEvent(
-            InstallationSessionEvent.InstallationCompleted(
-                checks = emptyList(),
-                writeConfirmedComponentIds = setOf("desktop"),
-                confirmationPendingComponentIds = setOf("desktop"),
-            ),
-        )
+        session.dispatchEvent(InstallationSessionEvent.InstallationBatchCompleted(invalid))
 
         assertEquals(InstallationSessionState.FAILED, session.currentSnapshot().state)
-        assertEquals("installation_detail_invalid", session.currentSnapshot().failure?.reasonCode)
+        assertEquals(
+            "installation_batch_receipt_post_install_without_identity",
+            session.currentSnapshot().failure?.reasonCode,
+        )
+    }
+
+    @Test
+    fun `batch receipt rejects authorization evidence for an unconfirmed installation`() {
+        val session = batchReceiptSession(
+            listOf(fullManifest("desktop", versionCode = 1), fullManifest("lyrics", versionCode = 1)),
+        )
+        val invalid = successfulReceipt(session).mapComponent("lyrics") { component ->
+            val evidence = component.authorization.evidence.firstOrNull()
+                ?: error("fixture must contain authorization evidence")
+            component.copy(
+                installation = InstallationStageReceipt(
+                    status = InstallationStageReceiptStatus.NOT_ATTEMPTED,
+                    reasonCode = "lyrics_download_failed",
+                ),
+                authorization = AuthorizationStageReceipt(
+                    status = AuthorizationStageReceiptStatus.NOT_ATTEMPTED,
+                    evidence = listOf(evidence),
+                    reasonCode = "authorization_not_attempted_installation_unverified",
+                ),
+                availability = AvailabilityStageReceipt(
+                    status = AvailabilityStageReceiptStatus.NOT_ATTEMPTED,
+                    reasonCode = "availability_not_attempted_installation_unverified",
+                ),
+            )
+        }
+
+        session.dispatchEvent(InstallationSessionEvent.InstallationBatchCompleted(invalid))
+
+        assertEquals(InstallationSessionState.FAILED, session.currentSnapshot().state)
+        assertEquals(
+            "installation_batch_receipt_post_install_without_identity",
+            session.currentSnapshot().failure?.reasonCode,
+        )
+    }
+
+    @Test
+    fun `batch receipt rejects a reusable component carrying a fresh write flag`() {
+        val fixture = maintenanceReceiptFixture(fullManifest("lyrics", versionCode = 1))
+        val invalid = successfulMaintenanceReceipt(fixture).mapComponent("desktop") { component ->
+            component.copy(
+                installation = component.installation.copy(writeConfirmed = true),
+            )
+        }
+
+        fixture.session.dispatchEvent(InstallationSessionEvent.InstallationBatchCompleted(invalid))
+
+        assertEquals(InstallationSessionState.FAILED, fixture.session.currentSnapshot().state)
+        assertEquals(
+            "installation_batch_receipt_reusable_write_confirmed",
+            fixture.session.currentSnapshot().failure?.reasonCode,
+        )
     }
 
     @Test
     fun `identity mismatch remains a concrete failure even when the device write was confirmed`() {
-        val session = connectedSession(includeOptional = false)
-        session.dispatch(InstallationSessionCommand.ToggleOptionalComponent("lyrics", selected = true))
-        session.dispatch(InstallationSessionCommand.StartInstallation)
-        session.dispatch(InstallationSessionCommand.BeginPipeline)
-        session.dispatchEvent(InstallationSessionEvent.SourceResolved("fixture"))
-        session.dispatchEvent(InstallationSessionEvent.ArchiveDownloaded(1024L, "archive-sha"))
-        session.dispatchEvent(InstallationSessionEvent.ArchiveVerified(true))
-        session.dispatchEvent(InstallationSessionEvent.ApkExtracted("component.apk", 512L, "apk-sha"))
-        session.dispatchEvent(InstallationSessionEvent.ArtifactsVerified(checks(session)))
-        session.dispatchEvent(InstallationSessionEvent.InstallationStarted())
-        session.dispatchEvent(
-            InstallationSessionEvent.ComponentFailed(
-                componentId = "lyrics",
-                phase = InstallPhase.VERIFY,
-                reasonCode = "installation_installed_certificate_mismatch",
-                retryable = false,
-            ),
+        val session = batchReceiptSession(
+            listOf(fullManifest("desktop", versionCode = 1), fullManifest("lyrics", versionCode = 1)),
         )
-        session.dispatchEvent(
-            InstallationSessionEvent.InstallationCompleted(
-                checks = listOf(ComponentCheck("desktop", passed = true)),
-                writeConfirmedComponentIds = setOf("desktop", "lyrics"),
-                confirmationPendingComponentIds = setOf("lyrics"),
-            ),
-        )
+        val receipt = successfulReceipt(session).mapComponent("lyrics") { component ->
+            component.copy(
+                installation = InstallationStageReceipt(
+                    status = InstallationStageReceiptStatus.FAILED,
+                    reasonCode = "installation_installed_certificate_mismatch",
+                    writeConfirmed = true,
+                ),
+                authorization = AuthorizationStageReceipt(
+                    status = AuthorizationStageReceiptStatus.NOT_ATTEMPTED,
+                    reasonCode = "authorization_not_attempted_installation_failed",
+                ),
+                availability = AvailabilityStageReceipt(
+                    status = AvailabilityStageReceiptStatus.NOT_ATTEMPTED,
+                    reasonCode = "availability_not_attempted_installation_failed",
+                ),
+            )
+        }
+        session.dispatchEvent(InstallationSessionEvent.InstallationBatchCompleted(receipt))
 
         val result = session.currentSnapshot().componentResults.first { it.componentId == "lyrics" }
         assertEquals(ComponentResultStatus.NOT_INSTALLED, result.status)
         assertEquals("installation_installed_certificate_mismatch", result.failureReason)
-        assertEquals(setOf("lyrics"), session.currentSnapshot().failedComponentIds)
+        assertTrue(session.currentSnapshot().failedComponentIds.isEmpty())
     }
 
     @Test
@@ -1154,64 +996,32 @@ class InstallationSessionTest {
     }
 
     @Test
-    fun `failed optional component history does not invalidate the remaining success proof`() {
+    fun `failed optional component receipt does not invalidate the remaining success proof`() {
         val desktop = evidenceManifest("desktop", AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME, required = true)
         val lyrics = evidenceManifest("lyrics", AuthorizationPlanFactory.LYRICS_PACKAGE_NAME, required = false)
         val manifests = listOf(desktop, lyrics)
-        val selected = manifests.map { it.componentId }.toSet()
-        val plan = (AuthorizationPlanFactory.createForManifests(manifests) as AuthorizationPlanBuildResult.Ready).plan
-        val installation = manifests.associate { manifest ->
-            manifest.componentId to InstalledArtifactEvidence(
-                componentId = manifest.componentId,
-                packageName = manifest.packageName,
-                version = manifest.apkVersion,
-                apkSizeBytes = manifest.apkSizeBytes,
-                apkSha256 = manifest.apkSha256,
-                certificateSha256 = manifest.certificateSha256,
+        val session = batchReceiptSession(manifests)
+        val receipt = successfulReceipt(session).mapComponent("lyrics") { component ->
+            component.copy(
+                authorization = AuthorizationStageReceipt(
+                    status = AuthorizationStageReceiptStatus.FAILED,
+                    reasonCode = "authorization_action_failed",
+                    retryable = true,
+                ),
+                availability = AvailabilityStageReceipt(
+                    status = AvailabilityStageReceiptStatus.NOT_ATTEMPTED,
+                    reasonCode = "availability_not_attempted_authorization_incomplete",
+                ),
             )
         }
-        val desktopAvailability = DeviceAvailabilityEvidence(
-            componentId = desktop.componentId,
-            packageName = desktop.packageName,
-            version = desktop.apkVersion,
-            installedArchiveVerified = true,
-            launchAttempted = true,
-            launcherResolved = true,
-            processRunning = true,
-            requiredServiceBound = true,
-        )
-        val session = InstallationSession(
-            initialSnapshot = InstallationSessionSnapshot(
-                state = InstallationSessionState.VERIFYING_DEVICE,
-                device = confirmedDevice,
-                components = manifests.map { it.toComponentDescriptor() },
-                selectedOptionalComponentIds = setOf("lyrics"),
-                failedComponentIds = setOf("lyrics"),
-                artifactManifests = manifests,
-                artifactCatalogStage = ArtifactCatalogStage.PREPARED,
-                evidence = SessionEvidence(
-                    artifactsVerified = selected,
-                    installed = selected,
-                    configured = setOf("desktop"),
-                    available = setOf("desktop"),
-                    installation = installation,
-                    authorizationActions = validAuthorizationEvidence(plan)
-                        .filter { it.componentId == "desktop" },
-                    availability = mapOf("desktop" to desktopAvailability),
-                ),
-            ),
-        )
 
         session.dispatchEvent(
-            InstallationSessionEvent.DeviceVerified(
-                checks = listOf(ComponentCheck("desktop", passed = true)),
-                evidence = listOf(desktopAvailability),
-            ),
+            InstallationSessionEvent.InstallationBatchCompleted(receipt),
         )
 
         val snapshot = session.currentSnapshot()
         assertEquals(InstallationSessionState.COMPLETED_WITH_ERRORS, snapshot.state)
-        assertEquals(setOf("lyrics"), snapshot.failedComponentIds)
+        assertTrue(snapshot.failedComponentIds.isEmpty())
         assertTrue(snapshot.componentResults.first { it.componentId == "desktop" }.available)
         assertTrue(snapshot.componentResults.first { it.componentId == "lyrics" }.installed)
         assertFalse(snapshot.componentResults.first { it.componentId == "lyrics" }.configured)
@@ -1714,11 +1524,11 @@ class InstallationSessionTest {
         assertEquals(started.sessionId, started.installationBatch?.batchId)
         assertEquals(started.sessionId, started.checkpoint?.sessionId)
         val firstBatchSessionId = started.sessionId
+        session.dispatch(InstallationSessionCommand.BeginPipeline)
 
         session.dispatchEvent(
-            InstallationSessionEvent.ComponentFailed(
+            InstallationSessionEvent.ArtifactUnavailable(
                 componentId = lyrics.componentId,
-                phase = InstallPhase.CHECK,
                 reasonCode = "distribution_archive_invalid",
                 retryable = false,
             ),
@@ -1750,12 +1560,12 @@ class InstallationSessionTest {
         assertNotEquals(firstBatchSessionId, secondStarted.sessionId)
         assertEquals(secondStarted.sessionId, secondStarted.installationBatch?.batchId)
         assertEquals(secondStarted.sessionId, secondStarted.checkpoint?.sessionId)
-        val beforeStaleEvent = secondStarted
+        session.dispatch(InstallationSessionCommand.BeginPipeline)
+        val beforeStaleEvent = session.currentSnapshot()
         session.dispatch(
             InstallationSessionCommand.AdapterEvent(
-                event = InstallationSessionEvent.ComponentFailed(
+                event = InstallationSessionEvent.ArtifactUnavailable(
                     componentId = lyrics.componentId,
-                    phase = InstallPhase.CHECK,
                     reasonCode = "stale_batch_event",
                     retryable = false,
                 ),
@@ -1765,9 +1575,8 @@ class InstallationSessionTest {
         )
         assertEquals(beforeStaleEvent, session.currentSnapshot())
         session.dispatchEvent(
-            InstallationSessionEvent.ComponentFailed(
+            InstallationSessionEvent.ArtifactUnavailable(
                 componentId = lyrics.componentId,
-                phase = InstallPhase.CHECK,
                 reasonCode = "distribution_archive_invalid",
                 retryable = false,
             ),
@@ -1788,49 +1597,32 @@ class InstallationSessionTest {
 
     @Test
     fun `reused maintenance prerequisite can complete from persisted aggregate evidence`() {
-        val desktop = fullManifest("desktop", versionCode = 1)
-        val cast = fullManifest("cast", versionCode = 1)
-        val plan = InstallationBatchPlan(
-            batchId = 7L,
-            flow = InstallationFlow.MAINTENANCE_INSTALL,
-            strategy = InstallationStrategy.INSTALL_MISSING_ONLY,
-            selectedComponentIds = setOf("desktop", "cast"),
-            reusableComponentIds = setOf("desktop"),
-            preparationComponentIds = setOf("cast"),
-            resultComponentIds = setOf("cast"),
-        )
-        val session = InstallationSession(
-            initialSnapshot = InstallationSessionSnapshot(
-                state = InstallationSessionState.VERIFYING_DEVICE,
-                device = confirmedDevice,
-                components = listOf(desktop, cast).map { it.toComponentDescriptor() },
-                selectedOptionalComponentIds = setOf("cast"),
-                failedComponentIds = setOf("cast"),
-                artifactManifests = listOf(desktop, cast),
-                artifactCatalogStage = ArtifactCatalogStage.PREPARED,
-                installationFlow = InstallationFlow.MAINTENANCE_INSTALL,
-                installationStrategy = InstallationStrategy.INSTALL_MISSING_ONLY,
-                installationBatch = plan,
-                evidence = SessionEvidence(
-                    installed = setOf("desktop"),
-                    configured = setOf("desktop"),
-                    available = setOf("desktop"),
+        val cast = evidenceManifest("cast", "com.ninepointnine.desktopcast", required = false)
+        val fixture = maintenanceReceiptFixture(cast)
+        val receipt = successfulMaintenanceReceipt(fixture).mapComponent("cast") { component ->
+            component.copy(
+                installation = InstallationStageReceipt(
+                    status = InstallationStageReceiptStatus.FAILED,
+                    reasonCode = "installation_failed",
+                    retryable = true,
                 ),
-            ),
-        )
+                authorization = AuthorizationStageReceipt(
+                    status = AuthorizationStageReceiptStatus.NOT_ATTEMPTED,
+                    reasonCode = "authorization_not_attempted_installation_failed",
+                ),
+                availability = AvailabilityStageReceipt(
+                    status = AvailabilityStageReceiptStatus.NOT_ATTEMPTED,
+                    reasonCode = "availability_not_attempted_installation_failed",
+                ),
+            )
+        }
 
-        session.dispatchEvent(
-            InstallationSessionEvent.DeviceVerified(
-                checks = emptyList(),
-                evidence = emptyList(),
-                preservedComponentIds = setOf("desktop"),
-            ),
-        )
+        fixture.session.dispatchEvent(InstallationSessionEvent.InstallationBatchCompleted(receipt))
 
-        val snapshot = session.currentSnapshot()
+        val snapshot = fixture.session.currentSnapshot()
         assertEquals(InstallationSessionState.COMPLETED_WITH_ERRORS, snapshot.state)
         assertTrue(snapshot.evidence.installed.contains("desktop"))
-        assertEquals(listOf("cast"), snapshot.componentResults.map { it.componentId })
+        assertEquals(listOf("cast"), snapshot.resolveInstallationResult().componentResults.map { it.componentId })
     }
 
     @Test
@@ -2286,6 +2078,15 @@ class InstallationSessionTest {
         val desktop = fullManifest("desktop", versionCode = 1)
         val lyrics = fullManifest("lyrics", versionCode = 1)
         val selected = setOf("desktop", "lyrics")
+        val batch = InstallationBatchPlan(
+            batchId = 7L,
+            flow = InstallationFlow.MAINTENANCE_INSTALL,
+            strategy = InstallationStrategy.INSTALL_MISSING_ONLY,
+            selectedComponentIds = selected,
+            reusableComponentIds = setOf("desktop"),
+            preparationComponentIds = setOf("lyrics"),
+            resultComponentIds = setOf("lyrics"),
+        )
         val session = InstallationSession(
             initialSnapshot = InstallationSessionSnapshot(
                 state = InstallationSessionState.SELECTION_CONFIRMED,
@@ -2301,6 +2102,7 @@ class InstallationSessionTest {
                 artifactManifests = listOf(lyrics),
                 maintenance = MaintenanceSnapshot(
                     availableManifests = listOf(desktop, lyrics),
+                    installedManifests = listOf(desktop),
                     managedApplicationsState = MaintenanceInventoryState.READY,
                     managedApplications = listOf(
                         ManagedApplicationStatus(
@@ -2311,7 +2113,15 @@ class InstallationSessionTest {
                         ),
                     ),
                 ),
+                installationFlow = InstallationFlow.MAINTENANCE_INSTALL,
                 installationStrategy = InstallationStrategy.INSTALL_MISSING_ONLY,
+                installationBatch = batch,
+                evidence = SessionEvidence(
+                    installed = setOf("desktop"),
+                    configured = setOf("desktop"),
+                    available = setOf("desktop"),
+                    installation = mapOf("desktop" to installedEvidence(desktop)),
+                ),
             ),
         )
 
@@ -2385,50 +2195,13 @@ class InstallationSessionTest {
             InstallationSessionEvent.InstallationStarted(listOf("lyrics", "desktop")),
         )
         session.dispatchEvent(
-            InstallationSessionEvent.InstallationCompleted(
-                checks = selected.map { ComponentCheck(it, passed = true) },
-                evidence = listOf(desktop, lyrics).map { manifest ->
-                    InstalledArtifactEvidence(
-                        componentId = manifest.componentId,
-                        packageName = manifest.packageName,
-                        version = manifest.apkVersion,
-                        apkSizeBytes = manifest.apkSizeBytes,
-                        apkSha256 = manifest.apkSha256,
-                        certificateSha256 = manifest.certificateSha256,
-                    )
-                },
-            ),
-        )
-        val plan = (AuthorizationPlanFactory.createForManifests(listOf(desktop, lyrics))
-            as AuthorizationPlanBuildResult.Ready).plan
-        session.dispatchEvent(
-            InstallationSessionEvent.AuthorizationCompleted(
-                checks = selected.map { ComponentCheck(it, passed = true) },
-                evidence = validAuthorizationEvidence(plan),
-            ),
-        )
-        session.dispatchEvent(
-            InstallationSessionEvent.DeviceVerified(
-                checks = selected.map { ComponentCheck(it, passed = true) },
-                evidence = listOf(desktop, lyrics).map { manifest ->
-                    val isDesktop = manifest.componentId == "desktop"
-                    DeviceAvailabilityEvidence(
-                        componentId = manifest.componentId,
-                        packageName = manifest.packageName,
-                        version = manifest.apkVersion,
-                        installedArchiveVerified = true,
-                        launchAttempted = isDesktop,
-                        launcherResolved = isDesktop,
-                        processRunning = isDesktop,
-                        requiredServiceBound = if (isDesktop) true else null,
-                    )
-                },
-            ),
+            InstallationSessionEvent.InstallationBatchCompleted(successfulReceipt(session)),
         )
 
         val result = session.currentSnapshot()
         assertEquals(InstallationSessionState.SUCCEEDED, result.state)
-        assertTrue(result.evidence.artifactsVerified.containsAll(selected))
+        assertEquals(setOf("lyrics"), result.evidence.artifactsVerified)
+        assertTrue(result.evidence.installed.containsAll(selected))
         assertTrue(result.failure == null)
     }
 
@@ -2797,6 +2570,525 @@ class InstallationSessionTest {
         assertEquals("maintenance_catalog_rollback", session.currentSnapshot().maintenance.lastAction?.reasonCode)
     }
 
+    @Test
+    fun `cast batch receipt commits ready while preserving reusable desktop baseline`() {
+        val cast = evidenceManifest("cast", "com.ninepointnine.desktopcast", required = false)
+        val fixture = maintenanceReceiptFixture(cast)
+        val receipt = successfulMaintenanceReceipt(fixture)
+
+        fixture.session.dispatchEvent(InstallationSessionEvent.InstallationBatchCompleted(receipt))
+
+        val snapshot = fixture.session.currentSnapshot()
+        assertEquals(InstallationSessionState.SUCCEEDED, snapshot.state)
+        assertEquals(setOf("desktop", "cast"), snapshot.evidence.installed)
+        assertEquals(setOf("desktop", "cast"), snapshot.evidence.configured)
+        assertEquals(setOf("desktop", "cast"), snapshot.evidence.available)
+        assertEquals(ComponentResultStatus.READY, snapshot.componentResults.single { it.componentId == "cast" }.status)
+        assertEquals(ResultKind.SUCCESS, snapshot.resolveInstallationResult().kind)
+    }
+
+    @Test
+    fun `unknown file manager authorization remains installed and never becomes installation failure`() {
+        val fileManager = fullManifest("file-manager", versionCode = 1)
+        val fixture = maintenanceReceiptFixture(fileManager)
+        val plan = (AuthorizationPlanFactory.createForManifests(
+            listOf(fileManager),
+            requireDesktop = false,
+        ) as AuthorizationPlanBuildResult.Ready).plan
+        val receipt = successfulMaintenanceReceipt(fixture).copy(
+            components = successfulMaintenanceReceipt(fixture).components.map { component ->
+                if (component.componentId != fileManager.componentId) {
+                    component
+                } else {
+                    component.copy(
+                        authorization = AuthorizationStageReceipt(
+                            status = AuthorizationStageReceiptStatus.UNKNOWN,
+                            evidence = validAuthorizationEvidence(plan),
+                            reasonCode = "authorization_confirmation_unavailable",
+                            retryable = true,
+                        ),
+                        availability = AvailabilityStageReceipt(
+                            status = AvailabilityStageReceiptStatus.NOT_ATTEMPTED,
+                            reasonCode = "availability_not_attempted_authorization_incomplete",
+                        ),
+                    )
+                }
+            },
+        )
+
+        fixture.session.dispatchEvent(InstallationSessionEvent.InstallationBatchCompleted(receipt))
+
+        val snapshot = fixture.session.currentSnapshot()
+        val result = snapshot.componentResults.single { it.componentId == fileManager.componentId }
+        assertEquals(InstallationSessionState.COMPLETED_WITH_ERRORS, snapshot.state)
+        assertTrue(result.installed)
+        assertEquals(ComponentResultStatus.AUTHORIZATION_INCOMPLETE, result.status)
+        assertEquals(ResultKind.PARTIAL_FAILURE, snapshot.resolveInstallationResult().kind)
+        assertFalse(snapshot.resolveInstallationResult().kind == ResultKind.INSTALLATION_FAILED)
+    }
+
+    @Test
+    fun `unknown authorization requires a complete command receipt`() {
+        val fileManager = fullManifest("file-manager", versionCode = 1)
+        val fixture = maintenanceReceiptFixture(fileManager)
+        val plan = (AuthorizationPlanFactory.createForManifests(
+            listOf(fileManager),
+            requireDesktop = false,
+        ) as AuthorizationPlanBuildResult.Ready).plan
+        val incompleteEvidence = validAuthorizationEvidence(plan).drop(1)
+        val valid = successfulMaintenanceReceipt(fixture)
+        val invalid = valid.copy(
+            components = valid.components.map { component ->
+                if (component.componentId != fileManager.componentId) {
+                    component
+                } else {
+                    component.copy(
+                        authorization = AuthorizationStageReceipt(
+                            status = AuthorizationStageReceiptStatus.UNKNOWN,
+                            evidence = incompleteEvidence,
+                            reasonCode = "authorization_confirmation_unavailable",
+                            retryable = true,
+                        ),
+                        availability = AvailabilityStageReceipt(
+                            status = AvailabilityStageReceiptStatus.NOT_ATTEMPTED,
+                            reasonCode = "availability_not_attempted_authorization_incomplete",
+                        ),
+                    )
+                }
+            },
+        )
+
+        fixture.session.dispatchEvent(InstallationSessionEvent.InstallationBatchCompleted(invalid))
+
+        val snapshot = fixture.session.currentSnapshot()
+        assertEquals(InstallationSessionState.FAILED, snapshot.state)
+        assertEquals(
+            "installation_batch_receipt_unknown_authorization_evidence_incomplete",
+            snapshot.failure?.reasonCode,
+        )
+        assertEquals(null, snapshot.installationBatchReceipt)
+    }
+
+    @Test
+    fun `preparation omission is committed in the same receipt without erasing successful evidence`() {
+        val desktop = fullManifest("desktop", versionCode = 1)
+        val lyrics = fullManifest("lyrics", versionCode = 1)
+        val selected = setOf(desktop.componentId, lyrics.componentId)
+        val plan = InstallationBatchPlan(
+            batchId = 52L,
+            flow = InstallationFlow.INITIAL_INSTALL,
+            strategy = InstallationStrategy.INSTALL_MISSING_ONLY,
+            selectedComponentIds = selected,
+            reusableComponentIds = emptySet(),
+            preparationComponentIds = selected,
+            resultComponentIds = selected,
+        )
+        val session = InstallationSession(
+            initialSnapshot = InstallationSessionSnapshot(
+                state = InstallationSessionState.INSTALLING,
+                device = confirmedDevice.copy(
+                    androidSdk = 28,
+                    capabilities = setOf(DeviceCapability.ADB_TCP, DeviceCapability.IDENTITY_READ),
+                ),
+                components = listOf(desktop, lyrics).map { it.toComponentDescriptor() },
+                selectedOptionalComponentIds = setOf(lyrics.componentId),
+                // The preparation adapter omitted lyrics, so only desktop has
+                // a trusted manifest at the receipt boundary.
+                artifactManifests = listOf(desktop),
+                artifactCatalogStage = ArtifactCatalogStage.PREPARED,
+                installationBatch = plan,
+                evidence = SessionEvidence(artifactsVerified = setOf(desktop.componentId)),
+            ),
+        )
+        val desktopPlan = (
+            AuthorizationPlanFactory.createForManifests(
+                listOf(desktop),
+                requireDesktop = false,
+            ) as AuthorizationPlanBuildResult.Ready
+            ).plan
+        val receipt = InstallationBatchReceipt(
+            batchId = plan.batchId,
+            components = listOf(
+                InstallationComponentReceipt(
+                    componentId = desktop.componentId,
+                    installation = InstallationStageReceipt(
+                        status = InstallationStageReceiptStatus.VERIFIED,
+                        evidence = installedEvidence(desktop),
+                        writeConfirmed = true,
+                    ),
+                    authorization = AuthorizationStageReceipt(
+                        status = AuthorizationStageReceiptStatus.VERIFIED,
+                        evidence = validAuthorizationEvidence(desktopPlan),
+                    ),
+                    availability = AvailabilityStageReceipt(
+                        status = AvailabilityStageReceiptStatus.VERIFIED,
+                        evidence = verifiedDesktopAvailability(desktop),
+                    ),
+                ),
+                InstallationComponentReceipt(
+                    componentId = lyrics.componentId,
+                    installation = InstallationStageReceipt(
+                        status = InstallationStageReceiptStatus.NOT_ATTEMPTED,
+                        reasonCode = "lyrics_download_failed",
+                        retryable = true,
+                    ),
+                    authorization = AuthorizationStageReceipt(
+                        status = AuthorizationStageReceiptStatus.NOT_ATTEMPTED,
+                        reasonCode = "authorization_not_attempted_preparation_failed",
+                    ),
+                    availability = AvailabilityStageReceipt(
+                        status = AvailabilityStageReceiptStatus.NOT_ATTEMPTED,
+                        reasonCode = "availability_not_attempted_preparation_failed",
+                    ),
+                ),
+            ),
+        )
+
+        session.dispatchEvent(InstallationSessionEvent.InstallationBatchCompleted(receipt))
+
+        val snapshot = session.currentSnapshot()
+        assertEquals(InstallationSessionState.COMPLETED_WITH_ERRORS, snapshot.state)
+        assertEquals(
+            ComponentResultStatus.NOT_INSTALLED,
+            snapshot.componentResults.single { it.componentId == lyrics.componentId }.status,
+        )
+        assertTrue(snapshot.evidence.installed.contains(desktop.componentId))
+        assertEquals(
+            InstallationStageReceiptStatus.VERIFIED,
+            snapshot.installationBatchReceipt?.components?.single {
+                it.componentId == desktop.componentId
+            }?.installation?.status,
+        )
+    }
+
+    @Test
+    fun `preparation omission cannot carry installation or post-install facts`() {
+        val desktop = fullManifest("desktop", versionCode = 1)
+        val lyrics = fullManifest("lyrics", versionCode = 1)
+        val plan = InstallationBatchPlan(
+            batchId = 53L,
+            flow = InstallationFlow.INITIAL_INSTALL,
+            strategy = InstallationStrategy.INSTALL_MISSING_ONLY,
+            selectedComponentIds = setOf(desktop.componentId, lyrics.componentId),
+            reusableComponentIds = emptySet(),
+            preparationComponentIds = setOf(desktop.componentId, lyrics.componentId),
+            resultComponentIds = setOf(desktop.componentId, lyrics.componentId),
+        )
+        val session = InstallationSession(
+            initialSnapshot = InstallationSessionSnapshot(
+                state = InstallationSessionState.INSTALLING,
+                device = confirmedDevice.copy(
+                    androidSdk = 28,
+                    capabilities = setOf(DeviceCapability.ADB_TCP, DeviceCapability.IDENTITY_READ),
+                ),
+                components = listOf(desktop, lyrics).map { it.toComponentDescriptor() },
+                selectedOptionalComponentIds = setOf(lyrics.componentId),
+                artifactManifests = listOf(desktop),
+                artifactCatalogStage = ArtifactCatalogStage.PREPARED,
+                installationBatch = plan,
+                evidence = SessionEvidence(artifactsVerified = setOf(desktop.componentId)),
+            ),
+        )
+        val desktopPlan = (
+            AuthorizationPlanFactory.createForManifests(
+                listOf(desktop),
+                requireDesktop = false,
+            ) as AuthorizationPlanBuildResult.Ready
+            ).plan
+        val invalid = InstallationBatchReceipt(
+            batchId = plan.batchId,
+            components = listOf(
+                InstallationComponentReceipt(
+                    componentId = desktop.componentId,
+                    installation = InstallationStageReceipt(
+                        status = InstallationStageReceiptStatus.VERIFIED,
+                        evidence = installedEvidence(desktop),
+                        writeConfirmed = true,
+                    ),
+                    authorization = AuthorizationStageReceipt(
+                        status = AuthorizationStageReceiptStatus.VERIFIED,
+                        evidence = validAuthorizationEvidence(desktopPlan),
+                    ),
+                    availability = AvailabilityStageReceipt(
+                        status = AvailabilityStageReceiptStatus.VERIFIED,
+                        evidence = verifiedDesktopAvailability(desktop),
+                    ),
+                ),
+                InstallationComponentReceipt(
+                    componentId = lyrics.componentId,
+                    installation = InstallationStageReceipt(
+                        status = InstallationStageReceiptStatus.NOT_ATTEMPTED,
+                        // A missing-manifest component cannot carry any device
+                        // identity or write fact into the batch receipt.
+                        evidence = installedEvidence(lyrics),
+                        reasonCode = "lyrics_download_failed",
+                    ),
+                    authorization = AuthorizationStageReceipt(
+                        status = AuthorizationStageReceiptStatus.NOT_ATTEMPTED,
+                        reasonCode = "authorization_not_attempted_preparation_failed",
+                    ),
+                    availability = AvailabilityStageReceipt(
+                        status = AvailabilityStageReceiptStatus.NOT_ATTEMPTED,
+                        reasonCode = "availability_not_attempted_preparation_failed",
+                    ),
+                ),
+            ),
+        )
+
+        session.dispatchEvent(InstallationSessionEvent.InstallationBatchCompleted(invalid))
+
+        assertEquals(InstallationSessionState.FAILED, session.currentSnapshot().state)
+        assertEquals(
+            "installation_batch_receipt_manifest_missing",
+            session.currentSnapshot().failure?.reasonCode,
+        )
+        assertEquals(null, session.currentSnapshot().installationBatchReceipt)
+    }
+
+    @Test
+    fun `preparation omission cannot carry an operation confirmation`() {
+        val desktop = fullManifest("desktop", versionCode = 1)
+        val lyrics = fullManifest("lyrics", versionCode = 1)
+        val selected = setOf(desktop.componentId, lyrics.componentId)
+        val plan = InstallationBatchPlan(
+            batchId = 54L,
+            flow = InstallationFlow.INITIAL_INSTALL,
+            strategy = InstallationStrategy.INSTALL_MISSING_ONLY,
+            selectedComponentIds = selected,
+            reusableComponentIds = emptySet(),
+            preparationComponentIds = selected,
+            resultComponentIds = selected,
+        )
+        val notAttempted = InstallationStageReceipt(
+            status = InstallationStageReceiptStatus.NOT_ATTEMPTED,
+            reasonCode = "preparation_failed",
+        )
+        val invalid = InstallationBatchReceipt(
+            batchId = plan.batchId,
+            components = listOf(
+                InstallationComponentReceipt(
+                    componentId = desktop.componentId,
+                    installation = notAttempted,
+                    authorization = AuthorizationStageReceipt(
+                        status = AuthorizationStageReceiptStatus.NOT_ATTEMPTED,
+                        reasonCode = "authorization_not_attempted",
+                    ),
+                    availability = AvailabilityStageReceipt(
+                        status = AvailabilityStageReceiptStatus.NOT_ATTEMPTED,
+                        reasonCode = "availability_not_attempted",
+                    ),
+                ),
+                InstallationComponentReceipt(
+                    componentId = lyrics.componentId,
+                    installation = notAttempted.copy(operationConfirmed = true),
+                    authorization = AuthorizationStageReceipt(
+                        status = AuthorizationStageReceiptStatus.NOT_ATTEMPTED,
+                        reasonCode = "authorization_not_attempted",
+                    ),
+                    availability = AvailabilityStageReceipt(
+                        status = AvailabilityStageReceiptStatus.NOT_ATTEMPTED,
+                        reasonCode = "availability_not_attempted",
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(
+            "installation_batch_receipt_manifest_missing",
+            invalid.validationFailure(
+                plan = plan,
+                manifests = mapOf(desktop.componentId to desktop),
+                baseline = SessionEvidence(),
+            ),
+        )
+    }
+
+    @Test
+    fun `post-install failure cannot erase verified package identity`() {
+        val fileManager = fullManifest("file-manager", versionCode = 1)
+        val fixture = maintenanceReceiptFixture(fileManager)
+        val receipt = successfulMaintenanceReceipt(fixture).copy(
+            components = successfulMaintenanceReceipt(fixture).components.map { component ->
+                if (component.componentId != fileManager.componentId) {
+                    component
+                } else {
+                    component.copy(
+                        authorization = AuthorizationStageReceipt(
+                            status = AuthorizationStageReceiptStatus.FAILED,
+                            reasonCode = "authorization_runtime_permission_not_granted",
+                            retryable = true,
+                        ),
+                        availability = AvailabilityStageReceipt(
+                            status = AvailabilityStageReceiptStatus.NOT_ATTEMPTED,
+                            reasonCode = "availability_not_attempted_authorization_incomplete",
+                        ),
+                    )
+                }
+            },
+        )
+
+        fixture.session.dispatchEvent(InstallationSessionEvent.InstallationBatchCompleted(receipt))
+
+        val snapshot = fixture.session.currentSnapshot()
+        val result = snapshot.componentResults.single { it.componentId == fileManager.componentId }
+        assertTrue(fileManager.componentId in snapshot.evidence.installed)
+        assertTrue(result.installed)
+        assertEquals(ComponentResultStatus.AUTHORIZATION_INCOMPLETE, result.status)
+    }
+
+    @Test
+    fun `rejected optional authorization setup is isolated from a ready desktop`() {
+        val desktop = fullManifest("desktop", versionCode = 1)
+        val optional = fullManifest("notes", versionCode = 1).copy(
+            deviceSetup = com.ninepointnine.helper.domain.device.AuthorizationSetupDeclaration(
+                profileId = "desktop-default",
+            ),
+        )
+        val plan = InstallationBatchPlan(
+            batchId = 55L,
+            flow = InstallationFlow.INITIAL_INSTALL,
+            strategy = InstallationStrategy.INSTALL_MISSING_ONLY,
+            selectedComponentIds = setOf("desktop", "notes"),
+            reusableComponentIds = emptySet(),
+            preparationComponentIds = setOf("desktop", "notes"),
+            resultComponentIds = setOf("desktop", "notes"),
+        )
+        val session = InstallationSession(
+            initialSnapshot = InstallationSessionSnapshot(
+                state = InstallationSessionState.INSTALLING,
+                device = confirmedDevice.copy(
+                    androidSdk = 28,
+                    capabilities = setOf(DeviceCapability.ADB_TCP, DeviceCapability.IDENTITY_READ),
+                ),
+                components = listOf(desktop, optional).map { it.toComponentDescriptor() },
+                selectedOptionalComponentIds = setOf("notes"),
+                artifactManifests = listOf(desktop, optional),
+                artifactCatalogStage = ArtifactCatalogStage.PREPARED,
+                installationBatch = plan,
+                evidence = SessionEvidence(artifactsVerified = setOf("desktop", "notes")),
+            ),
+        )
+        val desktopPlan = (
+            AuthorizationPlanFactory.createForManifests(listOf(desktop), requireDesktop = false)
+                as AuthorizationPlanBuildResult.Ready
+            ).plan
+        val receipt = InstallationBatchReceipt(
+            batchId = plan.batchId,
+            components = listOf(
+                InstallationComponentReceipt(
+                    componentId = "desktop",
+                    installation = InstallationStageReceipt(
+                        status = InstallationStageReceiptStatus.VERIFIED,
+                        evidence = installedEvidence(desktop),
+                        writeConfirmed = true,
+                    ),
+                    authorization = AuthorizationStageReceipt(
+                        status = AuthorizationStageReceiptStatus.VERIFIED,
+                        evidence = validAuthorizationEvidence(desktopPlan),
+                    ),
+                    availability = AvailabilityStageReceipt(
+                        status = AvailabilityStageReceiptStatus.VERIFIED,
+                        evidence = verifiedDesktopAvailability(desktop),
+                    ),
+                ),
+                InstallationComponentReceipt(
+                    componentId = "notes",
+                    installation = InstallationStageReceipt(
+                        status = InstallationStageReceiptStatus.VERIFIED,
+                        evidence = installedEvidence(optional),
+                        writeConfirmed = true,
+                    ),
+                    authorization = AuthorizationStageReceipt(
+                        status = AuthorizationStageReceiptStatus.FAILED,
+                        reasonCode = "authorization_component_unapproved",
+                    ),
+                    availability = AvailabilityStageReceipt(
+                        status = AvailabilityStageReceiptStatus.NOT_ATTEMPTED,
+                        reasonCode = "availability_not_attempted_authorization_incomplete",
+                    ),
+                ),
+            ),
+        )
+
+        session.dispatchEvent(InstallationSessionEvent.InstallationBatchCompleted(receipt))
+
+        val snapshot = session.currentSnapshot()
+        assertEquals(InstallationSessionState.COMPLETED_WITH_ERRORS, snapshot.state)
+        assertEquals(ComponentResultStatus.READY, snapshot.componentResults.single { it.componentId == "desktop" }.status)
+        assertEquals(ComponentResultStatus.AUTHORIZATION_INCOMPLETE, snapshot.componentResults.single { it.componentId == "notes" }.status)
+    }
+
+    @Test
+    fun `receipt rejects mismatched identity before committing terminal state`() {
+        val cast = evidenceManifest("cast", "com.ninepointnine.desktopcast", required = false)
+        val fixture = maintenanceReceiptFixture(cast)
+        val valid = successfulMaintenanceReceipt(fixture)
+        val invalid = valid.copy(
+            components = valid.components.map { component ->
+                if (component.componentId != cast.componentId) {
+                    component
+                } else {
+                    component.copy(
+                        installation = component.installation.copy(
+                            evidence = checkNotNull(component.installation.evidence).copy(
+                                packageName = "com.example.untrusted",
+                            ),
+                        ),
+                    )
+                }
+            },
+        )
+
+        fixture.session.dispatchEvent(InstallationSessionEvent.InstallationBatchCompleted(invalid))
+
+        val snapshot = fixture.session.currentSnapshot()
+        assertEquals(InstallationSessionState.FAILED, snapshot.state)
+        assertEquals("installation_batch_receipt_installation_package_mismatch", snapshot.failure?.reasonCode)
+        assertEquals(null, snapshot.installationBatchReceipt)
+    }
+
+    @Test
+    fun `late progress event cannot change a committed receipt`() {
+        val cast = evidenceManifest("cast", "com.ninepointnine.desktopcast", required = false)
+        val fixture = maintenanceReceiptFixture(cast)
+        fixture.session.dispatchEvent(
+            InstallationSessionEvent.InstallationBatchCompleted(successfulMaintenanceReceipt(fixture)),
+        )
+        val committed = fixture.session.currentSnapshot()
+
+        fixture.session.dispatchEvent(
+            event = InstallationSessionEvent.ComponentProgressUpdated(
+                componentId = cast.componentId,
+                phase = InstallPhase.CONFIGURE,
+                status = ComponentProgressStatus.FAILED,
+                fraction = 0f,
+                indeterminate = false,
+            ),
+            sequence = committed.lastEventSequence + 1L,
+        )
+
+        val afterLateEvent = fixture.session.currentSnapshot()
+        assertEquals(committed.revision, afterLateEvent.revision)
+        assertEquals(InstallationSessionState.SUCCEEDED, afterLateEvent.state)
+        assertEquals(committed.installationBatchReceipt, afterLateEvent.installationBatchReceipt)
+        assertTrue(afterLateEvent.failedComponentIds.isEmpty())
+    }
+
+    @Test
+    fun `receipt from another batch is rejected`() {
+        val cast = evidenceManifest("cast", "com.ninepointnine.desktopcast", required = false)
+        val fixture = maintenanceReceiptFixture(cast)
+        val foreign = successfulMaintenanceReceipt(fixture).copy(batchId = fixture.plan.batchId + 1L)
+
+        fixture.session.dispatchEvent(InstallationSessionEvent.InstallationBatchCompleted(foreign))
+
+        assertEquals(InstallationSessionState.FAILED, fixture.session.currentSnapshot().state)
+        assertEquals(
+            "installation_batch_receipt_batch_mismatch",
+            fixture.session.currentSnapshot().failure?.reasonCode,
+        )
+    }
+
     private fun connectedSession(
         includeOptional: Boolean,
         catalog: List<ComponentDescriptor> = components,
@@ -2807,7 +3099,12 @@ class InstallationSessionTest {
         session.dispatch(InstallationSessionCommand.SelectDevice(confirmedDevice.id))
         val connecting = session.currentSnapshot()
         session.dispatchEvent(
-            InstallationSessionEvent.DeviceConnectionConfirmed(confirmedDevice),
+            InstallationSessionEvent.DeviceConnectionConfirmed(
+                confirmedDevice.copy(
+                    androidSdk = 28,
+                    capabilities = setOf(DeviceCapability.ADB_TCP, DeviceCapability.IDENTITY_READ),
+                ),
+            ),
             sessionId = connecting.sessionId,
             sequence = connecting.lastEventSequence + 1L,
         )
@@ -2821,6 +3118,194 @@ class InstallationSessionTest {
         }
         return session
     }
+
+    private fun batchReceiptSession(
+        manifests: List<ArtifactManifest>,
+        descriptors: List<ComponentDescriptor> = manifests.map { it.toComponentDescriptor() },
+    ): InstallationSession {
+        val selectedIds = manifests.mapTo(linkedSetOf()) { it.componentId }
+        val plan = InstallationBatchPlan(
+            batchId = 41L,
+            flow = InstallationFlow.INITIAL_INSTALL,
+            strategy = InstallationStrategy.INSTALL_MISSING_ONLY,
+            selectedComponentIds = selectedIds,
+            reusableComponentIds = emptySet(),
+            preparationComponentIds = selectedIds,
+            resultComponentIds = selectedIds,
+        )
+        return InstallationSession(
+            initialSnapshot = InstallationSessionSnapshot(
+                state = InstallationSessionState.INSTALLING,
+                device = confirmedDevice.copy(
+                    androidSdk = 28,
+                    capabilities = setOf(DeviceCapability.ADB_TCP, DeviceCapability.IDENTITY_READ),
+                ),
+                components = descriptors,
+                selectedOptionalComponentIds = selectedIds - AuthorizationPlanFactory.DESKTOP_COMPONENT_ID,
+                artifactManifests = manifests,
+                artifactCatalogStage = ArtifactCatalogStage.PREPARED,
+                installationFlow = InstallationFlow.INITIAL_INSTALL,
+                installationStrategy = InstallationStrategy.INSTALL_MISSING_ONLY,
+                installationBatch = plan,
+                evidence = SessionEvidence(artifactsVerified = selectedIds),
+            ),
+        )
+    }
+
+    private data class MaintenanceReceiptFixture(
+        val session: InstallationSession,
+        val desktop: ArtifactManifest,
+        val optional: ArtifactManifest,
+        val plan: InstallationBatchPlan,
+    )
+
+    private fun maintenanceReceiptFixture(optional: ArtifactManifest): MaintenanceReceiptFixture {
+        val desktop = fullManifest("desktop", versionCode = 1)
+        val plan = InstallationBatchPlan(
+            batchId = 41L,
+            flow = InstallationFlow.MAINTENANCE_INSTALL,
+            strategy = InstallationStrategy.INSTALL_MISSING_ONLY,
+            selectedComponentIds = setOf(desktop.componentId, optional.componentId),
+            reusableComponentIds = setOf(desktop.componentId),
+            preparationComponentIds = setOf(optional.componentId),
+            resultComponentIds = setOf(optional.componentId),
+        )
+        val session = InstallationSession(
+            initialSnapshot = InstallationSessionSnapshot(
+                state = InstallationSessionState.INSTALLING,
+                device = confirmedDevice.copy(
+                    androidSdk = 28,
+                    capabilities = setOf(DeviceCapability.ADB_TCP, DeviceCapability.IDENTITY_READ),
+                ),
+                components = listOf(desktop, optional).map { it.toComponentDescriptor() },
+                selectedOptionalComponentIds = setOf(optional.componentId),
+                artifactManifests = listOf(desktop, optional),
+                artifactCatalogStage = ArtifactCatalogStage.PREPARED,
+                installationFlow = InstallationFlow.MAINTENANCE_INSTALL,
+                installationStrategy = InstallationStrategy.INSTALL_MISSING_ONLY,
+                installationBatch = plan,
+                evidence = SessionEvidence(
+                    artifactsVerified = setOf(optional.componentId),
+                    installed = setOf(desktop.componentId),
+                    configured = setOf(desktop.componentId),
+                    available = setOf(desktop.componentId),
+                ),
+                maintenance = MaintenanceSnapshot(
+                    managedApplicationsState = MaintenanceInventoryState.READY,
+                    managedApplications = listOf(
+                        ManagedApplicationStatus(
+                            componentId = desktop.componentId,
+                            packageName = desktop.packageName,
+                            installed = true,
+                            versionCode = desktop.apkVersion.code,
+                        ),
+                    ),
+                    installedManifests = listOf(desktop),
+                ),
+            ),
+        )
+        return MaintenanceReceiptFixture(session, desktop, optional, plan)
+    }
+
+    private fun successfulMaintenanceReceipt(fixture: MaintenanceReceiptFixture): InstallationBatchReceipt {
+        return successfulReceipt(fixture.session)
+    }
+
+    private fun successfulReceipt(session: InstallationSession): InstallationBatchReceipt {
+        val snapshot = session.currentSnapshot()
+        val batch = checkNotNull(snapshot.installationBatch)
+        val manifests = (
+            snapshot.maintenance.availableManifests +
+                snapshot.maintenance.installedManifests +
+                snapshot.artifactManifests
+            ).associateBy { it.componentId }
+        val selectedManifests = batch.selectedComponentIds.map { componentId ->
+            checkNotNull(manifests[componentId])
+        }
+        val authorizationPlan = (
+            AuthorizationPlanFactory.createForManifests(selectedManifests, requireDesktop = false)
+                as AuthorizationPlanBuildResult.Ready
+            ).plan
+        val authorizationEvidence = validAuthorizationEvidence(authorizationPlan)
+        val orderedIds = snapshot.components.map { it.id }.filter { it in batch.selectedComponentIds } +
+            (batch.selectedComponentIds - snapshot.components.map { it.id }.toSet())
+        return InstallationBatchReceipt(
+            batchId = batch.batchId,
+            components = orderedIds.map { componentId ->
+                val manifest = checkNotNull(manifests[componentId])
+                if (componentId in batch.reusableComponentIds) {
+                    InstallationComponentReceipt(
+                        componentId = componentId,
+                        installation = InstallationStageReceipt(
+                            status = InstallationStageReceiptStatus.VERIFIED,
+                            evidence = installedEvidence(manifest),
+                        ),
+                        authorization = AuthorizationStageReceipt(AuthorizationStageReceiptStatus.PRESERVED),
+                        availability = AvailabilityStageReceipt(AvailabilityStageReceiptStatus.PRESERVED),
+                    )
+                } else {
+                    val componentAuthorizationEvidence = authorizationEvidence.filter {
+                        it.componentId == componentId
+                    }
+                    InstallationComponentReceipt(
+                        componentId = componentId,
+                        installation = InstallationStageReceipt(
+                            status = InstallationStageReceiptStatus.VERIFIED,
+                            evidence = installedEvidence(manifest),
+                            writeConfirmed = true,
+                        ),
+                        authorization = if (componentAuthorizationEvidence.isEmpty()) {
+                            AuthorizationStageReceipt(AuthorizationStageReceiptStatus.NOT_REQUIRED)
+                        } else {
+                            AuthorizationStageReceipt(
+                                status = AuthorizationStageReceiptStatus.VERIFIED,
+                                evidence = componentAuthorizationEvidence,
+                            )
+                        },
+                        availability = if (componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID) {
+                            AvailabilityStageReceipt(
+                                status = AvailabilityStageReceiptStatus.VERIFIED,
+                                evidence = verifiedDesktopAvailability(manifest),
+                            )
+                        } else {
+                            AvailabilityStageReceipt(AvailabilityStageReceiptStatus.NOT_REQUIRED)
+                        },
+                    )
+                }
+            },
+        )
+    }
+
+    private fun InstallationBatchReceipt.mapComponent(
+        componentId: String,
+        transform: (InstallationComponentReceipt) -> InstallationComponentReceipt,
+    ): InstallationBatchReceipt = copy(
+        components = components.map { component ->
+            if (component.componentId == componentId) transform(component) else component
+        },
+    )
+
+    private fun installedEvidence(manifest: ArtifactManifest): InstalledArtifactEvidence =
+        InstalledArtifactEvidence(
+            componentId = manifest.componentId,
+            packageName = manifest.packageName,
+            version = manifest.apkVersion,
+            apkSizeBytes = manifest.apkSizeBytes,
+            apkSha256 = manifest.apkSha256,
+            certificateSha256 = manifest.certificateSha256,
+        )
+
+    private fun verifiedDesktopAvailability(manifest: ArtifactManifest): DeviceAvailabilityEvidence =
+        DeviceAvailabilityEvidence(
+            componentId = manifest.componentId,
+            packageName = manifest.packageName,
+            version = manifest.apkVersion,
+            installedArchiveVerified = true,
+            launchAttempted = true,
+            launcherResolved = true,
+            processRunning = true,
+            requiredServiceBound = true,
+        )
 
     private fun maintenanceSession(
         connected: Boolean = true,
@@ -2873,22 +3358,119 @@ class InstallationSessionTest {
         ),
     )
 
-    private fun startToDeviceVerification(session: InstallationSession) {
+    private fun resolveTrustedCatalog(session: InstallationSession) {
+        if (session.currentSnapshot().artifactCatalogStage == ArtifactCatalogStage.PREPARED) return
+        val current = session.currentSnapshot()
+        val manifests = current.components.map { component -> fullManifest(component.id, versionCode = 1) }
+        session.dispatchEvent(
+            InstallationSessionEvent.CatalogResolved(
+                catalogVersion = "fixture-catalog",
+                keyId = "fixture-key",
+                signatureAlgorithm = "Ed25519",
+                manifests = manifests,
+                catalogRevision = 1L,
+                apps = current.components,
+            ),
+        )
+    }
+
+    private fun preparationManifests(session: InstallationSession): List<ArtifactManifest> {
+        val snapshot = session.currentSnapshot()
+        val preparationIds = checkNotNull(snapshot.installationBatch).preparationComponentIds
+        return snapshot.artifactManifests.filter { it.componentId in preparationIds }
+    }
+
+    private fun dispatchSourceResolved(session: InstallationSession) {
+        val manifests = preparationManifests(session)
+        session.dispatchEvent(
+            InstallationSessionEvent.SourceResolved(
+                sourceId = "fixture",
+                selections = manifests.map {
+                    SourceSelectionEvidence(it.componentId, ArtifactSourceKind.LANZOU_SHARE)
+                },
+            ),
+        )
+    }
+
+    private fun dispatchArchivesDownloaded(session: InstallationSession) {
+        val manifests = preparationManifests(session)
+        session.dispatchEvent(
+            InstallationSessionEvent.ArchiveDownloaded(
+                sizeBytes = manifests.sumOf { it.archiveSizeBytes },
+                sha256 = manifests.first().archiveSha256,
+                archives = manifests.map {
+                    ArchiveDownloadEvidence(it.componentId, it.archiveSizeBytes, it.archiveSha256)
+                },
+            ),
+        )
+    }
+
+    private fun dispatchArchivesVerified(session: InstallationSession) {
+        val manifests = preparationManifests(session)
+        session.dispatchEvent(
+            InstallationSessionEvent.ArchiveVerified(
+                verified = true,
+                verifications = manifests.map {
+                    ArchiveVerificationEvidence(it.componentId, it.archiveSizeBytes, it.archiveSha256)
+                },
+            ),
+        )
+    }
+
+    private fun dispatchApksExtracted(session: InstallationSession) {
+        val manifests = preparationManifests(session)
+        session.dispatchEvent(
+            InstallationSessionEvent.ApkExtracted(
+                entryName = manifests.first().apkEntryName,
+                sizeBytes = manifests.sumOf { it.apkSizeBytes },
+                sha256 = manifests.first().apkSha256,
+                extractions = manifests.map {
+                    ApkExtractionEvidence(it.componentId, it.apkEntryName, it.apkSizeBytes, it.apkSha256)
+                },
+            ),
+        )
+    }
+
+    private fun dispatchArtifactsVerified(session: InstallationSession) {
+        val manifests = preparationManifests(session)
+        session.dispatchEvent(
+            InstallationSessionEvent.ArtifactsVerified(
+                checks = manifests.map { ComponentCheck(it.componentId, passed = true) },
+                verifications = manifests.map { manifest ->
+                    ArtifactVerification(
+                        componentId = manifest.componentId,
+                        sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                        archiveSizeBytes = manifest.archiveSizeBytes,
+                        archiveSha256 = manifest.archiveSha256,
+                        apkSizeBytes = manifest.apkSizeBytes,
+                        apkSha256 = manifest.apkSha256,
+                        packageName = manifest.packageName,
+                        apkVersion = manifest.apkVersion,
+                        certificateSha256 = manifest.certificateSha256,
+                        archiveDeleted = true,
+                    )
+                },
+            ),
+        )
+    }
+
+    private fun startToInstalling(session: InstallationSession) {
+        resolveTrustedCatalog(session)
         session.dispatch(InstallationSessionCommand.StartInstallation)
         session.dispatch(InstallationSessionCommand.BeginPipeline)
-        session.dispatchEvent(InstallationSessionEvent.SourceResolved("fixture"))
-        session.dispatchEvent(InstallationSessionEvent.ArchiveDownloaded(1024L, "archive-sha"))
-        session.dispatchEvent(InstallationSessionEvent.ArchiveVerified(true))
-        session.dispatchEvent(InstallationSessionEvent.ApkExtracted("component.apk", 512L, "apk-sha"))
-        session.dispatchEvent(InstallationSessionEvent.ArtifactsVerified(checks(session)))
+        dispatchSourceResolved(session)
+        dispatchArchivesDownloaded(session)
+        dispatchArchivesVerified(session)
+        dispatchApksExtracted(session)
+        dispatchArtifactsVerified(session)
         session.dispatchEvent(InstallationSessionEvent.InstallationStarted())
-        session.dispatchEvent(InstallationSessionEvent.InstallationCompleted(checks(session)))
-        session.dispatchEvent(InstallationSessionEvent.AuthorizationCompleted(checks(session)))
     }
 
     private fun complete(session: InstallationSession) {
-        startToDeviceVerification(session)
-        session.dispatchEvent(InstallationSessionEvent.DeviceVerified(checks(session)))
+        startToInstalling(session)
+        session.dispatchEvent(
+            InstallationSessionEvent.InstallationBatchCompleted(successfulReceipt(session)),
+        )
     }
 
     private fun checks(session: InstallationSession): List<ComponentCheck> =

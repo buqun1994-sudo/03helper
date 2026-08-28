@@ -308,9 +308,9 @@ object InstallUiStateMapper {
                 installed = it.installed,
                 configured = it.configured,
                 available = it.available,
-                // Status is derived from the evidence fields at projection
-                // time; a legacy constructor value must not survive here.
-                status = it.derivedStatus,
+                // The domain result is the only terminal adjudication. This
+                // mapper translates it but never reinterprets raw evidence.
+                status = it.status,
                 // The result projection already scopes reasons to this batch.
                 // Never reattach a catalog descriptor error here: that would
                 // turn a successful fallback-source install into a failure.

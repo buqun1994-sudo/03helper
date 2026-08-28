@@ -7,10 +7,6 @@ import com.ninepointnine.helper.domain.artifact.ArtifactManifest
 import com.ninepointnine.helper.domain.artifact.ArtifactSourceKind
 import com.ninepointnine.helper.domain.artifact.ArtifactVerification
 import com.ninepointnine.helper.domain.artifact.SourceSelectionEvidence
-import com.ninepointnine.helper.domain.device.AuthorizationActionEvidence
-import com.ninepointnine.helper.domain.device.DeviceAvailabilityEvidence
-import com.ninepointnine.helper.domain.device.DeviceInstallWarning
-import com.ninepointnine.helper.domain.device.InstalledArtifactEvidence
 import com.ninepointnine.helper.domain.device.ManagedApplicationAuthorizationStatus
 
 /** Commands accepted by the single installation-session owner. */
@@ -188,38 +184,15 @@ sealed interface InstallationSessionEvent {
         val indeterminate: Boolean = true,
     ) : InstallationSessionEvent
 
-    /** One application failed; the batch must continue with the remaining apps. */
-    data class ComponentFailed(
-        val componentId: String,
-        val phase: InstallPhase,
-        val reasonCode: String,
-        val retryable: Boolean = false,
-    ) : InstallationSessionEvent
-
     data class InstallationStarted(val componentIds: List<String> = emptyList()) : InstallationSessionEvent
 
-    data class InstallationCompleted(
-        val checks: List<ComponentCheck>,
-        val evidence: List<InstalledArtifactEvidence> = emptyList(),
-        val warnings: List<DeviceInstallWarning> = emptyList(),
-        /** PackageManager-confirmed writes whose identity may still be unknown. */
-        val writeConfirmedComponentIds: Set<String> = emptySet(),
-        /** Components whose installed identity could not be read back yet. */
-        val confirmationPendingComponentIds: Set<String> = emptySet(),
-    ) : InstallationSessionEvent
-
-    data class AuthorizationCompleted(
-        val checks: List<ComponentCheck>,
-        val evidence: List<AuthorizationActionEvidence> = emptyList(),
-        /** Components whose verified authorization is retained from the batch baseline. */
-        val preservedComponentIds: Set<String> = emptySet(),
-    ) : InstallationSessionEvent
-
-    data class DeviceVerified(
-        val checks: List<ComponentCheck>,
-        val evidence: List<DeviceAvailabilityEvidence> = emptyList(),
-        /** Components whose verified availability is retained from the batch baseline. */
-        val preservedComponentIds: Set<String> = emptySet(),
+    /**
+     * The sole production terminal event for device installation. Progress
+     * events may precede it, but all install, authorization and availability
+     * facts cross the session boundary together in one immutable receipt.
+     */
+    data class InstallationBatchCompleted(
+        val receipt: InstallationBatchReceipt,
     ) : InstallationSessionEvent
 
     data class DeviceDisconnected(
