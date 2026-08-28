@@ -204,6 +204,8 @@ sealed interface InstallationSessionEvent {
         val warnings: List<DeviceInstallWarning> = emptyList(),
         /** PackageManager-confirmed writes whose identity may still be unknown. */
         val writeConfirmedComponentIds: Set<String> = emptySet(),
+        /** Components whose installed identity could not be read back yet. */
+        val confirmationPendingComponentIds: Set<String> = emptySet(),
     ) : InstallationSessionEvent
 
     data class AuthorizationCompleted(
@@ -288,22 +290,6 @@ sealed interface InstallationSessionEvent {
         val catalogRevision: Long = 0L,
         val updateStatuses: List<MaintenanceUpdateStatus> = emptyList(),
         val controlPlaneOnly: Boolean = false,
-    ) : InstallationSessionEvent
-
-    /** The phone started saving one projected maintenance baseline. */
-    data class MaintenanceBaselinePersistenceStarted(
-        val attemptId: Long,
-    ) : InstallationSessionEvent
-
-    /** The same projected baseline is now durable on the phone. */
-    data class MaintenanceBaselinePersistenceCompleted(
-        val attemptId: Long,
-    ) : InstallationSessionEvent
-
-    /** Installation facts remain valid, but this phone could not save their durable baseline. */
-    data class MaintenanceBaselinePersistenceFailed(
-        val attemptId: Long,
-        val reasonCode: String = "maintenance_baseline_save_failed",
     ) : InstallationSessionEvent
 
     data class RecoverableError(

@@ -15,6 +15,7 @@ import com.ninepointnine.helper.domain.device.InstalledArtifactEvidence
 import com.ninepointnine.helper.domain.device.DeviceInstallWarning
 import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationState
 import com.ninepointnine.helper.domain.device.ManagedApplicationAuthorizationStatus
+import com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
 
 data class InstallationSessionSnapshot(
     val state: InstallationSessionState,
@@ -60,8 +61,6 @@ data class InstallationSessionSnapshot(
     val installationFlow: InstallationFlow = InstallationFlow.INITIAL_INSTALL,
     /** Immutable component decisions for the current installation attempt. */
     val installationBatch: InstallationBatchPlan? = null,
-    /** Phone-local durability of the projected maintenance baseline; never an install result. */
-    val maintenanceBaselinePersistence: MaintenanceBaselinePersistence = MaintenanceBaselinePersistence(),
 )
 
 data class DeviceSummary(
@@ -154,37 +153,284 @@ data class ComponentResult(
     val retryable: Boolean = false,
     /** True when the device accepted the APK write but identity proof is absent. */
     val writeConfirmed: Boolean = false,
+    /** True when the device operation completed but identity confirmation is unavailable. */
+    val confirmationPending: Boolean = false,
     /** Stable stage semantics used by both initial and maintenance result views. */
-    val status: ComponentResultStatus = when {
-        writeConfirmed && !installed -> ComponentResultStatus.WRITE_CONFIRMED_IDENTITY_UNVERIFIED
-        !installed -> ComponentResultStatus.NOT_INSTALLED
-        !configured -> ComponentResultStatus.AUTHORIZATION_INCOMPLETE
-        !available -> ComponentResultStatus.AVAILABILITY_INCOMPLETE
-        else -> ComponentResultStatus.READY
-    },
-)
+    val status: ComponentResultStatus = resolveComponentResultStatus(
+        installed = installed,
+        configured = configured,
+        available = available,
+        failureReason = failureReason,
+        failurePhase = failurePhase,
+        writeConfirmed = writeConfirmed,
+        confirmationPending = confirmationPending,
+    ),
+) {
+    /**
+     * Recomputes the status from the evidence fields. The constructor status
+     * remains source-compatible for older callers, but it is never trusted by
+     * the result projection because restored snapshots may carry stale data.
+     */
+    val derivedStatus: ComponentResultStatus
+        get() = resolveComponentResultStatus(
+            installed = installed,
+            configured = configured,
+            available = available,
+            failureReason = failureReason,
+            failurePhase = failurePhase,
+            writeConfirmed = writeConfirmed,
+            confirmationPending = confirmationPending,
+        )
+}
 
 enum class ComponentResultStatus {
     NOT_INSTALLED,
-    WRITE_CONFIRMED_IDENTITY_UNVERIFIED,
+    INSTALLATION_PENDING_CONFIRMATION,
     AUTHORIZATION_INCOMPLETE,
     AVAILABILITY_INCOMPLETE,
     READY,
 }
 
-/** Structured result of saving the durable maintenance baseline on this phone. */
-data class MaintenanceBaselinePersistence(
-    val status: MaintenanceBaselinePersistenceStatus = MaintenanceBaselinePersistenceStatus.NOT_ATTEMPTED,
-    /** Runtime-local correlation id used to reject a late result from an older baseline. */
-    val attemptId: Long = 0L,
-    val reasonCode: String? = null,
+/**
+ * Converts all evidence for one component into its only user-facing result.
+ * A structured failure phase wins over stale positive evidence from an older
+ * checkpoint, while an explicit identity mismatch can never become pending.
+ */
+private fun resolveComponentResultStatus(
+    installed: Boolean,
+    configured: Boolean,
+    available: Boolean,
+    failureReason: String?,
+    failurePhase: InstallPhase?,
+    writeConfirmed: Boolean,
+    confirmationPending: Boolean,
+): ComponentResultStatus {
+    if (failureReason != null && !installed) return ComponentResultStatus.NOT_INSTALLED
+    if (confirmationPending || (writeConfirmed && !installed)) {
+        return ComponentResultStatus.INSTALLATION_PENDING_CONFIRMATION
+    }
+    if (!installed) return ComponentResultStatus.NOT_INSTALLED
+
+    val effectiveFailurePhase = failurePhase ?: failureReason?.let(::installPhaseForReasonCode)
+    if (effectiveFailurePhase != null) {
+        return when (effectiveFailurePhase) {
+            InstallPhase.CONFIGURE -> ComponentResultStatus.AUTHORIZATION_INCOMPLETE
+            InstallPhase.VERIFY -> ComponentResultStatus.AVAILABILITY_INCOMPLETE
+            InstallPhase.FETCH,
+            InstallPhase.CHECK,
+            InstallPhase.SEND,
+            -> ComponentResultStatus.NOT_INSTALLED
+        }
+    }
+    return when {
+        !configured -> ComponentResultStatus.AUTHORIZATION_INCOMPLETE
+        !available -> ComponentResultStatus.AVAILABILITY_INCOMPLETE
+        failureReason != null -> ComponentResultStatus.NOT_INSTALLED
+        else -> ComponentResultStatus.READY
+    }
+}
+
+/**
+ * The one terminal result projection for both initial installation and
+ * maintenance installation. UI may translate its reason code, but must not
+ * recompute success, failure stage, or the visible batch from raw evidence.
+ */
+data class InstallationResultSummary(
+    val kind: ResultKind,
+    val componentResults: List<ComponentResult>,
+    val failureReasonCode: String? = null,
+    val installationFlow: InstallationFlow,
+    val failureStage: InstallationResultFailureStage,
+    val canContinue: Boolean,
+    val canEnterMaintenance: Boolean,
 )
 
-enum class MaintenanceBaselinePersistenceStatus {
-    NOT_ATTEMPTED,
-    SAVING,
-    SAVED,
-    FAILED,
+/**
+ * Returns the selected components whose device operation reached the
+ * readback boundary but still lacks trusted identity evidence. The derived
+ * set intentionally excludes a component once it is installed or explicitly
+ * failed, so a late observation cannot resurrect an old pending row.
+ */
+internal fun InstallationSessionSnapshot.confirmationPendingComponentIds(): Set<String> {
+    val selectedIds = installationBatch?.selectedComponentIds ?: components
+        .filter { it.required || it.id in selectedOptionalComponentIds }
+        .mapTo(linkedSetOf()) { it.id }
+    return (
+        (evidence.confirmationPending + (evidence.writeConfirmed - evidence.installed)) intersect selectedIds
+        ) - failedComponentIds - evidence.installed
+}
+
+fun InstallationSessionSnapshot.resolveInstallationResult(): InstallationResultSummary {
+    val batch = installationBatch
+    val resultIds = batch?.resultComponentIds
+    val rows = if (resultIds == null) {
+        componentResults
+    } else {
+        componentResults.filter { it.componentId in resultIds }
+    }
+    // A maintenance batch can contain reusable prerequisites that deliberately
+    // have no visible result row. Aggregate classification must still inspect
+    // the complete selected batch, while the UI projection remains scoped to
+    // resultComponentIds.
+    val selectedIds = batch?.selectedComponentIds ?: run {
+        val rowIds = rows.mapNotNull { it.componentId }.toSet()
+        if (rowIds.isNotEmpty()) {
+            rowIds
+        } else {
+            components
+                .filter { it.required || it.id in selectedOptionalComponentIds }
+                .mapTo(linkedSetOf()) { it.id }
+        }
+    }
+    val scopedIds = resultIds ?: rows.mapNotNull { it.componentId }.toSet().ifEmpty { selectedIds }
+    val evidenceIds = selectedIds
+    val installedIds = evidence.installed intersect evidenceIds
+    val configuredIds = evidence.configured intersect evidenceIds
+    val availableIds = evidence.available intersect evidenceIds
+    val failedIds = failedComponentIds intersect evidenceIds
+    val pendingIds = confirmationPendingComponentIds() intersect evidenceIds
+    val ordinaryInstallationFailureIds = failedIds - installedIds - pendingIds
+    val unaccountedIds = evidenceIds - installedIds - failedIds - pendingIds
+    val hasInstallationFailure = ordinaryInstallationFailureIds.isNotEmpty() ||
+        unaccountedIds.isNotEmpty() ||
+        rows.any { !it.installed && it.derivedStatus == ComponentResultStatus.NOT_INSTALLED }
+    val hasPostInstallFailure = pendingIds.isNotEmpty() ||
+        installedIds.any { it !in configuredIds || it !in availableIds } ||
+        (failedIds intersect installedIds).isNotEmpty() ||
+        rows.any { it.installed && (!it.configured || !it.available) }
+    val declaredKind = when (state) {
+        InstallationSessionState.SUCCEEDED -> ResultKind.SUCCESS
+        InstallationSessionState.COMPLETED_WITH_ERRORS -> ResultKind.PARTIAL_FAILURE
+        InstallationSessionState.PAUSED -> ResultKind.PAUSED
+        InstallationSessionState.FAILED -> when (failure?.category) {
+            FailureCategory.DOWNLOAD,
+            FailureCategory.ARCHIVE,
+            -> ResultKind.DOWNLOAD_FAILED
+
+            FailureCategory.CONFIGURATION -> ResultKind.CONFIGURATION_FAILED
+            else -> ResultKind.INSTALLATION_FAILED
+        }
+
+        else -> ResultKind.INSTALLATION_FAILED
+    }
+    val successEvidence = declaredKind == ResultKind.SUCCESS &&
+        hasConsistentSuccessEvidence(this, scopedIds)
+    val kind = when {
+        declaredKind == ResultKind.PAUSED -> ResultKind.PAUSED
+        declaredKind == ResultKind.SUCCESS && successEvidence -> ResultKind.SUCCESS
+        !hasInstallationFailure && pendingIds.isNotEmpty() &&
+            declaredKind in setOf(ResultKind.SUCCESS, ResultKind.PARTIAL_FAILURE, ResultKind.INSTALLATION_FAILED) ->
+            ResultKind.CONFIRMATION_PENDING
+        declaredKind == ResultKind.SUCCESS && hasPostInstallFailure ->
+            ResultKind.PARTIAL_FAILURE
+        declaredKind == ResultKind.SUCCESS -> ResultKind.INSTALLATION_FAILED
+        declaredKind !in setOf(ResultKind.SUCCESS, ResultKind.PAUSED) && hasPostInstallFailure ->
+            if (!hasInstallationFailure && pendingIds.isNotEmpty()) {
+                ResultKind.CONFIRMATION_PENDING
+            } else {
+                ResultKind.PARTIAL_FAILURE
+            }
+        else -> declaredKind
+    }
+    val visibleFailureReason = rows.asSequence().mapNotNull { it.failureReason }.firstOrNull()
+    val batchFailureApplies = batch == null || failure?.componentName == null ||
+        rows.any { it.componentId == failure.componentName || it.componentName == failure.componentName }
+    val failureReasonCode = visibleFailureReason
+        ?: failure?.reasonCode?.takeIf { batchFailureApplies }
+        // Keep hidden reusable prerequisites out of the page header. A
+        // structural fallback is useful only when there is no visible row
+        // that can carry the concrete outcome.
+        ?: "installation_evidence_missing".takeIf { unaccountedIds.isNotEmpty() && rows.isEmpty() }
+        ?: "success_evidence_incomplete".takeIf {
+            declaredKind == ResultKind.SUCCESS && !successEvidence && pendingIds.isEmpty()
+        }
+    val failureStage = when {
+        kind in setOf(ResultKind.SUCCESS, ResultKind.PAUSED) -> InstallationResultFailureStage.NONE
+        hasPostInstallFailure && hasInstallationFailure -> InstallationResultFailureStage.MIXED
+        hasPostInstallFailure -> InstallationResultFailureStage.POST_INSTALL
+        else -> InstallationResultFailureStage.INSTALLATION
+    }
+    val desktopParticipates = batch?.let {
+        AuthorizationPlanFactory.DESKTOP_COMPONENT_ID in it.resultComponentIds ||
+            AuthorizationPlanFactory.DESKTOP_COMPONENT_ID in it.reusableComponentIds
+    } ?: true
+    val desktopReady = desktopParticipates &&
+        AuthorizationPlanFactory.DESKTOP_COMPONENT_ID in evidence.available &&
+        AuthorizationPlanFactory.DESKTOP_COMPONENT_ID !in pendingIds &&
+        AuthorizationPlanFactory.DESKTOP_COMPONENT_ID !in failedIds
+    return InstallationResultSummary(
+        kind = kind,
+        componentResults = rows,
+        failureReasonCode = failureReasonCode,
+        installationFlow = installationFlow,
+        failureStage = failureStage,
+        canContinue = kind != ResultKind.SUCCESS,
+        canEnterMaintenance = kind in setOf(
+            ResultKind.SUCCESS,
+            ResultKind.PARTIAL_FAILURE,
+            ResultKind.CONFIRMATION_PENDING,
+        ) && desktopReady,
+    )
+}
+
+/**
+ * Defensive terminal proof used by the UI projection. The session normally
+ * reaches SUCCEEDED only after this proof, but restored or externally-created
+ * snapshots must not be allowed to display a false success.
+ */
+private fun hasConsistentSuccessEvidence(
+    snapshot: InstallationSessionSnapshot,
+    visibleIds: Set<String>,
+): Boolean {
+    val batch = snapshot.installationBatch
+    val expectedIds = batch?.selectedComponentIds ?: visibleIds.ifEmpty {
+        snapshot.components
+            .filter { it.required || it.id in snapshot.selectedOptionalComponentIds }
+            .mapTo(linkedSetOf()) { it.id }
+    }
+    if (expectedIds.isEmpty()) return false
+    if (snapshot.failedComponentIds.any { it in expectedIds }) return false
+
+    val evidence = snapshot.evidence
+    val pendingIds = snapshot.confirmationPendingComponentIds() intersect expectedIds
+    if (pendingIds.isNotEmpty()) return false
+    if (!expectedIds.all { id ->
+            id in evidence.installed && id in evidence.configured && id in evidence.available
+        }
+    ) {
+        return false
+    }
+    if (evidence.writeConfirmed.any { it in expectedIds && it !in evidence.installed }) {
+        return false
+    }
+
+    // Every non-reusable result component needs one corresponding row. A
+    // reusable-only maintenance batch is valid with zero visible rows.
+    val resultIds = batch?.resultComponentIds ?: visibleIds
+    val rows = snapshot.componentResults.filter { it.componentId in resultIds }
+    if (rows.mapNotNull { it.componentId }.toSet() != resultIds) return false
+    if (rows.any { row ->
+            !row.installed || !row.configured || !row.available ||
+                row.failureReason != null ||
+            row.derivedStatus != ComponentResultStatus.READY
+        }
+    ) {
+        return false
+    }
+
+    // A trusted catalog, when present, must have current artifact proof for
+    // every fresh component. A reusable maintenance prerequisite has no new
+    // APK preparation event by design; its verified installed identity is the
+    // equivalent proof and is already bound to this batch's live inventory.
+    val reusableIds = (batch?.reusableComponentIds.orEmpty() intersect expectedIds)
+    val artifactProofIds = evidence.artifactsVerified +
+        (reusableIds intersect evidence.installed)
+    if (snapshot.artifactManifests.isNotEmpty() &&
+        !expectedIds.all { it in artifactProofIds }
+    ) {
+        return false
+    }
+    return true
 }
 
 /** Structured proof collected by the session before it can report success. */
@@ -194,6 +440,8 @@ data class SessionEvidence(
     val installed: Set<String> = emptySet(),
     /** Device-side PackageManager writes confirmed before identity proof. */
     val writeConfirmed: Set<String> = emptySet(),
+    /** Device operation reached the readback boundary but identity is unknown. */
+    val confirmationPending: Set<String> = emptySet(),
     val installation: Map<String, InstalledArtifactEvidence> = emptyMap(),
     val configured: Set<String> = emptySet(),
     val available: Set<String> = emptySet(),
@@ -323,14 +571,17 @@ internal fun MaintenanceSnapshot.withVerifiedInstallations(
 /** Removes every page/action field that cannot survive process death independently. */
 internal fun MaintenanceSnapshot.toDurableMaintenanceBaseline(): MaintenanceSnapshot {
     val normalized = withVerifiedInstallations(installedManifests)
-    val inventoryState = when {
-        normalized.managedApplicationsState == MaintenanceInventoryState.READY -> MaintenanceInventoryState.READY
-        normalized.managedApplications.any { it.installed } -> MaintenanceInventoryState.READY
-        else -> MaintenanceInventoryState.NOT_STARTED
+    val verifiedIds = normalized.installedManifests.map { it.componentId }.toSet()
+    val verifiedApplications = normalized.managedApplications.filter { application ->
+        application.installed && application.componentId in verifiedIds
     }
     return MaintenanceSnapshot(
-        managedApplicationsState = inventoryState,
-        managedApplications = normalized.managedApplications,
+        managedApplicationsState = if (verifiedIds.isEmpty()) {
+            MaintenanceInventoryState.NOT_STARTED
+        } else {
+            MaintenanceInventoryState.READY
+        },
+        managedApplications = verifiedApplications,
         availableComponents = normalized.availableComponents,
         installedManifests = normalized.installedManifests,
         availableManifests = normalized.availableManifests,

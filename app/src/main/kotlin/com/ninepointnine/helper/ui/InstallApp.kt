@@ -59,10 +59,6 @@ fun InstallApp(
     val routedMaintenanceAction = when {
         uiState is InstallUiState.Maintenance -> uiState.routeAction
         uiState.ownsMaintenanceInstallation() -> snapshot.maintenance.routeAction
-            ?: snapshot.maintenance.installationSelection?.actionId
-                ?.takeIf { it.isApplicationInstallation }
-            ?: snapshot.maintenance.lastAction?.actionId
-                ?.takeIf { it.isApplicationInstallation }
         else -> null
     }
     // The system back gesture is part of the same flow-level contract as the
@@ -217,7 +213,10 @@ internal fun maintenanceResultBackIntent(
     // maintenance action argument. This guard prevents a stale page callback
     // from sending an initial failure into the maintenance recovery command.
     if (state.installationFlow != InstallationFlow.MAINTENANCE_INSTALL) {
-        return if (state.kind == com.ninepointnine.helper.domain.session.ResultKind.SUCCESS &&
+        return if (state.kind in setOf(
+                com.ninepointnine.helper.domain.session.ResultKind.SUCCESS,
+                com.ninepointnine.helper.domain.session.ResultKind.CONFIRMATION_PENDING,
+            ) &&
             state.canEnterMaintenance
         ) {
             InstallUiIntent.EnterMaintenance
@@ -226,7 +225,10 @@ internal fun maintenanceResultBackIntent(
         }
     }
     return when {
-        state.kind == com.ninepointnine.helper.domain.session.ResultKind.SUCCESS ->
+        state.kind in setOf(
+            com.ninepointnine.helper.domain.session.ResultKind.SUCCESS,
+            com.ninepointnine.helper.domain.session.ResultKind.CONFIRMATION_PENDING,
+        ) && state.canEnterMaintenance ->
             InstallUiIntent.EnterMaintenance
 
         action?.isApplicationInstallation == true ->

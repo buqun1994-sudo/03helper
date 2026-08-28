@@ -10,6 +10,7 @@ import com.ninepointnine.helper.domain.session.ComponentDescriptor
 import com.ninepointnine.helper.domain.session.ComponentStatus
 import com.ninepointnine.helper.domain.session.InstallationBatchPlan
 import com.ninepointnine.helper.domain.session.InstallationSessionEvent
+import com.ninepointnine.helper.domain.session.componentStatusForReasonCode
 
 fun interface InstallerCatalogLoader {
     suspend fun load(): CatalogLoadResult
@@ -145,9 +146,7 @@ internal fun TrustedArtifactCatalog.toComponentDescriptors(androidSdk: Int? = nu
         val base = manifest?.toComponentDescriptor(androidSdk)
         val status = when {
             app.minClientSchemaVersion > CloudInstallerDistributionConfigAdapter.SUPPORTED_SCHEMA_VERSION -> ComponentStatus.CLIENT_CAPABILITY_INSUFFICIENT
-            failure?.reasonCode?.contains("missing") == true -> ComponentStatus.DIRECTORY_MISSING
-            failure?.reasonCode?.contains("certificate") == true -> ComponentStatus.APK_SIGNATURE_MISMATCH
-            failure != null -> ComponentStatus.ZIP_VALIDATION_FAILED
+            failure != null -> componentStatusForReasonCode(failure.reasonCode)
             base != null -> ComponentStatus.AVAILABLE
             manifest == null -> ComponentStatus.READING
             else -> ComponentStatus.TEMPORARILY_UNAVAILABLE

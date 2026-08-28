@@ -37,6 +37,7 @@ import com.ninepointnine.helper.domain.session.InstallationBatchPlan
 import com.ninepointnine.helper.domain.session.InstallationFlow
 import com.ninepointnine.helper.domain.session.InstallPhase
 import com.ninepointnine.helper.domain.session.InstallationStrategy
+import com.ninepointnine.helper.domain.session.ComponentCheck
 import dadb.AdbShellResponse
 import dadb.Dadb
 import java.lang.reflect.Proxy
@@ -362,6 +363,135 @@ class DeviceActionsTest {
     }
 
     @Test
+    fun nonMaskableAuthorizationFailuresSeparateSafetyContractsFromReceiptNoise() {
+        listOf(
+            "authorization_component_list_not_preserved",
+            "shortcut_component_selection_invalid",
+            "unexpected_desktop_launch",
+            "maintenance_unexpected_launch",
+            "desktop_missing",
+            "selected_component_missing",
+            "desktop_launch_failed",
+            "desktop_launch_evidence_invalid",
+            "desktop_process_not_running",
+            "desktop_service_not_bound",
+            "desktop_service_readback_failed",
+        ).forEach { reasonCode ->
+            assertTrue(reasonCode, isNonMaskableAuthorizationFailure(reasonCode))
+        }
+
+        listOf(
+            "adb_combined_command_failed",
+            "combined_command_result_missing",
+            "authorization_action_invalid",
+            "authorization_appop_write_failed",
+            "authorization_confirmation_unavailable",
+        ).forEach { reasonCode ->
+            assertFalse(reasonCode, isNonMaskableAuthorizationFailure(reasonCode))
+        }
+    }
+
+    private fun noActionAuthorizationGateway(
+        response: AdbShellResponse,
+    ): Pair<DadbCommandGateway, AuthorizationPlan> {
+        val cast = AuthorizationPlanFactory.allManagedComponents()
+            .first { it.componentId == "cast" }
+        val plan = (
+            AuthorizationPlanFactory.createForComponents(
+                listOf(cast),
+                requireDesktop = false,
+            ) as AuthorizationPlanBuildResult.Ready
+            ).plan
+        val fakeDadb = Proxy.newProxyInstance(
+            Dadb::class.java.classLoader,
+            arrayOf(Dadb::class.java),
+        ) { _, method, _ ->
+            when (method.name) {
+                "shell" -> response
+                "supportsFeature" -> false
+                "close" -> null
+                else -> null
+            }
+        } as Dadb
+        return DadbCommandGateway(
+            adb = fakeDadb,
+            closed = AtomicBoolean(false),
+            ioMutex = Mutex(),
+            installedApkCacheDirectory = null,
+            installedApkMetadataReader = null,
+        ) to plan
+    }
+
+    @Test
+    fun satisfiedPostconditionCanOverrideCommandReceiptNoise() {
+        val (gateway, plan) = noActionAuthorizationGateway(
+            AdbShellResponse(
+                output = "",
+                errorOutput = "framework warning",
+                exitCode = 1,
+            ),
+        )
+
+        val result = runBlocking {
+            gateway.runShortcut(
+                DeviceShortcut.CONFIGURE_SELECTED_APPS,
+                setOf("cast"),
+                plan,
+            )
+        }
+
+        assertTrue(result is DeviceShortcutResult.Completed)
+        assertEquals(setOf("cast"), (result as DeviceShortcutResult.Completed).configuredComponentIds)
+    }
+
+    @Test
+    fun satisfiedPostconditionCannotOverrideAuthorizationPreservationFailure() {
+        val (gateway, plan) = noActionAuthorizationGateway(
+            AdbShellResponse(
+                output = "03HELPER|FAIL|authorization_component_list_not_preserved|cast",
+                errorOutput = "",
+                exitCode = 1,
+            ),
+        )
+
+        val result = runBlocking {
+            gateway.runShortcut(
+                DeviceShortcut.CONFIGURE_SELECTED_APPS,
+                setOf("cast"),
+                plan,
+            )
+        }
+
+        assertTrue(result is DeviceShortcutResult.Failed)
+        assertEquals(
+            "authorization_component_list_not_preserved",
+            (result as DeviceShortcutResult.Failed).failure.reasonCode,
+        )
+    }
+
+    @Test
+    fun satisfiedPostconditionOverridesMalformedAuthorizationReceipt() {
+        val (gateway, plan) = noActionAuthorizationGateway(
+            AdbShellResponse(
+                output = "03HELPER|FAIL|authorization_action_invalid|cast",
+                errorOutput = "",
+                exitCode = 1,
+            ),
+        )
+
+        val result = runBlocking {
+            gateway.runShortcut(
+                DeviceShortcut.CONFIGURE_SELECTED_APPS,
+                setOf("cast"),
+                plan,
+            )
+        }
+
+        assertTrue(result is DeviceShortcutResult.Completed)
+        assertEquals(setOf("cast"), (result as DeviceShortcutResult.Completed).configuredComponentIds)
+    }
+
+    @Test
     fun `app ops parser treats an untouched operation as default`() {
         assertEquals(
             AuthorizationValueState.DEFAULT,
@@ -393,13 +523,62 @@ class DeviceActionsTest {
     }
 
     @Test
+    fun `installed package path parser accepts split apks and selects the controlled base apk`() {
+        val result = InstalledPackagePathParser.parse(
+            """
+                package:/data/app/~~AbC_12==/com.example.app-xYz==/base.apk
+                package:/data/app/~~AbC_12==/com.example.app-xYz==/split_config.arm64_v8a.apk
+                package:/data/app/~~AbC_12==/com.example.app-xYz==/split_config.xxhdpi.apk
+            """.trimIndent(),
+        )
+
+        assertTrue(result is InstalledPackagePathParseResult.Valid)
+        result as InstalledPackagePathParseResult.Valid
+        assertEquals(
+            "/data/app/~~AbC_12==/com.example.app-xYz==/base.apk",
+            result.baseApkPath,
+        )
+        assertEquals(3, result.allApkPaths.size)
+    }
+
+    @Test
+    fun `installed package path parser rejects missing base and uncontrolled paths`() {
+        assertEquals(
+            InstalledPackagePathParseResult.Invalid,
+            InstalledPackagePathParser.parse(
+                "package:/data/app/com.example.app/split_config.arm64_v8a.apk",
+            ),
+        )
+        assertEquals(
+            InstalledPackagePathParseResult.Invalid,
+            InstalledPackagePathParser.parse("package:/system/app/com.example.app/base.apk"),
+        )
+        assertEquals(
+            InstalledPackagePathParseResult.Invalid,
+            InstalledPackagePathParser.parse("package:/data/app/com.example.app/../base.apk"),
+        )
+        assertEquals(
+            InstalledPackagePathParseResult.Missing,
+            InstalledPackagePathParser.parse(""),
+        )
+    }
+
+    @Test
     fun `missing-only gateway strategy skips installed package but reinstall strategy writes both`() {
         val root = Files.createTempDirectory("gateway-install-strategy").toFile()
         val desktopApk = root.resolve("desktop.apk").apply { writeBytes(byteArrayOf(1, 2, 3)) }
         val lyricsApk = root.resolve("lyrics.apk").apply { writeBytes(byteArrayOf(4, 5, 6)) }
         val outdatedApk = root.resolve("outdated-desktop.apk").apply { writeBytes(byteArrayOf(7, 8, 9)) }
-        val desktop = prepared("desktop", "com.tcrrry.desktop", desktopApk)
-        val lyrics = prepared("lyrics", "com.tcrrry.desktoplyrics", lyricsApk)
+        // The fake pull below represents the APK bytes read back from the
+        // vehicle. Keep the fixture manifest digest aligned with those bytes
+        // so this test exercises install strategy rather than hash rejection.
+        val installedDigest = "06df4f7e1394f1c57cc6583fba4d8060a5a66f4f4771c14aeff6b9af8a28c9b3"
+        val desktop = prepared("desktop", "com.tcrrry.desktop", desktopApk).let { artifact ->
+            artifact.copy(manifest = artifact.manifest.copy(apkSha256 = installedDigest))
+        }
+        val lyrics = prepared("lyrics", "com.tcrrry.desktoplyrics", lyricsApk).let { artifact ->
+            artifact.copy(manifest = artifact.manifest.copy(apkSha256 = installedDigest))
+        }
         val metadata = mapOf(
             desktopApk.absolutePath to ApkMetadata(
                 packageName = desktop.manifest.packageName,
@@ -422,6 +601,8 @@ class DeviceActionsTest {
             legacyInventory: Boolean = false,
             identityMismatch: Boolean = false,
             pulledDesktopVersion: ArtifactVersion? = null,
+            splitPackagePaths: Boolean = false,
+            pulledApkHashMismatch: Boolean = false,
         ): Pair<DadbCommandGateway, MutableList<String>> {
             val metadataReader = com.ninepointnine.helper.data.artifact.ApkMetadataReader { apk ->
                 if (identityMismatch && apk.name.endsWith(".installed.apk")) {
@@ -468,8 +649,18 @@ class DeviceActionsTest {
                             command == "pm list packages" && legacyInventory ->
                                 AdbShellResponse("package:com.tcrrry.desktop\n", "", 0)
 
-                            command == "pm path com.tcrrry.desktop" ->
-                                AdbShellResponse("package:/data/app/com.tcrrry.desktop/base.apk\n", "", 0)
+                            command == "pm path com.tcrrry.desktop" -> AdbShellResponse(
+                                if (splitPackagePaths) {
+                                    """
+                                        package:/data/app/~~Desktop==/com.tcrrry.desktop-hash==/base.apk
+                                        package:/data/app/~~Desktop==/com.tcrrry.desktop-hash==/split_config.arm64_v8a.apk
+                                    """.trimIndent()
+                                } else {
+                                    "package:/data/app/com.tcrrry.desktop/base.apk\n"
+                                },
+                                "",
+                                0,
+                            )
 
                             command == "pm path com.tcrrry.desktoplyrics" ->
                                 AdbShellResponse("package:/data/app/com.tcrrry.desktoplyrics/base.apk\n", "", 0)
@@ -490,7 +681,9 @@ class DeviceActionsTest {
                     }
 
                     "pull" -> {
-                        (args?.getOrNull(0) as? java.io.File)?.writeBytes(byteArrayOf(9, 8, 7))
+                        (args?.getOrNull(0) as? java.io.File)?.writeBytes(
+                            if (pulledApkHashMismatch) byteArrayOf(0, 1, 2) else byteArrayOf(9, 8, 7),
+                        )
                         null
                     }
 
@@ -595,6 +788,21 @@ class DeviceActionsTest {
         assertEquals(2, reinstallWrites.count { it.startsWith("push:") })
         assertEquals(2, reinstallWrites.count { it.startsWith("pm install -r ") })
 
+        val (splitGateway, splitWrites) = gatewayFixture(splitPackagePaths = true)
+        val splitResult = runBlocking {
+            splitGateway.install(
+                listOf(
+                    com.ninepointnine.helper.domain.device.InstallableArtifact(
+                        desktop.manifest,
+                        desktop.finalApk,
+                    ),
+                ),
+                InstallationStrategy.REINSTALL_SELECTED,
+            )
+        }
+        assertTrue(splitResult is DeviceInstallResult.Installed)
+        assertEquals(1, splitWrites.count { it.startsWith("pm install -r ") })
+
         val (unverifiedGateway, unverifiedWrites) = gatewayFixture(identityMismatch = true)
         val unverifiedResult = runBlocking {
             unverifiedGateway.install(
@@ -607,8 +815,51 @@ class DeviceActionsTest {
         assertTrue(unverifiedResult is DeviceInstallResult.WrittenButUnverified)
         val unverified = unverifiedResult as DeviceInstallResult.WrittenButUnverified
         assertEquals(setOf("desktop"), unverified.writeConfirmedComponentIds)
+        assertTrue(unverified.confirmationPendingComponentIds.isEmpty())
         assertEquals("installation_installed_package_mismatch", unverified.failure.reasonCode)
         assertEquals(1, unverifiedWrites.count { it.startsWith("pm install -r ") })
+
+        val (mixedIdentityGateway, _) = gatewayFixture(identityMismatch = true)
+        val mixedIdentityResult = runBlocking {
+            mixedIdentityGateway.install(
+                listOf(
+                    com.ninepointnine.helper.domain.device.InstallableArtifact(
+                        desktop.manifest,
+                        desktop.finalApk,
+                    ),
+                    com.ninepointnine.helper.domain.device.InstallableArtifact(
+                        lyrics.manifest,
+                        lyrics.finalApk,
+                    ),
+                ),
+                InstallationStrategy.REINSTALL_SELECTED,
+            )
+        }
+        assertTrue(mixedIdentityResult is DeviceInstallResult.WrittenButUnverified)
+        val mixedIdentity = mixedIdentityResult as DeviceInstallResult.WrittenButUnverified
+        assertEquals(setOf("desktop", "lyrics"), mixedIdentity.writeConfirmedComponentIds)
+        assertEquals(
+            setOf("lyrics"),
+            mixedIdentity.confirmationPendingComponentIds,
+        )
+        assertEquals("desktop", mixedIdentity.failure.componentId)
+
+        val (hashMismatchGateway, hashMismatchWrites) = gatewayFixture(pulledApkHashMismatch = true)
+        val hashMismatchResult = runBlocking {
+            hashMismatchGateway.install(
+                listOf(
+                    com.ninepointnine.helper.domain.device.InstallableArtifact(
+                        desktop.manifest,
+                        desktop.finalApk,
+                    ),
+                ),
+                InstallationStrategy.REINSTALL_SELECTED,
+            )
+        }
+        assertTrue(hashMismatchResult is DeviceInstallResult.Installed)
+        val observedHashEvidence = (hashMismatchResult as DeviceInstallResult.Installed).evidence.single()
+        assertFalse(observedHashEvidence.apkSha256.equals(desktop.manifest.apkSha256, ignoreCase = true))
+        assertEquals(1, hashMismatchWrites.count { it.startsWith("pm install -r ") })
     }
 
     @Test
@@ -760,6 +1011,147 @@ class DeviceActionsTest {
         assertTrue(availability.getValue("desktop").processRunning)
         assertTrue(lyricsFile.exists())
         assertTrue(desktopFile.exists())
+    }
+
+    @Test
+    fun `coordinator keeps readback uncertainty pending without emitting component failure`() {
+        val desktopFile = Files.createTempFile("desktop-readback-pending", ".apk").toFile().apply {
+            writeBytes(byteArrayOf(2))
+        }
+        val artifacts = listOf(prepared("desktop", "com.tcrrry.desktop", desktopFile))
+        val events = mutableListOf<InstallationSessionEvent>()
+        val gateway = object : AdbCommandGateway {
+            override suspend fun install(
+                artifacts: List<com.ninepointnine.helper.domain.device.InstallableArtifact>,
+            ): DeviceInstallResult = DeviceInstallResult.WrittenButUnverified(
+                writeConfirmedComponentIds = setOf("desktop"),
+                failure = com.ninepointnine.helper.domain.device.DeviceActionFailure(
+                    "installation_installed_apk_read_failed",
+                    "desktop",
+                    retryable = true,
+                ),
+                confirmationPendingComponentIds = setOf("desktop"),
+            )
+
+            override suspend fun runShortcut(
+                shortcut: DeviceShortcut,
+                selectedComponentIds: Set<String>,
+            ): DeviceShortcutResult = error("pending installation must not authorize")
+        }
+
+        kotlinx.coroutines.runBlocking {
+            DeviceInstallationCoordinator(InstallationSessionEventPort { events += it })
+                .execute(actionLease(gateway), artifacts)
+        }
+
+        val completed = events.filterIsInstance<InstallationSessionEvent.InstallationCompleted>().single()
+        assertEquals(emptyList<ComponentCheck>(), completed.checks)
+        assertEquals(setOf("desktop"), completed.writeConfirmedComponentIds)
+        assertEquals(setOf("desktop"), completed.confirmationPendingComponentIds)
+        assertFalse(events.any { it is InstallationSessionEvent.ComponentFailed })
+    }
+
+    @Test
+    fun `coordinator keeps a confirmed identity mismatch as a concrete failure`() {
+        val desktopFile = Files.createTempFile("desktop-identity-mismatch", ".apk").toFile().apply {
+            writeBytes(byteArrayOf(2))
+        }
+        val artifacts = listOf(prepared("desktop", "com.tcrrry.desktop", desktopFile))
+        val events = mutableListOf<InstallationSessionEvent>()
+        val gateway = object : AdbCommandGateway {
+            override suspend fun install(
+                artifacts: List<com.ninepointnine.helper.domain.device.InstallableArtifact>,
+            ): DeviceInstallResult = DeviceInstallResult.WrittenButUnverified(
+                writeConfirmedComponentIds = setOf("desktop"),
+                failure = com.ninepointnine.helper.domain.device.DeviceActionFailure(
+                    "installation_installed_certificate_mismatch",
+                    "desktop",
+                    retryable = false,
+                ),
+                confirmationPendingComponentIds = setOf("desktop"),
+            )
+
+            override suspend fun runShortcut(
+                shortcut: DeviceShortcut,
+                selectedComponentIds: Set<String>,
+            ): DeviceShortcutResult = error("identity mismatch must not authorize")
+        }
+
+        kotlinx.coroutines.runBlocking {
+            DeviceInstallationCoordinator(InstallationSessionEventPort { events += it })
+                .execute(actionLease(gateway), artifacts)
+        }
+
+        val completed = events.filterIsInstance<InstallationSessionEvent.InstallationCompleted>().single()
+        assertTrue(completed.confirmationPendingComponentIds.isEmpty())
+        assertTrue(events.any {
+            it is InstallationSessionEvent.ComponentFailed &&
+                it.componentId == "desktop" &&
+                it.reasonCode == "installation_installed_certificate_mismatch"
+        })
+    }
+
+    @Test
+    fun `coordinator accepts observed version and digest differences after identity proof`() {
+        val desktopFile = Files.createTempFile("desktop-observed-metadata", ".apk").toFile().apply {
+            writeBytes(byteArrayOf(2))
+        }
+        val artifacts = listOf(prepared("desktop", "com.tcrrry.desktop", desktopFile))
+        val observedVersion = ArtifactVersion("9.9.9", 999)
+        val events = mutableListOf<InstallationSessionEvent>()
+        val gateway = object : AdbCommandGateway {
+            override suspend fun install(
+                artifacts: List<com.ninepointnine.helper.domain.device.InstallableArtifact>,
+            ): DeviceInstallResult {
+                val expected = installedEvidence(artifacts.single())
+                return DeviceInstallResult.Installed(
+                    evidence = listOf(
+                        expected.copy(
+                            version = observedVersion,
+                            apkSizeBytes = expected.apkSizeBytes + 5L,
+                            apkSha256 = "44".repeat(32),
+                        ),
+                    ),
+                    writeConfirmedComponentIds = setOf("desktop"),
+                )
+            }
+
+            override suspend fun runShortcut(
+                shortcut: DeviceShortcut,
+                selectedComponentIds: Set<String>,
+            ): DeviceShortcutResult {
+                val installable = artifacts.map {
+                    com.ninepointnine.helper.domain.device.InstallableArtifact(it.manifest, it.finalApk, it.declarations)
+                }
+                val plan = AuthorizationPlanFactory.create(installable) as AuthorizationPlanBuildResult.Ready
+                return DeviceShortcutResult.Completed(
+                    configuredComponentIds = selectedComponentIds,
+                    skippedComponentIds = emptySet(),
+                    authorizationEvidence = validAuthorizationEvidence(plan.plan),
+                    availabilityEvidence = listOf(
+                        com.ninepointnine.helper.domain.device.ManagedApplicationAvailabilityEvidence(
+                            componentId = "desktop",
+                            packageName = "com.tcrrry.desktop",
+                            launchAttempted = true,
+                            launcherResolved = true,
+                            processRunning = true,
+                            requiredServiceBound = true,
+                        ),
+                    ),
+                )
+            }
+        }
+
+        kotlinx.coroutines.runBlocking {
+            DeviceInstallationCoordinator(InstallationSessionEventPort { events += it })
+                .execute(actionLease(gateway), artifacts)
+        }
+
+        val completed = events.filterIsInstance<InstallationSessionEvent.InstallationCompleted>().single()
+        val observed = completed.evidence.single()
+        assertEquals(observedVersion, observed.version)
+        assertEquals("44".repeat(32), observed.apkSha256)
+        assertFalse(events.any { it is InstallationSessionEvent.ComponentFailed })
     }
 
     @Test

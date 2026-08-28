@@ -1,5 +1,6 @@
 package com.ninepointnine.helper.application
 
+import android.util.Log
 import com.ninepointnine.helper.application.device.DeviceDiscoverySessionAdapter
 import com.ninepointnine.helper.application.device.DeviceConnectionSessionAdapter
 import com.ninepointnine.helper.application.session.InstallationSessionEventDispatcher
@@ -27,6 +28,7 @@ import com.ninepointnine.helper.domain.session.InstallationFlow
 import com.ninepointnine.helper.domain.session.InstallationBatchPlan
 import com.ninepointnine.helper.domain.session.ArtifactCatalogStage
 import com.ninepointnine.helper.domain.session.MaintenanceActionStatus
+import com.ninepointnine.helper.domain.session.failureCategoryForReasonCode
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -35,6 +37,11 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
+
+private sealed interface MaintenancePersistenceOperation {
+    data class Save(val snapshot: InstallationSessionSnapshot) : MaintenancePersistenceOperation
+    data object Clear : MaintenancePersistenceOperation
+}
 
 /**
  * Application owner that starts, retains and cancels adapters around the single domain session.
@@ -50,6 +57,7 @@ class InstallerRuntime(
     private val executeDeviceInstallation: (suspend (DeviceConnectionLease, List<PreparedArtifact>, InstallationSessionEventPort) -> Unit)? = null,
     private val maintenanceController: MaintenanceController? = null,
     private val persistMaintenanceSnapshot: (suspend (InstallationSessionSnapshot) -> Unit)? = null,
+    private val clearMaintenanceSnapshot: (suspend () -> Unit)? = null,
     coroutineContext: CoroutineContext,
     private val prepareSelectedCatalog: (suspend (Set<String>, InstallationSessionEventPort) -> CatalogLoadResult)? = null,
     /** Strategy-aware selected-catalog hook; skipped ids never enter remote preparation. */
@@ -85,8 +93,7 @@ class InstallerRuntime(
     private var foregroundGeneration = 0L
     private var maintenanceReconnectGeneration: Long? = null
     private var manualMaintenanceDisconnect = false
-    private var lastAttemptedMaintenanceBaseline: InstallationSessionSnapshot? = null
-    private var maintenancePersistenceAttemptId = 0L
+    private var lastMaintenancePersistenceOperation: MaintenancePersistenceOperation? = null
     private var closed = false
 
     init {
@@ -95,34 +102,31 @@ class InstallerRuntime(
                 reconcileDisconnectedInstallation(snapshot)
             }
         }
-        persistMaintenanceSnapshot?.let { persist ->
+        val persist = persistMaintenanceSnapshot
+        val clear = clearMaintenanceSnapshot
+        if (persist != null || clear != null) {
             scope.launch {
                 session.snapshots.collect { snapshot ->
-                    val baseline = MaintenanceBaselineProjector.project(snapshot) ?: return@collect
-                    if (baseline == lastAttemptedMaintenanceBaseline) return@collect
-                    // Record the business baseline before publishing feedback. The
-                    // feedback projects to the same baseline and must not start a
-                    // recursive write.
-                    lastAttemptedMaintenanceBaseline = baseline
-                    val attemptId = ++maintenancePersistenceAttemptId
-                    eventPortFor(session.currentSnapshot()).emit(
-                        InstallationSessionEvent.MaintenanceBaselinePersistenceStarted(attemptId),
-                    )
+                    val baseline = MaintenanceBaselineProjector.project(snapshot)
+                    val operation = when {
+                        baseline != null && persist != null -> MaintenancePersistenceOperation.Save(baseline)
+                        MaintenanceBaselineProjector.shouldClear(snapshot) && clear != null ->
+                            MaintenancePersistenceOperation.Clear
+                        else -> return@collect
+                    }
+                    if (operation == lastMaintenancePersistenceOperation) return@collect
+                    // Phone-local durability is deliberately outside the session.
+                    // It cannot change a verified car result or trigger a UI state.
+                    lastMaintenancePersistenceOperation = operation
                     try {
-                        persist(baseline)
-                        if (MaintenanceBaselineProjector.project(session.currentSnapshot()) == baseline) {
-                            eventPortFor(session.currentSnapshot()).emit(
-                                InstallationSessionEvent.MaintenanceBaselinePersistenceCompleted(attemptId),
-                            )
+                        when (operation) {
+                            is MaintenancePersistenceOperation.Save -> checkNotNull(persist).invoke(operation.snapshot)
+                            MaintenancePersistenceOperation.Clear -> checkNotNull(clear).invoke()
                         }
                     } catch (cancelled: CancellationException) {
                         throw cancelled
-                    } catch (_: Exception) {
-                        if (MaintenanceBaselineProjector.project(session.currentSnapshot()) == baseline) {
-                            eventPortFor(session.currentSnapshot()).emit(
-                                InstallationSessionEvent.MaintenanceBaselinePersistenceFailed(attemptId),
-                            )
-                        }
+                    } catch (exception: Exception) {
+                        Log.w("03helper-runtime", "maintenance_baseline_persistence_failed", exception)
                     }
                 }
             }
@@ -293,7 +297,16 @@ class InstallerRuntime(
 
                 before.state == InstallationSessionState.MAINTENANCE &&
                     after.maintenance.activeAction == effectiveCommand.actionId &&
-                    before.maintenance.activeAction != effectiveCommand.actionId -> launchMaintenanceAction(effectiveCommand.actionId, after)
+                    before.maintenance.activeAction != effectiveCommand.actionId -> {
+                    if (after.sessionId != before.sessionId) {
+                        // Every maintenance action starts a fresh generation.
+                        // Stop the previous adapter before launching the new
+                        // one; its already-emitted callbacks are rejected by
+                        // sessionId.
+                        cancelTransferWork()
+                    }
+                    launchMaintenanceAction(effectiveCommand.actionId, after)
+                }
             }
 
             is InstallationSessionCommand.MaintenanceApplicationAction -> {
@@ -303,6 +316,7 @@ class InstallerRuntime(
                     after.maintenance.applicationAction?.actionId == effectiveCommand.actionId &&
                     after.maintenance.applicationAction?.status == MaintenanceActionStatus.RUNNING
                 ) {
+                    if (after.sessionId != before.sessionId) cancelTransferWork()
                     launchMaintenanceApplicationAction(effectiveCommand, after)
                 }
             }
@@ -1005,17 +1019,16 @@ class InstallerRuntime(
         snapshot.installationBatch?.resultComponentIds
             ?.asSequence()
             ?.mapNotNull { componentId ->
+                // Component descriptors carry catalog/selection diagnostics,
+                // which are not proof that this batch failed. Use only the
+                // result projection built from explicit batch failure facts.
                 val reason = snapshot.componentResults.firstOrNull { it.componentId == componentId }?.failureReason
-                    ?: snapshot.components.firstOrNull { it.id == componentId }?.errorReason
                 reason?.let { componentId to it }
             }
             ?.firstOrNull()
 
-    private fun failureCategoryForReason(reasonCode: String): FailureCategory = when {
-        reasonCode.contains("archive") || reasonCode.contains("zip") -> FailureCategory.ARCHIVE
-        reasonCode.contains("download") || reasonCode.contains("source") -> FailureCategory.DOWNLOAD
-        else -> FailureCategory.VERIFICATION
-    }
+    private fun failureCategoryForReason(reasonCode: String): FailureCategory =
+        failureCategoryForReasonCode(reasonCode)
 
     private fun failureCategory(failure: ArtifactFailure): FailureCategory = when (failure.phase) {
         ArtifactFailurePhase.ARCHIVE_VERIFICATION,

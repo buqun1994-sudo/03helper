@@ -125,6 +125,11 @@ internal class DadbCommandGateway(
         }
 
         val reusableMissingOnlyIds = mutableSetOf<String>()
+        // Includes both fresh writes and packages intentionally skipped after
+        // a trusted inventory read. It marks the set for which a later
+        // identity-readback failure is a pending confirmation rather than a
+        // pre-install failure.
+        val operationConfirmedComponentIds = mutableSetOf<String>()
         val writeConfirmedComponentIds = mutableSetOf<String>()
         val installationWarnings = mutableListOf<DeviceInstallWarning>()
         // Validate every artifact that may be written. An already-installed
@@ -187,6 +192,7 @@ internal class DadbCommandGateway(
             ) {
                 // The package is already present. The identity readback below
                 // remains mandatory; presence alone is never accepted as proof.
+                operationConfirmedComponentIds += artifact.manifest.componentId
                 return@forEach
             }
             val remotePath = remoteApkPath(artifact)
@@ -234,6 +240,7 @@ internal class DadbCommandGateway(
                 )
             }
             writeConfirmedComponentIds += artifact.manifest.componentId
+            operationConfirmedComponentIds += artifact.manifest.componentId
         }
 
         // Read back every installed APK only after the entire install batch is
@@ -243,12 +250,20 @@ internal class DadbCommandGateway(
             when (val identity = verifyInstalledArtifactIdentity(artifact, metadataReader, verificationDirectory)) {
                 is InstalledArtifactIdentityResult.Verified -> installed += identity.evidence
                 is InstalledArtifactIdentityResult.Failed -> {
-                    if (writeConfirmedComponentIds.isNotEmpty()) {
+                    if (operationConfirmedComponentIds.isNotEmpty()) {
+                        val identityMismatch = identity.failure.reasonCode in setOf(
+                            "installation_installed_package_mismatch",
+                            "installation_installed_certificate_mismatch",
+                        )
                         return@withLease DeviceInstallResult.WrittenButUnverified(
                             writeConfirmedComponentIds = writeConfirmedComponentIds.toSet(),
                             failure = identity.failure,
                             verifiedEvidence = installed.toList(),
                             warnings = installationWarnings.toList(),
+                            confirmationPendingComponentIds = operationConfirmedComponentIds
+                                .filterNot { id -> installed.any { evidence -> evidence.componentId == id } }
+                                .filterNot { id -> identityMismatch && id == identity.failure.componentId }
+                                .toSet(),
                         )
                     }
                     return@withLease DeviceInstallResult.Failed(
@@ -344,10 +359,51 @@ internal class DadbCommandGateway(
             authorizationPlan,
             launchDesktop = launchDesktop,
         )
-        val result = if (launchDesktop && parsed is DeviceShortcutResult.Completed) {
-            verifyDesktopRuntime(parsed, authorizationPlan)
-        } else {
-            parsed
+        val result = when (val postcondition = readAuthorizationPostcondition(authorizationPlan)) {
+            is AuthorizationPostcondition.Satisfied -> {
+                val structuralFailure = (parsed as? DeviceShortcutResult.Failed)
+                    ?.takeIf { isNonMaskableAuthorizationFailure(it.failure.reasonCode) }
+                if (structuralFailure != null) {
+                    structuralFailure
+                } else {
+                    val completed = DeviceShortcutResult.Completed(
+                        configuredComponentIds = postcondition.configuredComponentIds -
+                            (parsed as? DeviceShortcutResult.Failed)?.skippedComponentIds.orEmpty(),
+                        skippedComponentIds = (parsed as? DeviceShortcutResult.Failed)
+                            ?.skippedComponentIds.orEmpty(),
+                        authorizationEvidence = postcondition.evidence,
+                        availabilityEvidence = parsed.availabilityEvidenceOrEmpty(),
+                    )
+                    if (launchDesktop) verifyDesktopRuntime(completed, authorizationPlan) else completed
+                }
+            }
+
+            is AuthorizationPostcondition.NotSatisfied -> DeviceShortcutResult.Failed(
+                stage = DeviceShortcutFailureStage.AUTHORIZATION,
+                failure = DeviceActionFailure(
+                    reasonCode = postcondition.probe.reasonCode
+                        ?: "authorization_confirmation_not_satisfied",
+                    componentId = postcondition.action.componentId,
+                    retryable = true,
+                ),
+                configuredComponentIds = postcondition.configuredComponentIds,
+                skippedComponentIds = parsed.skippedComponentIdsOrEmpty(),
+                authorizationEvidence = postcondition.evidence,
+                availabilityEvidence = parsed.availabilityEvidenceOrEmpty(),
+            )
+
+            is AuthorizationPostcondition.Unavailable -> DeviceShortcutResult.Failed(
+                stage = DeviceShortcutFailureStage.AUTHORIZATION,
+                failure = DeviceActionFailure(
+                    reasonCode = "authorization_confirmation_unavailable",
+                    componentId = postcondition.action?.componentId,
+                    retryable = true,
+                ),
+                configuredComponentIds = postcondition.configuredComponentIds,
+                skippedComponentIds = parsed.skippedComponentIdsOrEmpty(),
+                authorizationEvidence = postcondition.evidence,
+                availabilityEvidence = parsed.availabilityEvidenceOrEmpty(),
+            )
         }
         Log.d(
             TAG,
@@ -533,7 +589,31 @@ internal class DadbCommandGateway(
         } catch (_: Exception) {
             null
         }
-        CombinedAuthorizationResponseParser.parseRepair(response, plan)
+        val parsed = CombinedAuthorizationResponseParser.parseRepair(response, plan)
+        when (val postcondition = readAuthorizationPostcondition(plan)) {
+            is AuthorizationPostcondition.Satisfied -> {
+                (parsed as? MaintenanceDeviceResult.Failed)
+                    ?.takeIf { isNonMaskableAuthorizationFailure(it.failure.reasonCode) }
+                    ?: MaintenanceDeviceResult.Completed("authorization_repaired")
+            }
+
+            is AuthorizationPostcondition.NotSatisfied -> MaintenanceDeviceResult.Failed(
+                DeviceActionFailure(
+                    reasonCode = postcondition.probe.reasonCode
+                        ?: "authorization_confirmation_not_satisfied",
+                    componentId = postcondition.action.componentId,
+                    retryable = true,
+                ),
+            )
+
+            is AuthorizationPostcondition.Unavailable -> MaintenanceDeviceResult.Failed(
+                DeviceActionFailure(
+                    "authorization_confirmation_unavailable",
+                    postcondition.action?.componentId,
+                    retryable = true,
+                ),
+            )
+        }
     }
 
     override suspend fun inspectManagedApplications(): ManagedApplicationsResult =
@@ -746,23 +826,23 @@ internal class DadbCommandGateway(
                 )
             }
             val probes = plan.actions.map(::readAuthorizationAction)
-            val failedProbe = probes.firstOrNull { it.value == null }
             val unmet = probes.firstOrNull { it.value == false }
+            val failedProbe = probes.firstOrNull { it.value == null }
             when {
-                failedProbe != null -> ManagedApplicationAuthorizationStatus(
-                    componentId = component.componentId,
-                    packageName = installed.packageName,
-                    authorized = null,
-                    state = MaintenanceAuthorizationState.ERROR,
-                    reasonCode = failedProbe.reasonCode,
-                )
-
                 unmet != null -> ManagedApplicationAuthorizationStatus(
                     componentId = component.componentId,
                     packageName = installed.packageName,
                     authorized = false,
                     state = MaintenanceAuthorizationState.NOT_AUTHORIZED,
                     reasonCode = unmet.reasonCode,
+                )
+
+                failedProbe != null -> ManagedApplicationAuthorizationStatus(
+                    componentId = component.componentId,
+                    packageName = installed.packageName,
+                    authorized = null,
+                    state = MaintenanceAuthorizationState.ERROR,
+                    reasonCode = failedProbe.reasonCode,
                 )
 
                 else -> ManagedApplicationAuthorizationStatus(
@@ -776,16 +856,21 @@ internal class DadbCommandGateway(
         return MaintenanceAuthorizationResult.Completed(statuses)
     }
 
-    private fun readAuthorizationAction(action: AuthorizationAction): AuthorizationProbe = when (action) {
+    private fun readAuthorizationAction(action: AuthorizationAction): AuthorizationProbe = try {
+        when (action) {
         is AuthorizationAction.EnsureAppOpAllowed -> {
             val response = shell("appops get ${shellArgument(action.packageName)} ${shellArgument(action.operation.wireName)}")
             val state = response
                 ?.takeIf { it.exitCode == 0 }
                 ?.let { AppOpsResponseParser.parse(it.output, action.operation.wireName) }
             when (state) {
-                AuthorizationValueState.ALLOWED -> AuthorizationProbe(true, null)
+                AuthorizationValueState.ALLOWED -> AuthorizationProbe(
+                    value = true,
+                    reasonCode = null,
+                    state = state,
+                )
                 null -> AuthorizationProbe(null, "authorization_appop_read_failed")
-                else -> AuthorizationProbe(false, "authorization_appop_not_allowed")
+                else -> AuthorizationProbe(false, "authorization_appop_not_allowed", state)
             }
         }
 
@@ -795,11 +880,12 @@ internal class DadbCommandGateway(
                 AuthorizationProbe(null, "authorization_runtime_permission_read_failed")
             } else {
                 val granted = Regex(
-                    "(?m)^\\s*${Regex.escape(action.permission.wireName)}:\\s*granted=(true|false)",
-                ).find(response.output)?.groupValues?.getOrNull(1)?.toBooleanStrictOrNull()
+                    "(?im)^\\s*${Regex.escape(action.permission.wireName)}\\s*:\\s*granted\\s*=\\s*(true|false)\\b",
+                ).find(response.output)?.groupValues?.getOrNull(1)
+                    ?.equals("true", ignoreCase = true)
                 when (granted) {
-                    true -> AuthorizationProbe(true, null)
-                    false -> AuthorizationProbe(false, "authorization_runtime_permission_not_granted")
+                    true -> AuthorizationProbe(true, null, AuthorizationValueState.GRANTED)
+                    false -> AuthorizationProbe(false, "authorization_runtime_permission_not_granted", AuthorizationValueState.DENIED)
                     null -> AuthorizationProbe(null, "authorization_runtime_permission_read_failed")
                 }
             }
@@ -810,8 +896,8 @@ internal class DadbCommandGateway(
             when {
                 response == null || response.exitCode != 0 ->
                     AuthorizationProbe(null, "authorization_secure_setting_read_failed")
-                response.output.trim() == "1" -> AuthorizationProbe(true, null)
-                response.output.trim() == "0" -> AuthorizationProbe(false, "authorization_secure_setting_disabled")
+                response.output.trim() == "1" -> AuthorizationProbe(true, null, AuthorizationValueState.ENABLED)
+                response.output.trim() == "0" -> AuthorizationProbe(false, "authorization_secure_setting_disabled", AuthorizationValueState.DISABLED)
                 else -> AuthorizationProbe(null, "authorization_secure_setting_read_failed")
             }
         }
@@ -821,24 +907,167 @@ internal class DadbCommandGateway(
             if (response == null || response.exitCode != 0) {
                 AuthorizationProbe(null, "authorization_component_list_read_failed")
             } else {
-                val present = response.output.trim()
-                    .takeUnless { it.isBlank() || it == "null" }
-                    ?.split(':')
-                    ?.any { it == action.targetComponent }
-                    ?: false
-                if (present) {
-                    AuthorizationProbe(true, null)
-                } else {
-                    AuthorizationProbe(false, "authorization_component_not_present")
+                when (val entries = parseAuthorizationComponentList(response.output)) {
+                    null -> AuthorizationProbe(null, "authorization_component_list_read_failed")
+                    else -> {
+                        val present = action.targetComponent in entries
+                        if (present) {
+                            AuthorizationProbe(
+                                value = true,
+                                reasonCode = null,
+                                state = AuthorizationValueState.COMPONENT_PRESENT,
+                                preservedEntryCount = entries.size,
+                            )
+                        } else {
+                            AuthorizationProbe(
+                                value = false,
+                                reasonCode = "authorization_component_not_present",
+                                state = AuthorizationValueState.COMPONENT_ABSENT,
+                                preservedEntryCount = entries.size,
+                            )
+                        }
+                    }
                 }
             }
         }
+        }
+    } catch (_: Exception) {
+        AuthorizationProbe(
+            value = null,
+            reasonCode = when (action) {
+                is AuthorizationAction.EnsureAppOpAllowed -> "authorization_appop_read_failed"
+                is AuthorizationAction.EnsureRuntimePermissionGranted -> "authorization_runtime_permission_read_failed"
+                is AuthorizationAction.EnsureSecureSettingEnabled -> "authorization_secure_setting_read_failed"
+                is AuthorizationAction.AppendSecureComponent -> "authorization_component_list_read_failed"
+            },
+        )
     }
 
     private data class AuthorizationProbe(
         val value: Boolean?,
         val reasonCode: String?,
+        val state: AuthorizationValueState? = null,
+        val preservedEntryCount: Int? = null,
     )
+
+    private sealed interface AuthorizationPostcondition {
+        data class Satisfied(
+            val evidence: List<AuthorizationActionEvidence>,
+            val configuredComponentIds: Set<String>,
+        ) : AuthorizationPostcondition
+
+        data class NotSatisfied(
+            val action: AuthorizationAction,
+            val probe: AuthorizationProbe,
+            val evidence: List<AuthorizationActionEvidence>,
+            val configuredComponentIds: Set<String>,
+        ) : AuthorizationPostcondition
+
+        data class Unavailable(
+            val action: AuthorizationAction?,
+            val evidence: List<AuthorizationActionEvidence>,
+            val configuredComponentIds: Set<String>,
+        ) : AuthorizationPostcondition
+    }
+
+    /** Reads the same typed authorization postcondition used by maintenance inspection. */
+    private suspend fun readAuthorizationPostcondition(
+        plan: com.ninepointnine.helper.domain.device.AuthorizationPlan,
+    ): AuthorizationPostcondition {
+        if (plan.actions.isEmpty()) {
+            return AuthorizationPostcondition.Satisfied(
+                evidence = emptyList(),
+                configuredComponentIds = plan.components.mapTo(linkedSetOf()) { it.componentId },
+            )
+        }
+        var lastReadings = emptyList<Pair<AuthorizationAction, AuthorizationProbe>>()
+        READBACK_RETRY_DELAYS_MILLIS.take(AUTHORIZATION_CONFIRMATION_ATTEMPTS).forEachIndexed { index, delayMillis ->
+            val readings = plan.actions.map { action -> action to readAuthorizationAction(action) }
+            lastReadings = readings
+            val evidence = authorizationEvidenceFor(readings)
+            val configured = configuredComponentIdsFor(readings, plan)
+            val unmet = readings.firstOrNull { it.second.value == false }
+            val unknown = readings.firstOrNull { it.second.value == null || it.second.state == null }
+            if (unknown == null &&
+                evidence.size == plan.actions.size &&
+                AuthorizationPlanFactory.validateEvidence(plan, evidence)
+            ) {
+                return AuthorizationPostcondition.Satisfied(
+                    evidence = evidence,
+                    configuredComponentIds = configured,
+                )
+            }
+            if (index < AUTHORIZATION_CONFIRMATION_ATTEMPTS - 1) delay(delayMillis)
+        }
+        val evidence = authorizationEvidenceFor(lastReadings)
+        val unmet = lastReadings.firstOrNull { it.second.value == false }
+        if (unmet != null) {
+            return AuthorizationPostcondition.NotSatisfied(
+                action = unmet.first,
+                probe = unmet.second,
+                evidence = evidence,
+                configuredComponentIds = configuredComponentIdsFor(lastReadings, plan),
+            )
+        }
+        return AuthorizationPostcondition.Unavailable(
+            action = lastReadings.firstOrNull { it.second.value == null || it.second.state == null }?.first,
+            evidence = evidence,
+            configuredComponentIds = configuredComponentIdsFor(lastReadings, plan),
+        )
+    }
+
+    private fun authorizationEvidenceFor(
+        readings: List<Pair<AuthorizationAction, AuthorizationProbe>>,
+    ): List<AuthorizationActionEvidence> = readings.mapNotNull { (action, probe) ->
+        if (probe.value != true) return@mapNotNull null
+        val after = probe.state ?: return@mapNotNull null
+        val preserved = if (action is AuthorizationAction.AppendSecureComponent) {
+            probe.preservedEntryCount ?: return@mapNotNull null
+        } else {
+            null
+        }
+        AuthorizationActionEvidence(
+            componentId = action.componentId,
+            actionId = action.id,
+            // This is a read-only postcondition receipt. The desired value was
+            // already present when observed, so no new write is claimed here.
+            before = after,
+            writeApplied = false,
+            after = after,
+            preservedEntryCount = preserved,
+        )
+    }
+
+    private fun configuredComponentIdsFor(
+        readings: List<Pair<AuthorizationAction, AuthorizationProbe>>,
+        plan: com.ninepointnine.helper.domain.device.AuthorizationPlan,
+    ): Set<String> {
+        val evidence = authorizationEvidenceFor(readings)
+        return if (AuthorizationPlanFactory.validateEvidenceSubset(plan, evidence)) {
+            AuthorizationPlanFactory.configuredComponentIdsForEvidence(plan, evidence)
+        } else {
+            emptySet()
+        }
+    }
+
+    private fun parseAuthorizationComponentList(output: String): List<String>? {
+        val normalized = output.trim()
+        if (normalized.isBlank() || normalized == "null") return emptyList()
+        if (normalized.any { it == '\n' || it == '\r' || it.isWhitespace() }) return null
+        val entries = normalized.split(':')
+        if (entries.any { it.isBlank() }) return null
+        return entries.distinct()
+    }
+
+    private fun DeviceShortcutResult.skippedComponentIdsOrEmpty(): Set<String> = when (this) {
+        is DeviceShortcutResult.Completed -> skippedComponentIds
+        is DeviceShortcutResult.Failed -> skippedComponentIds
+    }
+
+    private fun DeviceShortcutResult.availabilityEvidenceOrEmpty(): List<com.ninepointnine.helper.domain.device.ManagedApplicationAvailabilityEvidence> = when (this) {
+        is DeviceShortcutResult.Completed -> availabilityEvidence
+        is DeviceShortcutResult.Failed -> availabilityEvidence
+    }
 
     override suspend fun performApplicationAction(
         component: com.ninepointnine.helper.domain.device.ManagedComponent,
@@ -1165,8 +1394,6 @@ internal class DadbCommandGateway(
             val certificate = metadata.certificateSha256s.firstOrNull { candidate ->
                 candidate.equals(manifest.certificateSha256, ignoreCase = true)
             }
-            val versionMatches = metadata.version.code == manifest.apkVersion.code &&
-                (manifest.apkVersion.name.isBlank() || metadata.version.name == manifest.apkVersion.name)
             if (metadata.packageName != manifest.packageName) {
                 InstalledArtifactIdentityResult.Failed(
                     DeviceActionFailure(
@@ -1183,15 +1410,12 @@ internal class DadbCommandGateway(
                         retryable = false,
                     ),
                 )
-            } else if (!versionMatches) {
-                InstalledArtifactIdentityResult.Failed(
-                    DeviceActionFailure(
-                        "installation_installed_version_mismatch",
-                        manifest.componentId,
-                        retryable = false,
-                    ),
-                )
             } else {
+                // The package name and trusted signing certificate answer the
+                // identity question. Version, size and digest are retained as
+                // observations of the bytes actually installed; they are not
+                // a second Cloud-field identity gate after PackageManager has
+                // accepted the package.
                 InstalledArtifactIdentityResult.Verified(
                     InstalledArtifactEvidence(
                         componentId = manifest.componentId,
@@ -1243,8 +1467,6 @@ internal class DadbCommandGateway(
             val certificateMatches = metadata.certificateSha256s.any { candidate ->
                 candidate.equals(manifest.certificateSha256, ignoreCase = true)
             }
-            val versionMatches = metadata.version.code == manifest.apkVersion.code &&
-                (manifest.apkVersion.name.isBlank() || metadata.version.name == manifest.apkVersion.name)
             if (metadata.packageName != manifest.packageName) {
                 MaintenanceInstalledIdentity.Failed(
                     DeviceActionFailure(
@@ -1261,15 +1483,10 @@ internal class DadbCommandGateway(
                         retryable = false,
                     ),
                 )
-            } else if (!versionMatches) {
-                MaintenanceInstalledIdentity.Failed(
-                    DeviceActionFailure(
-                        "maintenance_installed_version_mismatch",
-                        manifest.componentId,
-                        retryable = false,
-                    ),
-                )
             } else {
+                // Maintenance authorization needs the declarations from the
+                // installed, trusted package. A version or digest difference
+                // is an observation, not an identity rejection.
                 MaintenanceInstalledIdentity.Completed(metadata.declarations)
             }
         } catch (_: IOException) {
@@ -1306,16 +1523,13 @@ internal class DadbCommandGateway(
                 DeviceActionFailure("maintenance_package_check_failed", componentId, retryable = true),
             )
         }
-        val paths = response.output.lineSequence()
-            .map(String::trim)
-            .filter { it.startsWith("package:") }
-            .map { it.removePrefix("package:") }
-            .toList()
-        if (paths.isEmpty()) return PackageInspection.Completed(installed = false)
-        if (paths.size != 1 || !INSTALLED_APK_PATH_PATTERN.matches(paths.single())) {
-            return PackageInspection.Failed(
+        val paths = when (val parsed = InstalledPackagePathParser.parse(response.output)) {
+            InstalledPackagePathParseResult.Missing -> return PackageInspection.Completed(installed = false)
+            InstalledPackagePathParseResult.Invalid -> return PackageInspection.Failed(
                 DeviceActionFailure("maintenance_package_identity_invalid", componentId, retryable = false),
             )
+
+            is InstalledPackagePathParseResult.Valid -> parsed
         }
         val packageInfo = shell("dumpsys package ${shellArgument(packageName)}")
             ?: return PackageInspection.Failed(
@@ -1334,7 +1548,7 @@ internal class DadbCommandGateway(
             ?.let(::parseEpochMillis)
         val lastUpdate = Regex("lastUpdateTime=([^\\s]+)").find(output)?.groupValues?.getOrNull(1)
             ?.let(::parseEpochMillis)
-        val filePath = paths.single()
+        val filePath = paths.baseApkPath
         val fileSize = shell("stat -c %s ${shellArgument(filePath)}")
             ?.takeIf { it.exitCode == 0 }
             ?.output
@@ -1384,15 +1598,15 @@ internal class DadbCommandGateway(
         if (path.exitCode != 0) {
             return if (isPackageAbsentResponse(path)) PackagePresence.ABSENT else PackagePresence.UNKNOWN
         }
-        val hasPath = path.output.lineSequence()
-            .map(String::trim)
-            .filter { it.startsWith("package:") }
-            .map { it.removePrefix("package:") }
-            .any { it.isNotBlank() }
-        return if (hasPath) PackagePresence.PRESENT else if (path.output.isBlank()) {
-            PackagePresence.ABSENT
-        } else {
-            PackagePresence.UNKNOWN
+        return when (InstalledPackagePathParser.parse(path.output)) {
+            is InstalledPackagePathParseResult.Valid -> PackagePresence.PRESENT
+            InstalledPackagePathParseResult.Missing -> if (path.output.isBlank()) {
+                PackagePresence.ABSENT
+            } else {
+                PackagePresence.UNKNOWN
+            }
+
+            InstalledPackagePathParseResult.Invalid -> PackagePresence.UNKNOWN
         }
     }
 
@@ -1418,13 +1632,8 @@ internal class DadbCommandGateway(
         // A framework warning on stderr does not invalidate a structured path
         // response. Exit code and stdout are authoritative for this readback.
         if (response.exitCode != 0) return null
-        val paths = response.output.lineSequence()
-            .map(String::trim)
-            .filter { it.startsWith("package:") }
-            .map { it.removePrefix("package:") }
-            .toList()
-        if (paths.size != 1) return null
-        return paths.single().takeIf { INSTALLED_APK_PATH_PATTERN.matches(it) }
+        return (InstalledPackagePathParser.parse(response.output) as? InstalledPackagePathParseResult.Valid)
+            ?.baseApkPath
     }
 
     private fun deleteRemoteStagingFile(remotePath: String): Boolean = try {
@@ -1544,12 +1753,12 @@ internal class DadbCommandGateway(
         val PACKAGE_NAME_PATTERN = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$")
         val COMPONENT_NAME_PATTERN = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)*/[A-Za-z0-9_.$]+$")
         val DIGEST_PREFIX_PATTERN = Regex("^[0-9a-f]{16}$")
-        val INSTALLED_APK_PATH_PATTERN = Regex("^/data/app/[A-Za-z0-9_./=+\\-]+\\.apk$")
         val READBACK_RETRY_DELAYS_MILLIS = longArrayOf(150L, 300L, 500L, 750L, 750L, 750L, 750L, 750L)
         const val PROCESS_READBACK_ATTEMPTS = 13
         const val PROCESS_READBACK_DELAY_MILLIS = 250L
         const val SERVICE_READBACK_ATTEMPTS = 10
         const val SERVICE_READBACK_DELAY_MILLIS = 1_000L
+        const val AUTHORIZATION_CONFIRMATION_ATTEMPTS = 4
     }
 
     private enum class BoundServiceProbe {
@@ -1558,6 +1767,76 @@ internal class DadbCommandGateway(
         READ_FAILED,
     }
 }
+
+internal sealed interface InstalledPackagePathParseResult {
+    data object Missing : InstalledPackagePathParseResult
+
+    data object Invalid : InstalledPackagePathParseResult
+
+    data class Valid(
+        val baseApkPath: String,
+        val allApkPaths: List<String>,
+    ) : InstalledPackagePathParseResult
+}
+
+/** One strict parser shared by install identity readback and maintenance inventory. */
+internal object InstalledPackagePathParser {
+    private val segmentPattern = Regex("^[A-Za-z0-9._+=~@-]+$")
+
+    fun parse(output: String): InstalledPackagePathParseResult {
+        val packageLines = output.lineSequence()
+            .map(String::trim)
+            .filter { it.startsWith("package:") }
+            .toList()
+        if (packageLines.isEmpty()) return InstalledPackagePathParseResult.Missing
+
+        val paths = packageLines.map { it.removePrefix("package:") }
+        if (paths.distinct().size != paths.size || paths.any { !isControlledApkPath(it) }) {
+            return InstalledPackagePathParseResult.Invalid
+        }
+        val directories = paths.mapTo(linkedSetOf()) { it.substringBeforeLast('/') }
+        val basePaths = paths.filter { it.substringAfterLast('/') == "base.apk" }
+        if (directories.size != 1 || basePaths.size != 1) {
+            return InstalledPackagePathParseResult.Invalid
+        }
+        return InstalledPackagePathParseResult.Valid(
+            baseApkPath = basePaths.single(),
+            allApkPaths = paths,
+        )
+    }
+
+    private fun isControlledApkPath(path: String): Boolean {
+        if (!path.startsWith("/data/app/") || !path.endsWith(".apk")) return false
+        if (path.any { it == '\\' || it == '\u0000' || it.isWhitespace() }) return false
+        val segments = path.removePrefix("/data/app/").split('/')
+        return segments.size >= 2 && segments.all { segment ->
+            segment.isNotBlank() && segment != "." && segment != ".." && segmentPattern.matches(segment)
+        }
+    }
+}
+
+/**
+ * Failures in this set describe a violated target, safety, or runtime
+ * contract. Authorization readback proves only the requested values; it
+ * cannot prove that an unrelated component was not launched, an existing list
+ * was preserved, the selected packages existed, or the desktop became usable.
+ */
+internal fun isNonMaskableAuthorizationFailure(reasonCode: String): Boolean = reasonCode in setOf(
+    "authorization_component_list_not_preserved",
+    "shortcut_component_selection_invalid",
+    "unexpected_desktop_launch",
+    "maintenance_unexpected_launch",
+    "desktop_missing",
+    "selected_component_missing",
+    "desktop_launch_component_missing",
+    "desktop_launch_failed",
+    "desktop_launch_evidence_invalid",
+    "desktop_process_not_running",
+    "desktop_service_missing",
+    "desktop_service_not_bound",
+    "desktop_service_readback_failed",
+    "desktop_verification_not_completed",
+)
 
 internal object CombinedAuthorizationResponseParser {
     fun parse(

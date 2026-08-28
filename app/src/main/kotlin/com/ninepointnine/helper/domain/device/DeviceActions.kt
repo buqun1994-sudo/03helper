@@ -252,12 +252,18 @@ sealed interface DeviceInstallResult {
         val warnings: List<DeviceInstallWarning> = emptyList(),
     ) : DeviceInstallResult
 
-    /** PackageManager accepted a write, but the installed APK identity is not yet trusted. */
+    /**
+     * PackageManager accepted a write, but the installed APK identity could
+     * not be read back yet. The component is pending confirmation, not an
+     * ordinary install failure; a package/certificate mismatch still carries
+     * its concrete failure in [failure].
+     */
     data class WrittenButUnverified(
         val writeConfirmedComponentIds: Set<String>,
         val failure: DeviceActionFailure,
         val verifiedEvidence: List<InstalledArtifactEvidence> = emptyList(),
         val warnings: List<DeviceInstallWarning> = emptyList(),
+        val confirmationPendingComponentIds: Set<String> = emptySet(),
     ) : DeviceInstallResult
 }
 

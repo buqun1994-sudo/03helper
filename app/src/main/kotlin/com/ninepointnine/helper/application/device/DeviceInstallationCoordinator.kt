@@ -22,6 +22,7 @@ import com.ninepointnine.helper.domain.session.InstallationBatchPlan
 import com.ninepointnine.helper.domain.session.InstallationFlow
 import com.ninepointnine.helper.domain.session.InstallationSessionEvent
 import com.ninepointnine.helper.domain.session.InstallationStrategy
+import com.ninepointnine.helper.domain.session.installPhaseForReasonCode
 import kotlinx.coroutines.CancellationException
 
 sealed interface DeviceInstallationExecutionResult {
@@ -94,6 +95,7 @@ class DeviceInstallationCoordinator(
         val installedArtifacts = mutableListOf<InstallableArtifact>()
         val installationEvidence = mutableListOf<com.ninepointnine.helper.domain.device.InstalledArtifactEvidence>()
         val writeConfirmedComponentIds = mutableSetOf<String>()
+        val confirmationPendingComponentIds = mutableSetOf<String>()
         val installationWarnings = mutableListOf<com.ninepointnine.helper.domain.device.DeviceInstallWarning>()
 
         fun consumeVerifiedEvidence(evidence: List<com.ninepointnine.helper.domain.device.InstalledArtifactEvidence>) {
@@ -126,6 +128,14 @@ class DeviceInstallationCoordinator(
             when (result) {
                 is DeviceInstallResult.Failed -> {
                     writeConfirmedComponentIds += result.writeConfirmedComponentIds
+                    val verifiedIds = result.verifiedEvidence.map { it.componentId }.toSet()
+                    confirmationPendingComponentIds += result.writeConfirmedComponentIds
+                        .filterNot { it in verifiedIds }
+                        .filterNot { id ->
+                            // An explicit package/certificate mismatch is a
+                            // concrete failed identity, never an unknown one.
+                            id == result.failure.componentId && isInstalledIdentityMismatch(result.failure)
+                        }
                     installationWarnings += result.warnings
                     consumeVerifiedEvidence(result.verifiedEvidence)
                     recordFailure(artifact, installFailurePhase(result.failure), result.failure)
@@ -159,13 +169,30 @@ class DeviceInstallationCoordinator(
                 }
                 is DeviceInstallResult.WrittenButUnverified -> {
                     writeConfirmedComponentIds += result.writeConfirmedComponentIds
+                    val pendingIds = (result.confirmationPendingComponentIds.ifEmpty {
+                        if (isInstalledIdentityMismatch(result.failure)) emptySet()
+                        else setOf(artifact.manifest.componentId)
+                    }).filterNot { id ->
+                        // Defensive normalization for older gateways that may
+                        // still echo the mismatching component as pending.
+                        id == result.failure.componentId && isInstalledIdentityMismatch(result.failure)
+                    }.toSet()
+                    confirmationPendingComponentIds += pendingIds
                     installationWarnings += result.warnings
                     consumeVerifiedEvidence(result.verifiedEvidence)
-                    // PackageManager accepted the write, but this component is
-                    // deliberately excluded from installedArtifacts and all
-                    // authorization candidates until identity proof succeeds.
+                    // A package/certificate mismatch is a real installation
+                    // failure. Readback/transport uncertainty is kept as a
+                    // separate pending confirmation and never emitted as a
+                    // normal ComponentFailed event.
                     emitProgress(artifact.manifest.componentId, InstallPhase.SEND, ComponentProgressStatus.COMPLETED)
-                    recordFailure(artifact, InstallPhase.VERIFY, result.failure)
+                    if (isInstalledIdentityMismatch(result.failure)) {
+                        recordFailure(artifact, InstallPhase.VERIFY, result.failure)
+                    } else {
+                        installationWarnings += com.ninepointnine.helper.domain.device.DeviceInstallWarning(
+                            reasonCode = result.failure.reasonCode,
+                            componentId = artifact.manifest.componentId,
+                        )
+                    }
                 }
             }
         }
@@ -175,6 +202,7 @@ class DeviceInstallationCoordinator(
                 evidence = installationEvidence,
                 warnings = installationWarnings.toList(),
                 writeConfirmedComponentIds = writeConfirmedComponentIds.toSet(),
+                confirmationPendingComponentIds = confirmationPendingComponentIds.toSet(),
             ),
         )
 
@@ -660,14 +688,14 @@ class DeviceInstallationCoordinator(
         )
     }
 
-    private fun installFailurePhase(failure: DeviceActionFailure): InstallPhase = when {
-        failure.reasonCode.contains("installed_") ||
-            failure.reasonCode.contains("package_path") ||
-            failure.reasonCode.contains("apk_read") ||
-            failure.reasonCode.contains("apk_verify") -> InstallPhase.VERIFY
+    private fun installFailurePhase(failure: DeviceActionFailure): InstallPhase =
+        installPhaseForReasonCode(failure.reasonCode)
 
-        else -> InstallPhase.SEND
-    }
+    private fun isInstalledIdentityMismatch(failure: DeviceActionFailure): Boolean =
+        failure.reasonCode in setOf(
+            "installation_installed_package_mismatch",
+            "installation_installed_certificate_mismatch",
+        )
 
     private fun validateInstallationEvidence(
         artifacts: List<InstallableArtifact>,
@@ -681,9 +709,7 @@ class DeviceInstallationCoordinator(
         return evidence.all { installed ->
             val manifest = expected[installed.componentId]?.manifest ?: return@all false
             installed.packageName == manifest.packageName &&
-                installed.certificateSha256.equals(manifest.certificateSha256, ignoreCase = true) &&
-                installed.version.code == manifest.apkVersion.code &&
-                (manifest.apkVersion.name.isBlank() || installed.version.name == manifest.apkVersion.name)
+                installed.certificateSha256.equals(manifest.certificateSha256, ignoreCase = true)
         }
     }
 

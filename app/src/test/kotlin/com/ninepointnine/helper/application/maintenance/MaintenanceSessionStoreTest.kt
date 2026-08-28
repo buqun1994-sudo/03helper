@@ -100,7 +100,54 @@ class MaintenanceSessionStoreTest {
     }
 
     @Test
-    fun `explicit empty inventory and full available configuration survive a cold start`() {
+    fun `new durable record does not serialize maintenance route or action history`() {
+        val file = Files.createTempDirectory("maintenance-store-no-history")
+            .resolve("session.json")
+            .toFile()
+        val base = maintenanceSnapshot(manifests(1L), manifests(2L))
+        val snapshot = base.copy(
+            maintenance = base.maintenance.copy(
+                routeAction = MaintenanceActionId.MANAGE_APPS,
+                lastAction = MaintenanceActionRecord(
+                    actionId = MaintenanceActionId.MANAGE_APPS,
+                    status = MaintenanceActionStatus.SUCCEEDED,
+                    resultCode = "applications_checked",
+                ),
+            ),
+        )
+        val store = MaintenanceSessionStore(file)
+
+        assertTrue(store.save(snapshot))
+        val wire = file.readText()
+        assertFalse(wire.contains("\"routeAction\""))
+        assertFalse(wire.contains("\"lastAction\""))
+    }
+
+    @Test
+    fun `legacy route and action fields are ignored on cold start`() {
+        val file = Files.createTempDirectory("maintenance-store-legacy-route")
+            .resolve("session.json")
+            .toFile()
+        val base = maintenanceSnapshot(manifests(1L), manifests(2L))
+        val store = MaintenanceSessionStore(file)
+        assertTrue(store.save(base))
+        val legacyAction = "\"lastAction\":{" +
+            "\"actionId\":\"MANAGE_APPS\",\"status\":\"SUCCEEDED\",\"resultCode\":\"applications_checked\"," +
+            "\"retryable\":false},\"routeAction\":\"MANAGE_APPS\"," +
+            ""
+        val legacyWire = file.readText().replace(
+            "\"managedApplicationsState\"",
+            legacyAction + "\"managedApplicationsState\"",
+        )
+        file.writeText(legacyWire)
+
+        val restored = store.load() ?: error("legacy_snapshot_not_restored")
+        assertNull(restored.maintenance.routeAction)
+        assertNull(restored.maintenance.lastAction)
+    }
+
+    @Test
+    fun `confirmed empty inventory is not persisted as a maintenance baseline`() {
         val file = Files.createTempDirectory("maintenance-store-empty-inventory").resolve("session.json").toFile()
         val base = maintenanceSnapshot(manifests(1L), manifests(2L))
         val snapshot = base.copy(
@@ -112,19 +159,9 @@ class MaintenanceSessionStoreTest {
         )
         val store = MaintenanceSessionStore(file)
 
-        assertTrue(store.save(snapshot))
-        val restored = store.load() ?: error("snapshot_not_restored")
-
-        assertEquals(MaintenanceInventoryState.READY, restored.maintenance.managedApplicationsState)
-        assertTrue(restored.maintenance.managedApplications.isEmpty())
-        assertEquals(
-            setOf("lyrics", "file-manager"),
-            restored.maintenance.availableComponents.map { it.id }.toSet(),
-        )
-        assertEquals(
-            setOf("desktop", "lyrics", "file-manager"),
-            restored.components.map { it.id }.toSet(),
-        )
+        assertFalse(store.save(snapshot))
+        assertTrue(MaintenanceBaselineProjector.shouldClear(snapshot))
+        assertNull(store.load())
     }
 
     @Test
@@ -152,6 +189,60 @@ class MaintenanceSessionStoreTest {
         assertTrue(restored.artifactManifests.isEmpty())
         assertEquals(listOf(desktop), restored.maintenance.installedManifests)
         assertEquals(setOf(desktop.componentId), restored.evidence.installed)
+    }
+
+    @Test
+    fun `legacy artifact identity backed by installation evidence is migrated before empty identity rejection`() {
+        val file = Files.createTempDirectory("maintenance-store-legacy-identity")
+            .resolve("session.json")
+            .toFile()
+        val desktop = manifest("desktop", 1L, required = true)
+        val store = MaintenanceSessionStore(file)
+        val snapshot = maintenanceSnapshot(listOf(desktop), listOf(desktop)).copy(
+            maintenance = maintenanceSnapshot(listOf(desktop), listOf(desktop)).maintenance.copy(
+                installedManifests = listOf(desktop),
+            ),
+        )
+
+        assertTrue(store.save(snapshot))
+        val stored = file.readText()
+        val installedJson = Regex("\"installedManifests\":(\\[.*?\\]),\"availableManifests\"")
+            .find(stored)
+            ?.groupValues
+            ?.get(1)
+            ?: error("installed_manifest_wire_missing")
+        file.writeText(
+            stored
+                .replace("\"artifactManifests\":[]", "\"artifactManifests\":$installedJson")
+                .replace("\"installedManifests\":$installedJson", "\"installedManifests\":[]"),
+        )
+
+        val restored = store.load() ?: error("legacy_snapshot_not_restored")
+        assertEquals(listOf(desktop), restored.maintenance.installedManifests)
+        assertEquals(setOf(desktop.componentId), restored.evidence.installed)
+    }
+
+    @Test
+    fun `empty identity baseline is neither saved nor restored as maintenance`() {
+        val file = Files.createTempDirectory("maintenance-store-empty-identity")
+            .resolve("session.json")
+            .toFile()
+        val desktop = manifest("desktop", 1L, required = true)
+        val base = maintenanceSnapshot(listOf(desktop), listOf(desktop))
+        val emptyIdentity = base.copy(
+            evidence = SessionEvidence(),
+            maintenance = base.maintenance.copy(
+                installedManifests = emptyList(),
+                managedApplications = emptyList(),
+                managedApplicationsState = MaintenanceInventoryState.READY,
+            ),
+        )
+        val store = MaintenanceSessionStore(file)
+
+        assertFalse(store.save(emptyIdentity))
+        file.writeText("{\"schemaVersion\":1}")
+        assertNull(store.load())
+        assertFalse(file.exists())
     }
 
     @Test

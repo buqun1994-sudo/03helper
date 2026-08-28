@@ -1,5 +1,71 @@
 # 03helper 进度
 
+## 2026-08-28 真实车机安装结果复测（未通过）
+
+### 测试来源与范围
+
+以下记录来自用户按既定安装流程进行的真实车机复测。它覆盖车机实际写入和安装助手最终提示；不把 JVM fixture、手机启动 smoke 或车机应用列表观察扩写成授权 / 可用性全部通过。
+
+### 实际步骤与结果
+
+1. 首次批次安装 03桌面和 03歌词：安装助手提示正常，用户未报告该批次异常。
+2. 返回维护首页后单独安装 03投屏：安装助手提示“授权失败”。随后用户在车机侧确认 03投屏已经出现，说明车机写入成功；本次客户端最终结果与车机安装事实不一致。
+3. 返回维护首页后单独安装文件管理器：安装助手提示“安装失败”。用户在车机侧确认文件管理器已经出现，说明车机写入成功；本次客户端最终结果与车机安装事实不一致。
+
+### 最新判定
+
+本次真实车机测试不通过。当前版本仍存在“车机已写入成功，但安装助手把后置授权 / 安装结果归类为失败”的真实误报，不能标记为单一会话结果链路已修复，也不能继续要求用户按相同版本重复完整回归。待下一轮定位写入回执、安装后身份回读、授权回读和批次结果聚合之间的具体分支后，再生成新的 APK 和测试入口。本次失败记录已纳入本地提交。
+
+## 2026-08-27 单一会话安装结果施工证据锁定（本机与手机验证完成，车机复测发现结果误报）
+
+最后核对时间：2026-08-28 12:19（Asia/Shanghai）。
+
+### 锁定目的
+
+本记录是本轮施工的上下文恢复锚点。后续若发生上下文压缩，以本节、磁盘源码和当前 `git diff` 为准；不得把旧聊天、截图转写或终端显示当作新事实，也不得重复从零推演已锁定的结论。
+
+### 已发生事实
+
+1. 提交前当前分支为 `main`、相对 `origin/main` `ahead 5`，工作区包含本轮及上一轮共 27 个路径（26 个已跟踪文件、1 个新增文件）；本轮已创建本地提交，提交后分支相对 `origin/main` `ahead 6` 且工作区 clean。未执行回退、清数据、卸载、重启或车机写入。
+2. 已使用 `.codex/local-context.properties` 中的 JDK 17 显式运行 `:app:testDebugUnitTest --no-daemon --rerun-tasks`，260 项测试全部通过（0 failures / 0 errors / 0 skipped）；后续 Gradle 命令继续显式设置同一 `JDK17_HOME`。
+3. 上一轮已移除手机本地维护基线失败的领域 / UI 警告回写；维护首页二级路由只消费 `InstallationSessionSnapshot.maintenance.routeAction`；车机库存与 Android 9 授权回读已有对应适配器测试和实现。
+4. 本轮已补齐维护复用组件进入待确认的收据边界、身份不匹配与待确认互斥过滤，以及待确认时撤销旧正向维护基线；结果页和首页不再展示手机本地保存失败提示或历史路由残留。
+5. 最新 Debug APK 已构建并核对：`com.ninepointnine.helper`、`versionName=0.1.0`、`versionCode=1`、入口 `.MainActivity`，主包 SHA-256 为 `01e93f55f12ff68555f0752b2e4cfef035818622ddc96b8547b2c0108c5613fb`，AndroidTest APK SHA-256 为 `e7d46eff4e1930d9e7a297398e50b63c5615eec303af2916deaae2ae34fc0f5d`；主包单 signer、APK Signature Scheme v2 有效，Debug 证书 SHA-256 为 `2990047fddf6d6ec1eb7f83731fcc1398616e5fb83aec97542a4f132c35a1a27`。
+6. 测试手机 `adb-RFCX412AN1X-gWfMRD._adb-tls-connect._tcp` 已恢复在线（`SM-F946B`、Android 36）；已用该显式 serial 对最新主包和 AndroidTest 包执行保留数据覆盖安装，`InstallAppActivitySmokeTest` 直接运行 `2/2` 通过，smoke 后再次覆盖安装主包并启动 `.MainActivity` 返回 `Status: ok`。随后用户已完成真实车机复测，具体失败现象记录在本文件上方；本机没有代替用户再次写入车机。
+7. 共享 03 APP 登记 Guard 已在提交后从 Cloud 仓库按严格模式重新执行，阻断原因为登记快照 HEAD `53898143ab42a08ded0c68431e523312a4ec61fd` 与本次本地提交的当前 HEAD 不一致，且登记记录为 dirty、当前工作树为 clean；未修改共享登记库，也未把本地提交标记为已发布产物。
+
+### 本轮锁定的不变量
+
+1. **安装前供应链门禁**：不可信 ZIP / APK 在进入车机前继续严格校验包名、受信发布者证书、版本、大小、SHA-256 和 manifest 约束；失败必须停止该组件并清理无效产物。
+2. **安装后身份裁决**：车机回读只用包名和受信发布者证书判断“是不是目标应用”。车机实际版本、大小和 SHA-256 必须作为 `InstalledArtifactEvidence` 观测证据保留，但不得与 Cloud 展示字段重复构成安装后拒绝门禁。
+3. **结果分类**：明确身份 / 写入失败进入普通失败；已写入但车机回读不可用进入“安装结果待确认”；已安装但授权或可用性未满足进入对应后置失败；任何类别不得被另一类别的日志文本覆盖。
+4. **单一会话**：安装、授权、可用性、维护路由和结果行均由 `InstallationSession` / `InstallationSessionSnapshot` 提供；手机本地基线保存是运行时外部副作用，不回写会话或 UI。
+5. **用户可见结果**：每个组件只显示一条最终状态：安装成功、已安装但授权未完成、已安装但可用性未完成、安装结果待确认或安装失败及明确原因；阶段标签、三项布尔证据和开发日志不进入结果页。
+6. **批次隔离**：结果行和失败原因只来自当前 `InstallationBatchPlan.resultComponentIds`；历史批次、维护库存和完整控制面清单不得复活到当前结果页。
+
+### 物理施工锚点
+
+1. `DadbCommandGateway.verifyInstalledArtifactIdentityOnce` 与 `verifyInstalledArtifactForMaintenance`：保留包名 / 证书身份裁决，降级版本 / 大小 / 摘要差异为观测证据。
+2. `DeviceInstallationCoordinator` 的 `WrittenButUnverified` 分支和 `validateInstallationEvidence`：身份硬失败写入失败集合，其余回读不可用只产生待确认证据。
+3. `InstallationSession.handleInstallationCompleted`、`validateInstallationEvidence`、`handleAuthorizationCompleted`、`handleDeviceVerified`：允许“已写入但未回读”的明确子集，且不把待确认升级为普通失败。
+4. `InstallationSessionSnapshot.resolveInstallationResult`、`buildComponentResults`、`hasCompleteSuccessEvidence` 与 `ComponentResultStatus`：按当前批次计算失败 / 待确认 / 后置失败，并提供唯一最终结果种类。
+5. `InstallationSession.enterMaintenance`：进入维护首页时清理 `routeAction`、`lastAction`、安装选择和应用详情，防止旧二级页或提示残留。
+6. `FirstInstallScreens.kt`、`MaintenanceHome.kt`、`InstallUiStateMapper.kt` 和 `strings.xml`：统一结果行最终文案，删除内部阶段组合展示。
+
+### 已完成的本机验证
+
+1. JVM 单测覆盖版本 / 摘要差异不再误报安装失败、身份不匹配仍失败、待确认不进入普通失败集合、跨批次结果隔离、维护路由清理、Android 9 授权回读、维护复用待确认和旧基线撤销。
+2. 已通过 `:app:compileDebugKotlin`、`:app:lintDebug`、`:app:assembleDebug`、`:app:assembleDebugAndroidTest`；已通过 `node scripts/check-project-docs.mjs`、`node scripts/check-skills.mjs` 和 `git diff --check`。
+3. 已完成旧手机本地保存警告字段 / 文案、旧三项结果拼接和相关 UI 残留扫描，当前 `app/src/main` 与测试源码未发现这些旧入口。
+
+### 当前状态
+
+本机代码施工、结果聚合、UI 收敛、文档口径、自动化验证和测试手机验证已完成，但真实车机复测证明结果误报仍未解决；最新 Debug APK 不能标记为真实安装链路通过。下一轮必须先定位并修复该误报，再重新构建和安排最小车机复测，不应让用户重复当前完整流程。
+
+### 上下文恢复规则
+
+后续上下文压缩或交接时，以本节、磁盘源码、当前 `git status --short --branch` 和当前 `git diff` 为唯一证据。除非这些内容发生变化，不重复从零复核已经列出的测试、APK 身份、设备离线和 Guard 阻断事实；若有新代码或新设备结果，只追加带日期的事实并更新本节状态，不改写历史章节。
+
 ## 2026-08-25 已安装身份与图标缓存收口
 
 1. 复核发现：维护页按实时库存显示“已安装”并隐藏勾选框后，若车机只能报告包存在而没有 `versionCode`，可选组件可能同时被排除在内部批次之外，导致 UI 真值与安全复用条件不一致。

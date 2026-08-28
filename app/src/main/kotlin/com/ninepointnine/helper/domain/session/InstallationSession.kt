@@ -754,10 +754,6 @@ class InstallationSession(
         // reconstruct navigation after a flow transition or process restore.
         val actionId = current.maintenance.routeAction
             ?.takeIf { it.isApplicationInstallation }
-            ?: current.maintenance.installationSelection?.actionId
-                ?.takeIf { it.isApplicationInstallation }
-            ?: current.maintenance.lastAction?.actionId
-                ?.takeIf { it.isApplicationInstallation }
         if (actionId?.isApplicationInstallation != true) {
             // The same terminal command is also used by legacy maintenance
             // installation actions (for example REINSTALL). They must return
@@ -793,7 +789,10 @@ class InstallationSession(
                 componentFailureRetryable = emptyMap(),
                 failure = null,
                 checkpoint = null,
-                evidence = current.evidence.copy(writeConfirmed = emptySet()),
+                evidence = current.evidence.copy(
+                    writeConfirmed = emptySet(),
+                    confirmationPending = emptySet(),
+                ),
                 componentResults = emptyList(),
                 artifactManifests = emptyList(),
                 artifactCatalogStage = ArtifactCatalogStage.NOT_LOADED,
@@ -832,7 +831,10 @@ class InstallationSession(
                 failure = null,
                 checkpoint = null,
                 componentResults = emptyList(),
-                evidence = current.evidence.copy(writeConfirmed = emptySet()),
+                evidence = current.evidence.copy(
+                    writeConfirmed = emptySet(),
+                    confirmationPending = emptySet(),
+                ),
                 artifactManifests = emptyList(),
                 artifactCatalogStage = ArtifactCatalogStage.NOT_LOADED,
                 installationBatch = null,
@@ -951,7 +953,18 @@ class InstallationSession(
                 archiveDownloads = emptyMap(),
                 archiveVerifications = emptyMap(),
                 apkExtractions = emptyMap(),
-                maintenance = maintenanceBaseline,
+                // Entering the home page is a hard route boundary. Clear all
+                // secondary-page payloads and action feedback so a completed
+                // installation cannot resurrect the previous install page or
+                // its warning on the next visit.
+                maintenance = maintenanceBaseline.copy(
+                    activeAction = null,
+                    routeAction = null,
+                    lastAction = null,
+                    applicationAction = null,
+                    applicationDetails = null,
+                    installationSelection = null,
+                ),
                 maintenanceReconnectPending = false,
                 installationReconnectPending = false,
             ),
@@ -997,9 +1010,15 @@ class InstallationSession(
     private fun leaveMaintenanceAction() {
         val current = _snapshot.value
         if (current.state != InstallationSessionState.MAINTENANCE) return
-        publish(
+        // Leaving a secondary page ends the operation generation as well as
+        // clearing its route payload. Any adapter callback that was already
+        // in flight must not be able to repopulate the next home-page visit.
+        startNewGeneration(
             current.copy(
-                evidence = current.evidence.copy(writeConfirmed = emptySet()),
+                evidence = current.evidence.copy(
+                    writeConfirmed = emptySet(),
+                    confirmationPending = emptySet(),
+                ),
                 maintenance = current.maintenance.copy(
                         activeAction = null,
                         routeAction = null,
@@ -1032,10 +1051,13 @@ class InstallationSession(
             command.actionId.requiresConnectedDevice &&
             current.device?.connectionStatus != DeviceConnectionStatus.CONFIRMED
         ) {
-            publish(
+            startNewGeneration(
                 current.copy(
                     maintenance = current.maintenance.copy(
                         routeAction = command.actionId,
+                        applicationAction = null,
+                        applicationDetails = null,
+                        installationSelection = null,
                         lastAction = MaintenanceActionRecord(
                             actionId = command.actionId,
                             status = MaintenanceActionStatus.FAILED,
@@ -1072,7 +1094,9 @@ class InstallationSession(
             MaintenanceActionId.INSTALL_APPLICATIONS,
             MaintenanceActionId.INSTALL_FILE_MANAGER,
         )
-        publish(
+        // A new maintenance action owns a new generation. This is the
+        // boundary that invalidates callbacks from the previous action.
+        startNewGeneration(
             current.copy(
                 maintenance = current.maintenance.copy(
                     routeAction = command.actionId,
@@ -1099,11 +1123,11 @@ class InstallationSession(
                         current.maintenance.managedApplicationsFailureRetryable
                     },
                     managedApplications = if (refreshInventory) emptyList() else current.maintenance.managedApplications,
-                    installationSelection = if (command.actionId.isApplicationInstallation) {
-                        null
-                    } else {
-                        current.maintenance.installationSelection
-                    },
+                    // A new route owns a new page payload. Never let a prior
+                    // application detail/selection leak into this action.
+                    applicationAction = null,
+                    applicationDetails = null,
+                    installationSelection = null,
                 ),
             ),
         )
@@ -1119,11 +1143,31 @@ class InstallationSession(
         ) {
             return
         }
-        if (current.device?.connectionStatus != DeviceConnectionStatus.CONFIRMED) {
-            publish(
+        // Application actions are valid only from the managed-applications
+        // route. A stale callback must fail closed and must never invent a
+        // route that the UI did not select.
+        if (current.maintenance.routeAction != MaintenanceActionId.MANAGE_APPS) {
+            startNewGeneration(
                 current.copy(
                     maintenance = current.maintenance.copy(
-                        routeAction = current.maintenance.routeAction ?: MaintenanceActionId.MANAGE_APPS,
+                        applicationAction = MaintenanceApplicationActionRecord(
+                            componentId = command.componentId,
+                            actionId = command.actionId,
+                            status = MaintenanceActionStatus.FAILED,
+                            reasonCode = "maintenance_route_invalid",
+                            retryable = false,
+                        ),
+                        applicationDetails = null,
+                    ),
+                ),
+            )
+            return
+        }
+        if (current.device?.connectionStatus != DeviceConnectionStatus.CONFIRMED) {
+            startNewGeneration(
+                current.copy(
+                    maintenance = current.maintenance.copy(
+                        applicationDetails = null,
                         applicationAction = MaintenanceApplicationActionRecord(
                             componentId = command.componentId,
                             actionId = command.actionId,
@@ -1141,7 +1185,7 @@ class InstallationSession(
             current.maintenance.availableManifests.any { it.componentId == command.componentId } ||
             current.maintenance.managedApplications.any { it.componentId == command.componentId }
         if (!known) {
-            publish(
+            startNewGeneration(
                 current.copy(
                     maintenance = current.maintenance.copy(
                         applicationAction = MaintenanceApplicationActionRecord(
@@ -1151,21 +1195,24 @@ class InstallationSession(
                             reasonCode = "maintenance_component_unavailable",
                             retryable = false,
                         ),
-                        routeAction = current.maintenance.routeAction ?: MaintenanceActionId.MANAGE_APPS,
+                        applicationDetails = null,
                     ),
                 ),
             )
             return
         }
-        publish(
+        // Keep the application action and its adapter callbacks in one
+        // generation. A late callback from a previous row action is thereby
+        // rejected before it can change the current row.
+        startNewGeneration(
             current.copy(
                 maintenance = current.maintenance.copy(
+                    applicationDetails = null,
                     applicationAction = MaintenanceApplicationActionRecord(
                         componentId = command.componentId,
                         actionId = command.actionId,
                         status = MaintenanceActionStatus.RUNNING,
                     ),
-                    routeAction = current.maintenance.routeAction ?: MaintenanceActionId.MANAGE_APPS,
                 ),
             ),
         )
@@ -1230,7 +1277,22 @@ class InstallationSession(
             catalogSignatureAlgorithm = current.maintenance.availableCatalogSignatureAlgorithm
                 ?: current.catalogSignatureAlgorithm,
             selectedOptionalComponentIds = requestedOptional,
-            maintenance = current.maintenance.copy(routeAction = actionId),
+            maintenance = current.maintenance.copy(
+                routeAction = actionId,
+                activeAction = null,
+                applicationAction = null,
+                applicationDetails = null,
+                // Keep the selection that launched this batch so a failed
+                // attempt can return to the same user choice. A direct
+                // action (for example REINSTALL) has no matching selection
+                // and therefore starts without stale page data.
+                installationSelection = current.maintenance.installationSelection
+                    ?.takeIf { it.actionId == actionId },
+                lastAction = MaintenanceActionRecord(
+                    actionId = actionId,
+                    status = MaintenanceActionStatus.RUNNING,
+                ),
+            ),
             installationBatch = null,
         )
         // An installed row is intentionally not selectable in the UI. If its
@@ -1269,7 +1331,7 @@ class InstallationSession(
         if (validationFailure != null) {
             publish(
                 current.copy(
-                    maintenance = current.maintenance.copy(
+                    maintenance = candidate.maintenance.copy(
                         activeAction = null,
                         routeAction = actionId,
                         lastAction = MaintenanceActionRecord(
@@ -1308,6 +1370,7 @@ class InstallationSession(
             // A write receipt proves only the previous attempt's device call;
             // it cannot be reused as identity proof for this new batch.
             writeConfirmed = emptySet(),
+            confirmationPending = emptySet(),
             installation = current.evidence.installation.filterKeys { it in reusableIds },
             configured = current.evidence.configured intersect reusableIds,
             available = current.evidence.available intersect reusableIds,
@@ -1517,12 +1580,6 @@ class InstallationSession(
             is InstallationSessionEvent.MaintenanceAuthorizationChecked ->
                 handleMaintenanceAuthorizationChecked(event)
             is InstallationSessionEvent.MaintenanceCatalogRefreshed -> handleMaintenanceCatalogRefreshed(event)
-            is InstallationSessionEvent.MaintenanceBaselinePersistenceStarted ->
-                handleMaintenanceBaselinePersistenceStarted(event)
-            is InstallationSessionEvent.MaintenanceBaselinePersistenceCompleted ->
-                handleMaintenanceBaselinePersistenceCompleted(event)
-            is InstallationSessionEvent.MaintenanceBaselinePersistenceFailed ->
-                handleMaintenanceBaselinePersistenceFailed(event)
             is InstallationSessionEvent.RecoverableError -> pause(
                 category = event.category,
                 componentName = event.componentName,
@@ -2227,12 +2284,7 @@ class InstallationSession(
         sourceKind: ArtifactSourceKind? = null,
     ) {
         if (componentId !in selectedComponentIds(current) || reasonCode.isBlank()) return
-        val status = when {
-            reasonCode.contains("certificate") -> ComponentStatus.APK_SIGNATURE_MISMATCH
-            reasonCode.contains("archive") || reasonCode.contains("zip") -> ComponentStatus.ZIP_VALIDATION_FAILED
-            reasonCode.contains("missing") -> ComponentStatus.DIRECTORY_MISSING
-            else -> ComponentStatus.TEMPORARILY_UNAVAILABLE
-        }
+        val status = componentStatusForReasonCode(reasonCode)
         val updatedProgress = current.componentProgress + (
             componentId to ComponentProgress(
                 componentId = componentId,
@@ -2720,33 +2772,85 @@ class InstallationSession(
     private fun handleInstallationCompleted(event: InstallationSessionEvent.InstallationCompleted) {
         if (!requireState(InstallationSessionState.INSTALLING, "installation_event_out_of_order")) return
         val current = _snapshot.value
-        val successfulIds = successfulComponentIds(current)
-        if (!event.writeConfirmedComponentIds.all { it in selectedComponentIds(current) }) {
+        val selectedIds = selectedComponentIds(current)
+        val failedIds = current.failedComponentIds intersect selectedIds
+        val pendingIds = event.confirmationPendingComponentIds
+        // A reused maintenance prerequisite has no new PackageManager write
+        // receipt in this batch. Its immutable batch membership is still the
+        // operation receipt: the adapter proved presence from the same live
+        // inventory before entering the readback boundary.
+        val operationReceiptIds = event.writeConfirmedComponentIds +
+            current.installationBatch?.reusableComponentIds.orEmpty()
+        if (!event.writeConfirmedComponentIds.all { it in selectedIds } ||
+            !pendingIds.all { it in selectedIds } ||
+            !pendingIds.all { it in operationReceiptIds }
+        ) {
             fail(FailureCategory.INSTALLATION, reasonCode = "installation_write_receipt_invalid")
             return
         }
-        val installed = validateChecks(event.checks, successfulIds)
+        val eligibleIds = selectedIds - failedIds
+        val installed = validateCheckSubset(event.checks, eligibleIds)
         if (installed == null) {
             fail(FailureCategory.INSTALLATION, reasonCode = "installation_evidence_missing")
             return
         }
-        if (hasTrustedManifests(current, successfulIds) &&
-            !validateInstallationEvidence(event.evidence, current, successfulIds)
+        if (installed.intersect(pendingIds).isNotEmpty() ||
+            failedIds.intersect(installed).isNotEmpty() ||
+            failedIds.intersect(pendingIds).isNotEmpty() ||
+            event.evidence.any { it.componentId !in installed }
+        ) {
+            fail(FailureCategory.INSTALLATION, reasonCode = "installation_detail_invalid")
+            return
+        }
+        // Every selected component must have one explicit outcome in this
+        // batch: a verified install, a known failure already recorded above,
+        // or a readback that is explicitly waiting for confirmation.
+        if ((failedIds + installed + pendingIds) != selectedIds) {
+            fail(FailureCategory.INSTALLATION, reasonCode = "installation_evidence_missing")
+            return
+        }
+        if (hasTrustedManifests(current, installed) &&
+            !validateInstallationEvidence(event.evidence, current, installed)
         ) {
             fail(FailureCategory.INSTALLATION, reasonCode = "installation_detail_invalid")
             return
         }
         val reusedProof = reusableInstalledComponentIds(current) intersect installed
+        // A pending readback invalidates any older positive baseline for that
+        // component. Keeping the old installed/configured/available bits would
+        // make the same session simultaneously say "unknown" and "ready", and
+        // could leak an unverified identity back into the durable maintenance
+        // baseline. Fresh verified evidence below is allowed to repopulate it.
+        val invalidatedIds = pendingIds
         val evidence = current.evidence.copy(
-            installed = current.evidence.installed + installed,
+            installed = (current.evidence.installed - invalidatedIds) + installed,
             writeConfirmed = current.evidence.writeConfirmed + event.writeConfirmedComponentIds,
+            confirmationPending = (
+                current.evidence.confirmationPending + pendingIds
+                ) - installed - failedIds,
+            configured = (current.evidence.configured - invalidatedIds),
+            available = (current.evidence.available - invalidatedIds),
+            installation = (current.evidence.installation - invalidatedIds) +
+                event.evidence.associateBy { it.componentId },
+            authorizationActions = current.evidence.authorizationActions.filterNot {
+                it.componentId in invalidatedIds
+            },
+            availability = current.evidence.availability - invalidatedIds,
             artifactsVerified = current.evidence.artifactsVerified + reusedProof,
-            installation = current.evidence.installation + event.evidence.associateBy { it.componentId },
             installationWarnings = (current.evidence.installationWarnings + event.warnings).distinct(),
         )
         val verifiedInstalledManifests = trustedManifests(current).values
             .filter { it.componentId in installed }
-        val maintenance = current.maintenance.withVerifiedInstallations(verifiedInstalledManifests)
+        val maintenance = current.maintenance
+            .copy(
+                installedManifests = current.maintenance.installedManifests.filterNot {
+                    it.componentId in invalidatedIds
+                },
+                managedApplications = current.maintenance.managedApplications.filterNot {
+                    it.componentId in invalidatedIds
+                },
+            )
+            .withVerifiedInstallations(verifiedInstalledManifests)
         transition(
             state = InstallationSessionState.AUTHORIZING,
             evidence = evidence,
@@ -2765,19 +2869,41 @@ class InstallationSession(
     ): Boolean {
         if (evidence.size != expectedIds.size || evidence.map { it.componentId }.toSet() != expectedIds) return false
         val manifests = trustedManifests(snapshot)
+        // The manifest has already passed the pre-write supply-chain gate.
+        // After PackageManager accepts the write, package name and trusted
+        // certificate are the identity proof. Version, size and digest stay
+        // on InstalledArtifactEvidence as observations because the vehicle
+        // may expose a transformed/split base APK on readback.
         return evidence.all { item ->
             val manifest = manifests[item.componentId] ?: return@all false
             item.packageName == manifest.packageName &&
-                item.certificateSha256.equals(manifest.certificateSha256, ignoreCase = true) &&
-                item.version.code == manifest.apkVersion.code &&
-                (manifest.apkVersion.name.isBlank() || item.version.name == manifest.apkVersion.name)
+                item.certificateSha256.equals(manifest.certificateSha256, ignoreCase = true)
         }
+    }
+
+    /** Accepts only passed checks for a subset whose remaining ids are pending or failed. */
+    private fun validateCheckSubset(
+        checks: List<ComponentCheck>,
+        allowed: Set<String>,
+    ): Set<String>? {
+        if (checks.size != checks.map { it.componentId }.toSet().size) return null
+        if (allowed.isEmpty()) return if (checks.isEmpty()) emptySet() else null
+        val normalized = mutableMapOf<String, Boolean>()
+        checks.forEach { check ->
+            val component = _snapshot.value.components.firstOrNull {
+                it.id == check.componentId || it.displayName == check.componentId
+            } ?: return null
+            if (component.id !in allowed || normalized.put(component.id, check.passed) != null) return null
+        }
+        if (normalized.values.any { !it }) return null
+        return normalized.keys
     }
 
     private fun handleAuthorizationCompleted(event: InstallationSessionEvent.AuthorizationCompleted) {
         if (!requireState(InstallationSessionState.AUTHORIZING, "authorization_event_out_of_order")) return
         val current = _snapshot.value
-        val expectedAll = current.evidence.installed - current.failedComponentIds
+        val expectedAll = current.evidence.installed - current.failedComponentIds -
+            current.evidence.confirmationPending
         val preserved = event.preservedComponentIds
         if (!preserved.all { it in expectedAll && it in current.evidence.configured }) {
             fail(FailureCategory.CONFIGURATION, reasonCode = "preserved_authorization_evidence_invalid")
@@ -2814,7 +2940,8 @@ class InstallationSession(
     private fun handleDeviceVerified(event: InstallationSessionEvent.DeviceVerified) {
         if (!requireState(InstallationSessionState.VERIFYING_DEVICE, "device_verification_out_of_order")) return
         val current = _snapshot.value
-        val expectedAll = current.evidence.configured - current.failedComponentIds
+        val expectedAll = current.evidence.configured - current.failedComponentIds -
+            current.evidence.confirmationPending
         val preserved = event.preservedComponentIds
         if (!preserved.all { it in expectedAll && it in current.evidence.available }) {
             fail(FailureCategory.VERIFICATION, reasonCode = "preserved_availability_evidence_invalid")
@@ -2838,9 +2965,13 @@ class InstallationSession(
         )
         val results = buildComponentResults(evidence, current)
         val completeEvidence = hasCompleteSuccessEvidence(evidence, current)
+        val selectedIds = selectedComponentIds(current)
+        val failedIds = current.failedComponentIds intersect selectedIds
+        val pendingIds = current.copy(evidence = evidence).confirmationPendingComponentIds()
         val terminalState = when {
-            current.failedComponentIds.isEmpty() && completeEvidence -> InstallationSessionState.SUCCEEDED
-            current.failedComponentIds.isNotEmpty() && completeEvidence -> InstallationSessionState.COMPLETED_WITH_ERRORS
+            failedIds.isEmpty() && pendingIds.isEmpty() && completeEvidence -> InstallationSessionState.SUCCEEDED
+            completeEvidence && (failedIds.isNotEmpty() || pendingIds.isNotEmpty()) ->
+                InstallationSessionState.COMPLETED_WITH_ERRORS
             else -> {
                 fail(FailureCategory.VERIFICATION, reasonCode = "success_evidence_incomplete")
                 return
@@ -2980,65 +3111,6 @@ class InstallationSession(
                     event.actionId,
                     event.reasonCode,
                     event.retryable,
-                ),
-            ),
-            acceptedEventSequence,
-        )
-    }
-
-    private fun handleMaintenanceBaselinePersistenceStarted(
-        event: InstallationSessionEvent.MaintenanceBaselinePersistenceStarted,
-    ) {
-        val current = _snapshot.value
-        if (event.attemptId <= current.maintenanceBaselinePersistence.attemptId) return
-        publish(
-            current.copy(
-                maintenanceBaselinePersistence = MaintenanceBaselinePersistence(
-                    status = MaintenanceBaselinePersistenceStatus.SAVING,
-                    attemptId = event.attemptId,
-                ),
-            ),
-            acceptedEventSequence,
-        )
-    }
-
-    private fun handleMaintenanceBaselinePersistenceCompleted(
-        event: InstallationSessionEvent.MaintenanceBaselinePersistenceCompleted,
-    ) {
-        val current = _snapshot.value
-        val persistence = current.maintenanceBaselinePersistence
-        if (persistence.status != MaintenanceBaselinePersistenceStatus.SAVING ||
-            persistence.attemptId != event.attemptId
-        ) {
-            return
-        }
-        publish(
-            current.copy(
-                maintenanceBaselinePersistence = persistence.copy(
-                    status = MaintenanceBaselinePersistenceStatus.SAVED,
-                    reasonCode = null,
-                ),
-            ),
-            acceptedEventSequence,
-        )
-    }
-
-    private fun handleMaintenanceBaselinePersistenceFailed(
-        event: InstallationSessionEvent.MaintenanceBaselinePersistenceFailed,
-    ) {
-        val current = _snapshot.value
-        val persistence = current.maintenanceBaselinePersistence
-        if (persistence.status != MaintenanceBaselinePersistenceStatus.SAVING ||
-            persistence.attemptId != event.attemptId ||
-            event.reasonCode.isBlank()
-        ) {
-            return
-        }
-        publish(
-            current.copy(
-                maintenanceBaselinePersistence = persistence.copy(
-                    status = MaintenanceBaselinePersistenceStatus.FAILED,
-                    reasonCode = event.reasonCode,
                 ),
             ),
             acceptedEventSequence,
@@ -3981,56 +4053,56 @@ class InstallationSession(
             it.componentId == componentId && it.installed
         }
 
-    private fun catalogFailureStatus(reasonCode: String): ComponentStatus = when {
-        reasonCode.contains("missing") -> ComponentStatus.DIRECTORY_MISSING
-        reasonCode.contains("certificate") -> ComponentStatus.APK_SIGNATURE_MISMATCH
-        reasonCode.contains("archive") || reasonCode.contains("zip") -> ComponentStatus.ZIP_VALIDATION_FAILED
-        reasonCode.contains("schema") || reasonCode.contains("capability") ->
-            ComponentStatus.CLIENT_CAPABILITY_INSUFFICIENT
-        else -> ComponentStatus.TEMPORARILY_UNAVAILABLE
-    }
+    private fun catalogFailureStatus(reasonCode: String): ComponentStatus =
+        componentStatusForReasonCode(reasonCode)
 
     private fun buildComponentResults(
         evidence: SessionEvidence,
         snapshot: InstallationSessionSnapshot,
-    ): List<ComponentResult> = snapshot.components.filter { it.id in resultComponentIds(snapshot) }.map { component ->
-        val failed = component.id in snapshot.failedComponentIds || component.errorReason != null
-        val sourceFailure = if (failed) {
-            snapshot.sourceFailures.asSequence()
-                .filter { it.componentId == component.id }
-                .lastOrNull()
-        } else {
-            null
+    ): List<ComponentResult> {
+        val pendingIds = snapshot.copy(evidence = evidence).confirmationPendingComponentIds()
+        return snapshot.components.filter { it.id in resultComponentIds(snapshot) }.map { component ->
+            // A descriptor error belongs to the catalog/selection surface. It may
+            // describe one unavailable source even when a different source later
+            // produced a verified APK. Only an explicit failure recorded for this
+            // installation batch may affect the terminal result row.
+            val failed = component.id in snapshot.failedComponentIds
+            val sourceFailure = if (failed) {
+                snapshot.sourceFailures.asSequence()
+                    .filter { it.componentId == component.id }
+                    .lastOrNull()
+            } else {
+                null
+            }
+            val failureReason = if (failed) {
+                sourceFailure?.reasonCode ?: component.errorReason
+            } else {
+                null
+            }
+            val confirmationPending = !failed && component.id in pendingIds
+            ComponentResult(
+                componentName = component.displayName,
+                installed = component.id in evidence.installed,
+                configured = component.id in evidence.configured,
+                available = component.id in evidence.available,
+                componentId = component.id,
+                writeConfirmed = component.id in evidence.writeConfirmed,
+                confirmationPending = confirmationPending,
+                failureReason = failureReason,
+                failurePhase = snapshot.componentProgress[component.id]
+                    ?.takeIf { it.status == ComponentProgressStatus.FAILED }
+                    ?.phase
+                    ?: sourceFailure?.let { failurePhaseFor(it.reasonCode) }
+                    ?: failureReason?.let(::failurePhaseFor),
+                retryable = sourceFailure?.retryable
+                    ?: snapshot.componentFailureRetryable[component.id]
+                    ?: false,
+            )
         }
-        ComponentResult(
-            componentName = component.displayName,
-            installed = component.id in evidence.installed,
-            configured = component.id in evidence.configured,
-            available = component.id in evidence.available,
-            componentId = component.id,
-            writeConfirmed = component.id in evidence.writeConfirmed,
-            failureReason = component.errorReason ?: sourceFailure?.reasonCode,
-            failurePhase = snapshot.componentProgress[component.id]
-                ?.takeIf { it.status == ComponentProgressStatus.FAILED }
-                ?.phase
-                ?: sourceFailure?.let { failurePhaseFor(it.reasonCode) }
-                ?: component.errorReason?.let(::failurePhaseFor),
-            retryable = sourceFailure?.retryable
-                ?: snapshot.componentFailureRetryable[component.id]
-                ?: false,
-        )
     }
 
-    private fun failurePhaseFor(reasonCode: String): InstallPhase = when {
-        reasonCode.contains("identity") ||
-            reasonCode.contains("package_path") ||
-            reasonCode.contains("installed_apk") -> InstallPhase.VERIFY
-        reasonCode.contains("install") -> InstallPhase.SEND
-        reasonCode.contains("authoriz") || reasonCode.contains("config") -> InstallPhase.CONFIGURE
-        reasonCode.contains("availability") || reasonCode.contains("device_verif") -> InstallPhase.VERIFY
-        reasonCode.contains("archive") || reasonCode.contains("apk") || reasonCode.contains("zip") -> InstallPhase.CHECK
-        else -> InstallPhase.FETCH
-    }
+    private fun failurePhaseFor(reasonCode: String): InstallPhase =
+        installPhaseForReasonCode(reasonCode)
 
     private fun hasCompleteSuccessEvidence(snapshot: InstallationSessionSnapshot): Boolean =
         hasCompleteSuccessEvidence(snapshot.evidence, snapshot)
@@ -4039,8 +4111,16 @@ class InstallationSession(
         evidence: SessionEvidence,
         snapshot: InstallationSessionSnapshot,
     ): Boolean {
-        val expected = successfulComponentIds(snapshot)
-        if (expected.isEmpty()) return snapshot.failedComponentIds.isNotEmpty()
+        val selectedIds = selectedComponentIds(snapshot)
+        val pendingIds = snapshot.copy(evidence = evidence).confirmationPendingComponentIds()
+        val expected = successfulComponentIds(snapshot) - pendingIds
+        if (expected.isEmpty()) {
+            // A terminal batch may consist entirely of explicit failures or
+            // readback-pending components. That is a complete *classification*
+            // even though it is not a success proof.
+            return selectedIds.isNotEmpty() &&
+                (snapshot.failedComponentIds.intersect(selectedIds).isNotEmpty() || pendingIds.isNotEmpty())
+        }
         // A component can have a complete install proof and fail later during
         // authorization or availability. Keep that historical proof on the
         // result page, but exclude failed component ids from the aggregate

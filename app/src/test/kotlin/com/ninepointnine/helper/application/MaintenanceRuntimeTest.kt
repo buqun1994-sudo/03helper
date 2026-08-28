@@ -3,6 +3,11 @@ package com.ninepointnine.helper.application
 import com.ninepointnine.helper.application.maintenance.MaintenanceController
 import com.ninepointnine.helper.application.maintenance.MaintenanceDiagnosticStore
 import com.ninepointnine.helper.data.download.ArtifactCache
+import com.ninepointnine.helper.domain.artifact.ArtifactManifest
+import com.ninepointnine.helper.domain.artifact.ArtifactSource
+import com.ninepointnine.helper.domain.artifact.ArtifactSourceKind
+import com.ninepointnine.helper.domain.artifact.ArtifactVersion
+import com.ninepointnine.helper.domain.artifact.CompatibilityRange
 import com.ninepointnine.helper.domain.device.DeviceCapability
 import com.ninepointnine.helper.domain.session.ComponentDescriptor
 import com.ninepointnine.helper.domain.session.DeviceConnectionStatus
@@ -12,7 +17,6 @@ import com.ninepointnine.helper.domain.session.InstallationSessionCommand
 import com.ninepointnine.helper.domain.session.InstallationSessionSnapshot
 import com.ninepointnine.helper.domain.session.InstallationSessionState
 import com.ninepointnine.helper.domain.session.MaintenanceActionId
-import com.ninepointnine.helper.domain.session.MaintenanceBaselinePersistenceStatus
 import com.ninepointnine.helper.domain.session.ManagedApplicationStatus
 import com.ninepointnine.helper.domain.session.InstallationSessionEvent
 import com.ninepointnine.helper.domain.session.SessionEvidence
@@ -83,15 +87,16 @@ class MaintenanceRuntimeTest {
         assertTrue(saved.isNotEmpty())
         assertTrue(saved.all { it.state == InstallationSessionState.MAINTENANCE })
         assertTrue(saved.last().maintenance.activeAction == null)
+        assertEquals(InstallationSessionState.MAINTENANCE, runtime.session.currentSnapshot().state)
         assertEquals(
-            MaintenanceBaselinePersistenceStatus.SAVED,
-            runtime.session.currentSnapshot().maintenanceBaselinePersistence.status,
+            setOf("desktop"),
+            saved.last().maintenance.installedManifests.map { it.componentId }.toSet(),
         )
         runtime.close()
     }
 
     @Test
-    fun `failed baseline is visible and attempted once until business baseline changes`() = runTest {
+    fun `failed baseline is invisible and does not retry for an unverified inventory refresh`() = runTest {
         var attempts = 0
         val runtime = runtime(
             maintenanceSnapshot(),
@@ -103,10 +108,8 @@ class MaintenanceRuntimeTest {
         )
         advanceUntilIdle()
 
-        val firstFailure = runtime.session.currentSnapshot().maintenanceBaselinePersistence
         assertEquals(1, attempts)
-        assertEquals(MaintenanceBaselinePersistenceStatus.FAILED, firstFailure.status)
-        assertEquals("maintenance_baseline_save_failed", firstFailure.reasonCode)
+        assertEquals(InstallationSessionState.MAINTENANCE, runtime.session.currentSnapshot().state)
 
         // Persistence feedback projects to the same business baseline and must
         // not recursively trigger a second write.
@@ -131,11 +134,10 @@ class MaintenanceRuntimeTest {
         )
         advanceUntilIdle()
 
-        assertEquals(2, attempts)
-        assertEquals(
-            MaintenanceBaselinePersistenceStatus.FAILED,
-            runtime.session.currentSnapshot().maintenanceBaselinePersistence.status,
-        )
+        // An inventory row is not an installation identity. It must not turn
+        // an unverified package observation into a new durable baseline.
+        assertEquals(1, attempts)
+        assertEquals(InstallationSessionState.MAINTENANCE, runtime.session.currentSnapshot().state)
         runtime.close()
     }
 
@@ -166,5 +168,34 @@ class MaintenanceRuntimeTest {
             ComponentDescriptor("desktop", "Desktop", required = true, "1", "1 MB", "compatible"),
         ),
         evidence = SessionEvidence(installed = setOf("desktop")),
+        maintenance = com.ninepointnine.helper.domain.session.MaintenanceSnapshot(
+            installedManifests = listOf(desktopManifest()),
+        ),
+    )
+
+    private fun desktopManifest(): ArtifactManifest = ArtifactManifest(
+        schemaVersion = 1,
+        componentId = "desktop",
+        displayName = "Desktop",
+        required = true,
+        version = ArtifactVersion("1.0", 1L),
+        compatibility = CompatibilityRange(minAndroidSdk = 26, maxAndroidSdk = 30),
+        archiveFileName = "desktop.zip",
+        archiveSizeBytes = 100L,
+        archiveSha256 = "11".repeat(32),
+        apkEntryName = "desktop.apk",
+        apkSizeBytes = 50L,
+        apkSha256 = "22".repeat(32),
+        packageName = "com.ninepointnine.desktop",
+        apkVersion = ArtifactVersion("1.0", 1L),
+        certificateSha256 = "33".repeat(32),
+        sources = listOf(
+            ArtifactSource(ArtifactSourceKind.LANZOU_SHARE, "https://wwatl.lanzouw.com/idesktop"),
+            ArtifactSource(ArtifactSourceKind.R2, "https://assets.r2.dev/desktop.zip"),
+            ArtifactSource(
+                ArtifactSourceKind.GITHUB_RELEASES,
+                "https://github.com/example/repo/releases/download/v1/desktop.zip",
+            ),
+        ),
     )
 }

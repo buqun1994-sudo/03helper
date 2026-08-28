@@ -205,6 +205,11 @@ object ProductionInstallerRuntimeFactory {
                     check(maintenanceSessionStore.save(snapshot)) { "maintenance_baseline_rejected" }
                 }
             },
+            clearMaintenanceSnapshot = {
+                withContext(Dispatchers.IO) {
+                    check(maintenanceSessionStore.clear()) { "maintenance_baseline_clear_failed" }
+                }
+            },
             coroutineContext = Dispatchers.Main.immediate,
             apkIconRepository = apkIconRepository,
         )

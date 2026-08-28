@@ -13,6 +13,7 @@ import com.ninepointnine.helper.domain.session.MaintenanceAuthorizationFlowState
 import com.ninepointnine.helper.domain.session.MaintenanceInventoryState
 import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationState
 import com.ninepointnine.helper.domain.session.InstallationFlow
+import com.ninepointnine.helper.domain.session.InstallationResultFailureStage
 
 sealed interface InstallUiState {
     val screen: InstallScreen
@@ -61,9 +62,7 @@ sealed interface InstallUiState {
         /** Business flow owning this result page; never inferred by UI route state. */
         val installationFlow: InstallationFlow = InstallationFlow.INITIAL_INSTALL,
         /** Whether a failed result stopped before or after the APK write. */
-        val failureStage: ResultFailureStage = ResultFailureStage.NONE,
-        /** Independent phone-storage warning; it never changes [kind] or component facts. */
-        val persistenceWarning: String? = null,
+        val failureStage: InstallationResultFailureStage = InstallationResultFailureStage.NONE,
     ) : InstallUiState {
         override val screen: InstallScreen = InstallScreen.RESULT
     }
@@ -84,8 +83,6 @@ sealed interface InstallUiState {
         val applicationAction: MaintenanceApplicationFeedback? = null,
         val applicationDetails: MaintenanceApplicationDetailsRow? = null,
         val installationSelection: MaintenanceInstallationSelectionUi? = null,
-        /** Independent phone-storage warning for the durable maintenance baseline. */
-        val persistenceWarning: String? = null,
         val groups: List<MaintenanceGroupId> = listOf(
             MaintenanceGroupId.COMMON,
             MaintenanceGroupId.APPS,
@@ -159,13 +156,8 @@ data class ComponentResultRow(
         com.ninepointnine.helper.domain.session.ComponentResultStatus.NOT_INSTALLED,
 )
 
-/** Stable aggregate semantics for the result header and recovery action. */
-enum class ResultFailureStage {
-    NONE,
-    INSTALLATION,
-    POST_INSTALL,
-    MIXED,
-}
+/** Compatibility name for UI call sites; semantics are owned by the domain. */
+typealias ResultFailureStage = InstallationResultFailureStage
 
 data class MaintenanceFeedback(
     val actionId: MaintenanceActionId,

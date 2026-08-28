@@ -56,8 +56,11 @@ class MaintenanceSessionStore(
         if (!file.isFile || file.length() <= 0L || file.length() > MAX_STORE_BYTES) return null
         return try {
             val stored = json.decodeFromString<StoredMaintenanceState>(file.readText(Charsets.UTF_8))
-            stored.toSnapshotOrNull(sourcePolicy)
+            stored.toSnapshotOrNull(sourcePolicy).also { restored ->
+                if (restored == null) clear()
+            }
         } catch (_: Exception) {
+            clear()
             null
         }
     }
@@ -126,9 +129,7 @@ internal object MaintenanceBaselineProjector {
             InstallationSessionState.SUCCEEDED,
             InstallationSessionState.COMPLETED_WITH_ERRORS,
         )
-        val hasDurableInventory = snapshot.maintenance.installedManifests.isNotEmpty() ||
-            snapshot.maintenance.managedApplicationsState == MaintenanceInventoryState.READY
-        if (!durableState && !hasDurableInventory) return null
+        if (!durableState) return null
 
         val declaredSource = snapshot.maintenance.availableComponents.ifEmpty { snapshot.components }
         val declaredById = linkedMapOf<String, ComponentDescriptor>()
@@ -175,10 +176,10 @@ internal object MaintenanceBaselineProjector {
             .copy(availableComponents = availableComponents)
             .withVerifiedInstallations(verifiedCurrentBatch)
             .toDurableMaintenanceBaseline()
-        val installedIds = buildSet {
-            addAll(snapshot.evidence.installed)
-            addAll(maintenance.installedManifests.map { it.componentId })
-        } intersect components.mapTo(mutableSetOf()) { it.id }
+        // A durable maintenance entry is a verified device identity, never an
+        // empty inventory marker or a UI-ready flag.
+        if (maintenance.installedManifests.isEmpty()) return null
+        val installedIds = maintenance.installedManifests.mapTo(mutableSetOf()) { it.componentId }
         val configuredIds = snapshot.evidence.configured intersect installedIds
         val availableIds = snapshot.evidence.available intersect configuredIds
         val controlPlaneReady = snapshot.catalogRevision > 0L &&
@@ -207,6 +208,13 @@ internal object MaintenanceBaselineProjector {
             maintenance = maintenance,
         )
     }
+
+    /** A confirmed empty car inventory invalidates an earlier local baseline. */
+    fun shouldClear(snapshot: InstallationSessionSnapshot): Boolean =
+        snapshot.state == InstallationSessionState.MAINTENANCE &&
+            snapshot.maintenance.managedApplicationsState == MaintenanceInventoryState.READY &&
+            snapshot.maintenance.installedManifests.isEmpty() &&
+            snapshot.maintenance.managedApplications.none { it.installed }
 
     private fun ComponentDescriptor.toBaselineComponent(): ComponentDescriptor = copy(
         status = when (status) {
@@ -281,7 +289,10 @@ private data class StoredMaintenanceState(
             configured = snapshot.evidence.configured,
             available = snapshot.evidence.available,
             managedApplications = snapshot.maintenance.managedApplications.map(StoredApplication::from),
-            lastAction = snapshot.maintenance.lastAction?.let(StoredMaintenanceAction::from),
+            // Action history belongs to the live session/UI route. Persisting
+            // it would make a cold start carry stale page feedback; the
+            // durable record contains only the verified maintenance baseline.
+            lastAction = null,
             // Secondary-page route data is intentionally process-local. The
             // selection, update rows and detail payloads are not persisted as
             // one atomic wire model, so restoring a route would reopen an
@@ -421,18 +432,6 @@ private data class StoredMaintenanceState(
                 return null
             }
         }
-        val effectiveInventoryState = if (
-            parsedInventoryState == MaintenanceInventoryState.NOT_STARTED &&
-            parsedLastAction?.actionId in INVENTORY_ACTIONS &&
-            parsedLastAction?.status == MaintenanceActionStatus.SUCCEEDED
-        ) {
-            // Older schema-1 records had no explicit inventory state. A
-            // successful inventory action, including an empty result, is a
-            // durable READY proof rather than an implicit loading state.
-            MaintenanceInventoryState.READY
-        } else {
-            parsedInventoryState
-        }
         val parsedArtifactCatalogStage = try {
             ArtifactCatalogStage.valueOf(artifactCatalogStage)
         } catch (_: Exception) {
@@ -465,6 +464,29 @@ private data class StoredMaintenanceState(
                 .toSet()
             val trustedLegacyIds = installed + exactInventoryIds
             manifests.filter { it.componentId in trustedLegacyIds }
+        }
+        // A durable entry must prove at least one installed package identity.
+        // Evaluate legacy migration first: schema-1 records did not carry the
+        // dedicated installedManifests field, but can still contain valid
+        // artifact identities tied to installation evidence.
+        if (effectiveInstalledManifests.isEmpty() ||
+            !validateManifestEntries(effectiveInstalledManifests, sourcePolicy)
+        ) {
+            return null
+        }
+        val effectiveInventoryState = if (
+            parsedInventoryState == MaintenanceInventoryState.NOT_STARTED &&
+            effectiveInstalledManifests.isNotEmpty() &&
+            parsedLastAction?.actionId in INVENTORY_ACTIONS &&
+            parsedLastAction?.status == MaintenanceActionStatus.SUCCEEDED
+        ) {
+            // Schema-1 records did not carry an explicit inventory state. A
+            // legacy success may be promoted only when the same record also
+            // carries a verified installed identity. An action row alone,
+            // especially for an empty inventory, is never a READY proof.
+            MaintenanceInventoryState.READY
+        } else {
+            parsedInventoryState
         }
         if (manifests.isNotEmpty() && !validateBatchAuthorization(manifests)) {
             return null

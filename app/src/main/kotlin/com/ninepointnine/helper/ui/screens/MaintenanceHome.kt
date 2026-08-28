@@ -59,7 +59,6 @@ import com.ninepointnine.helper.domain.session.MaintenanceAuthorizationFlowState
 import com.ninepointnine.helper.domain.session.MaintenanceInventoryState
 import com.ninepointnine.helper.domain.session.InstallPhase
 import com.ninepointnine.helper.domain.session.ResultKind
-import com.ninepointnine.helper.domain.session.ComponentResultStatus
 import com.ninepointnine.helper.domain.session.requiresConnectedDevice
 import com.ninepointnine.helper.domain.session.isApplicationInstallation
 import com.ninepointnine.helper.ui.state.ResultFailureStage
@@ -67,6 +66,7 @@ import com.ninepointnine.helper.ui.components.AnimatedEntry
 import com.ninepointnine.helper.ui.components.ComponentLogo
 import com.ninepointnine.helper.ui.components.DividerLine
 import com.ninepointnine.helper.ui.components.IconTextActionButton
+import com.ninepointnine.helper.ui.components.InstallationResultRow
 import com.ninepointnine.helper.ui.components.PressableSurface
 import com.ninepointnine.helper.ui.components.PrimaryActionButton
 import com.ninepointnine.helper.ui.components.StatusIcon
@@ -1258,6 +1258,14 @@ private fun MaintenanceInstallResult(
             R.string.result_enter_maintenance,
             InstallUiIntent.EnterMaintenance,
         )
+        ResultKind.CONFIRMATION_PENDING -> ResultFlowCopy(
+            R.string.result_confirmation_pending_title,
+            R.string.result_confirmation_pending_description,
+            "circle_alert",
+            InstallerColors.Warning,
+            if (state.canEnterMaintenance) R.string.result_enter_maintenance else R.string.result_retry,
+            if (state.canEnterMaintenance) InstallUiIntent.EnterMaintenance else retryIntent,
+        )
         ResultKind.PARTIAL_FAILURE -> if (state.failureStage == ResultFailureStage.POST_INSTALL) {
             ResultFlowCopy(
                 R.string.result_post_install_failure_title,
@@ -1355,7 +1363,9 @@ private fun MaintenanceInstallResult(
                 modifier = Modifier.fillMaxWidth(),
             )
         }
-        state.failureReason?.let { reason ->
+        state.failureReason
+            ?.takeIf { state.componentResults.none { result -> result.errorReason != null } }
+            ?.let { reason ->
             Text(
                 text = reason,
                 style = MaterialTheme.typography.bodyMedium,
@@ -1364,67 +1374,13 @@ private fun MaintenanceInstallResult(
                 modifier = Modifier.fillMaxWidth(),
             )
         }
-        state.persistenceWarning?.let { warning ->
-            Text(
-                text = warning,
-                style = MaterialTheme.typography.bodyMedium,
-                color = InstallerColors.Warning,
-                textAlign = TextAlign.Center,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("maintenance_result_persistence_warning"),
-            )
-        }
         Spacer(modifier = Modifier.height(InstallerDimensions.SectionVerticalSpacing))
         LazyColumn(
             modifier = Modifier.weight(1f),
             verticalArrangement = Arrangement.spacedBy(InstallerDimensions.ListSpacing),
         ) {
             items(state.componentResults, key = { it.componentName }) { result ->
-                PressableSurface(onClick = {}, enabled = false, containerColor = InstallerColors.WhiteSurface) {
-                    Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            Text(text = result.componentName, style = MaterialTheme.typography.bodyLarge, color = InstallerColors.White)
-                            Text(
-                                text = listOf(
-                                    stringResource(
-                                        when (result.status) {
-                                            ComponentResultStatus.WRITE_CONFIRMED_IDENTITY_UNVERIFIED ->
-                                                R.string.result_status_write_confirmed
-                                            else -> if (result.installed) R.string.result_status_installed else R.string.result_status_not_installed
-                                        },
-                                    ),
-                                    stringResource(if (result.configured) R.string.result_status_configured else R.string.result_status_not_configured),
-                                    stringResource(if (result.available) R.string.result_status_available else R.string.result_status_not_available),
-                                ).joinToString(" · "),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = InstallerColors.AuxiliaryWhite,
-                            )
-                            Text(
-                                text = stringResource(maintenanceResultStageLabel(result.status)),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = if (result.status == ComponentResultStatus.READY) {
-                                    InstallerColors.Success
-                                } else {
-                                    InstallerColors.Warning
-                                },
-                            )
-                            result.errorReason?.let { reason ->
-                                Text(
-                                    text = reason,
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = InstallerColors.Warning,
-                                )
-                            }
-                        }
-                        StatusIcon(
-                            name = if (result.installed && result.configured && result.available) "circle_check" else "circle_alert",
-                            contentDescription = result.componentName,
-                            tint = if (result.installed && result.configured && result.available) InstallerColors.Success else InstallerColors.Warning,
-                            size = InstallerDimensions.SmallIconSize,
-                        )
-                    }
-                }
+                InstallationResultRow(result = result)
             }
         }
         PrimaryActionButton(
@@ -1468,16 +1424,6 @@ private fun MaintenanceOverview(
             onReconnect = onReconnect,
             onDisconnect = onDisconnect,
         )
-        state.persistenceWarning?.let { warning ->
-            Text(
-                text = warning,
-                style = MaterialTheme.typography.bodyMedium,
-                color = InstallerColors.Warning,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .testTag("maintenance_persistence_warning"),
-            )
-        }
         Spacer(modifier = Modifier.height(InstallerDimensions.SectionVerticalSpacing))
         LazyColumn(
             modifier = Modifier
@@ -1870,15 +1816,6 @@ private fun groupTitle(group: MaintenanceGroupId): Int = when (group) {
     MaintenanceGroupId.STORAGE -> R.string.maintenance_storage
 }
 
-private fun maintenanceResultStageLabel(status: ComponentResultStatus): Int = when (status) {
-    ComponentResultStatus.NOT_INSTALLED -> R.string.result_stage_not_installed
-    ComponentResultStatus.WRITE_CONFIRMED_IDENTITY_UNVERIFIED ->
-        R.string.result_stage_write_confirmed_identity_unverified
-    ComponentResultStatus.AUTHORIZATION_INCOMPLETE -> R.string.result_stage_authorization_incomplete
-    ComponentResultStatus.AVAILABILITY_INCOMPLETE -> R.string.result_stage_availability_incomplete
-    ComponentResultStatus.READY -> R.string.result_stage_ready
-}
-
 private fun actionTitle(action: MaintenanceActionId): Int = when (action) {
     MaintenanceActionId.CHECK_UPDATES -> R.string.maintenance_check_updates
     MaintenanceActionId.REINSTALL -> R.string.maintenance_reinstall
@@ -1947,7 +1884,17 @@ private fun maintenanceFeedbackDescription(feedback: MaintenanceFeedback): Int? 
                 "installed_component_manifest_unavailable",
                 "selected_catalog_preparer_strategy_unavailable",
             ) -> R.string.maintenance_failure_catalog
-        feedback.reasonCode?.contains("identity") == true -> R.string.maintenance_failure_identity
+        feedback.reasonCode in setOf(
+            "maintenance_package_identity_invalid",
+            "maintenance_package_path_missing",
+            "maintenance_installed_apk_metadata_unreadable",
+            "maintenance_installed_apk_read_failed",
+            "maintenance_installed_apk_verify_failed",
+            "maintenance_installed_package_mismatch",
+            "maintenance_installed_certificate_mismatch",
+            "maintenance_installed_version_mismatch",
+            "maintenance_installed_apk_hash_mismatch",
+        ) -> R.string.maintenance_failure_identity
         feedback.actionId.isApplicationInstallation -> null
         else -> R.string.maintenance_failure_generic
     }
