@@ -9,6 +9,7 @@ import com.ninepointnine.helper.domain.artifact.ArtifactSourceKind
 import com.ninepointnine.helper.domain.artifact.ReleaseSourcePolicy
 import java.net.URI
 import java.util.Locale
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.coroutines.resume
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
@@ -81,11 +82,16 @@ class LanzouFolderSourceAdapter(
         return try {
             val entries = withTimeout(timeoutMillis) {
                 suspendCancellableCoroutine<FolderCallbackResult> { continuation ->
+                    val completed = AtomicBoolean(false)
                     val completeFailure: (ArtifactFailure) -> Unit = { error ->
-                        if (continuation.isActive) continuation.resume(FolderCallbackResult.Failure(error))
+                        if (completed.compareAndSet(false, true) && continuation.isActive) {
+                            continuation.resume(FolderCallbackResult.Failure(error))
+                        }
                     }
                     val completeEntries: (List<LanzouFolderEntry>) -> Unit = { value ->
-                        if (continuation.isActive) continuation.resume(FolderCallbackResult.Success(value))
+                        if (completed.compareAndSet(false, true) && continuation.isActive) {
+                            continuation.resume(FolderCallbackResult.Success(value))
+                        }
                     }
                     try {
                         val expectedArchiveFileNames = config.declaredApps()
@@ -111,11 +117,19 @@ class LanzouFolderSourceAdapter(
                             ),
                         )
                     }
-                    continuation.invokeOnCancellation { host.stopAndDestroy() }
+                    continuation.invokeOnCancellation {
+                        completed.set(true)
+                        runCatching { host.stopAndDestroy() }
+                    }
                 }.getOrThrow()
             }
             when (entries) {
-                is FolderCallbackResult.Success -> matchEntries(config, folderUri, entries.entries)
+                is FolderCallbackResult.Success -> matchEntries(
+                    config = config,
+                    folderUri = folderUri,
+                    entries = entries.entries,
+                    expectedComponentIds = expectedComponentIds,
+                )
                 is FolderCallbackResult.Failure -> LanzouFolderResolutionResult.Failure(entries.failure)
             }
         } catch (failure: FolderResolutionException) {
@@ -127,7 +141,9 @@ class LanzouFolderSourceAdapter(
         } catch (_: Exception) {
             failure("lanzou_folder_parse_failed", retryable = true)
         } finally {
-            host.stopAndDestroy()
+            // Host teardown is best-effort; preserve the structured folder
+            // result when a platform WebView is already detached.
+            runCatching { host.stopAndDestroy() }
         }
     }
 
@@ -135,17 +151,24 @@ class LanzouFolderSourceAdapter(
         config: InstallerDistributionConfig,
         folderUri: URI,
         entries: List<LanzouFolderEntry>,
+        expectedComponentIds: Set<String>?,
     ): LanzouFolderResolutionResult {
         // Lanzou can contain readme files, old releases, or other operator
         // artifacts. They are outside the signed app set and are ignored.
         val zipEntries = entries.filter { it.name.endsWith(".zip", ignoreCase = true) }
-        val configuredApps = config.declaredApps().filter { it.enabled && it.clientSupported }
+        val configuredApps = config.declaredApps().filter {
+            it.enabled && it.clientSupported &&
+                (expectedComponentIds == null || it.componentId in expectedComponentIds)
+        }
         val byName = zipEntries.groupBy { it.name.lowercase(Locale.ROOT) }
         val origin = "${folderUri.scheme}://${folderUri.authority}"
         val artifacts = mutableListOf<LanzouFolderArtifact>()
         val appFailures = mutableListOf<LanzouFolderAppFailure>()
         val matchedIds = mutableMapOf<String, String>()
-        config.declaredApps().filter { it.enabled && !it.clientSupported }.forEach { component ->
+        config.declaredApps().filter {
+            it.enabled && !it.clientSupported &&
+                (expectedComponentIds == null || it.componentId in expectedComponentIds)
+        }.forEach { component ->
             appFailures += LanzouFolderAppFailure(
                 componentId = component.componentId,
                 reasonCode = "lanzou_folder_client_schema_unsupported",

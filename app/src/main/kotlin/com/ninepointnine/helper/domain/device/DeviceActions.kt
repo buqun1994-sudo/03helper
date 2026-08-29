@@ -15,7 +15,7 @@ import java.util.LinkedHashSet
 interface DeviceActionConnectionLease : DeviceConnectionLease {
     val commandGateway: AdbCommandGateway
 
-    /** Optional F4 port; old connection fakes remain valid and fail closed. */
+    /** Optional maintenance port exposed by a connection that supports maintenance actions. */
     val maintenanceGateway: MaintenanceCommandGateway?
         get() = commandGateway as? MaintenanceCommandGateway
 }
@@ -27,93 +27,49 @@ interface AdbCommandGateway {
         strategy: InstallationStrategy,
     ): DeviceInstallResult
 
-    /**
-     * Runs the one versioned authorization plan for the selected components.
-     * The caller supplies validated component ids, never shell text.
-     */
-    suspend fun runShortcut(
-        shortcut: DeviceShortcut,
-        selectedComponentIds: Set<String>,
-    ): DeviceShortcutResult
-
-    /** Dynamic v3 path; old fakes can continue to implement the narrow method. */
+    /** Runs the one versioned authorization plan for the selected components. */
     suspend fun runShortcut(
         shortcut: DeviceShortcut,
         selectedComponentIds: Set<String>,
         authorizationPlan: AuthorizationPlan,
-    ): DeviceShortcutResult = runShortcut(shortcut, selectedComponentIds)
+    ): DeviceShortcutResult
 }
 
 /** Fixed, non-shell maintenance operations available after a confirmed lease. */
 interface MaintenanceCommandGateway {
-    suspend fun repairAuthorization(manifests: List<ArtifactManifest>): MaintenanceDeviceResult
-
-    /** Optional declaration receipt from the verified install; implementations may use it to avoid re-pulling APKs. */
+    /** Repairs authorization using the verified install identity and declarations. */
     suspend fun repairAuthorization(
         manifests: List<ArtifactManifest>,
         declarationsByComponent: Map<String, ApkDeclarationMetadata>,
-    ): MaintenanceDeviceResult = repairAuthorization(manifests)
-
-    suspend fun inspectManagedApplications(): ManagedApplicationsResult
+    ): MaintenanceDeviceResult
 
     suspend fun inspectManagedApplications(
         components: List<ManagedComponent>,
-    ): ManagedApplicationsResult = inspectManagedApplications()
+    ): ManagedApplicationsResult
 
-    /**
-     * Reads the device package inventory once and returns only recognized,
-     * currently installed components. The default keeps older test gateways
-     * source-compatible while production gateways can use package discovery.
-     */
+    /** Reads the device package inventory once for the supplied components. */
     suspend fun inspectInstalledApplicationInventory(
         components: List<ManagedComponent>,
-    ): ManagedApplicationsResult = inspectManagedApplications(components)
+    ): ManagedApplicationsResult
 
-    suspend fun launchManagedComponent(componentId: String): MaintenanceDeviceResult
+    /** Launches a verified component using its typed catalog identity and setup. */
+    suspend fun launchManagedComponent(component: ManagedComponent): MaintenanceDeviceResult
 
-    /** Dynamic maintenance launch uses the verified package identity plus a typed catalog setup. */
-    suspend fun launchManagedComponent(component: ManagedComponent): MaintenanceDeviceResult =
-        launchManagedComponent(component.componentId)
-
-    /** Read-only authorization inspection. Implementations must not mutate the device. */
-    suspend fun inspectAuthorization(
-        manifests: List<ArtifactManifest>,
-    ): MaintenanceAuthorizationResult = MaintenanceAuthorizationResult.Completed(emptyList())
-
-    /** Read-only authorization probe for the components found in the live inventory. */
-    suspend fun inspectComponentAuthorization(
-        components: List<ManagedComponent>,
-    ): MaintenanceAuthorizationResult = MaintenanceAuthorizationResult.Completed(emptyList())
-
-    /**
-     * Probes authorization against the inventory read by the same maintenance
-     * action. Production uses this overload to avoid a second package scan and
-     * to keep version and authorization state tied to one car snapshot.
-     */
+    /** Probes authorization against the inventory read by the same maintenance action. */
     suspend fun inspectComponentAuthorization(
         components: List<ManagedComponent>,
         installedApplications: List<ManagedApplicationProbe>,
-    ): MaintenanceAuthorizationResult = inspectComponentAuthorization(components)
+    ): MaintenanceAuthorizationResult
 
     /** Fixed application operation selected by the maintenance UI. */
     suspend fun performApplicationAction(
         component: ManagedComponent,
         actionId: MaintenanceApplicationActionId,
-    ): MaintenanceDeviceResult = when (actionId) {
-        MaintenanceApplicationActionId.START -> launchManagedComponent(component)
-        MaintenanceApplicationActionId.FORCE_STOP,
-        MaintenanceApplicationActionId.UNINSTALL,
-        MaintenanceApplicationActionId.DETAILS,
-        -> MaintenanceDeviceResult.Failed(
-            DeviceActionFailure("maintenance_application_action_unavailable", component.componentId, retryable = false),
-        )
-    }
+    ): MaintenanceDeviceResult
 
     suspend fun inspectManagedApplicationDetails(
         component: ManagedComponent,
-    ): ManagedApplicationDetailsProbeResult = ManagedApplicationDetailsProbeResult.Failed(
-        DeviceActionFailure("maintenance_application_details_unavailable", component.componentId, retryable = false),
-    )
+    ): ManagedApplicationDetailsProbeResult
 }
 
 sealed interface MaintenanceDeviceResult {
@@ -554,7 +510,7 @@ object AuthorizationPlanFactory {
      */
     fun validateComponent(component: ManagedComponent): Boolean = isAllowedDynamicComponent(component)
 
-    /** Returns the built-in component descriptors used by the legacy overload. */
+    /** Returns the built-in component descriptors used by maintenance and fallback inspection. */
     fun allManagedComponents(): List<ManagedComponent> = listOf(
         ManagedComponent(DESKTOP_COMPONENT_ID, DESKTOP_PACKAGE_NAME, order = 0),
         ManagedComponent(LYRICS_COMPONENT_ID, LYRICS_PACKAGE_NAME, order = 1),
@@ -860,7 +816,7 @@ object AuthorizationPlanFactory {
         else -> emptySet()
     }
 
-    /** Dynamic manifests carry the authoritative order; legacy descriptors set it explicitly above. */
+    /** Dynamic manifests carry the authoritative order; built-in descriptors set their fixed order above. */
     private fun componentOrder(component: ManagedComponent): Int = component.order
 
     private fun compileSetupActions(

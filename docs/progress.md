@@ -1,5 +1,20 @@
 # 03helper 进度
 
+## 2026-08-29 APK 来源与 WebView 下载链路收口（完成）
+
+1. 已按本轮目标移除 `verified-apks` 长期私有 APK 缓存：手机公共 `Download` / Android Q+ `MediaStore.Downloads` 是唯一跨会话 APK 来源；公共候选未命中后才解析声明 ZIP、下载、校验、解压并发布到公共目录。车机已有同版本时跳过设备写入仍是独立的 `INSTALL_MISSING_ONLY` 策略，不改变手机来源主链。
+2. `ArtifactCache` 不再创建、扫描、读取或保留 `verified-apks`；构造时清理旧遗留目录，`clearPrivateCache()` 清理助手私有工作区。私有目录只允许保存当前操作 ZIP / 断点、解压中的 APK 和 MediaStore 读取临时副本；图标读取通过 `withEphemeralPublicApkCandidates` 在回调结束后递归清理，不形成持久来源。
+3. `ArtifactPreparationCoordinator` 与 `FolderArtifactCatalogAdapter` 已删除旧私有 APK 复制调用；唯一准备入口为 `prepareInstallationBatch -> ArtifactPreparationCoordinator.prepare`，唯一设备批次执行边界为 `InstallationBatchExecutor`。旧 `prepareSelectedCatalog*`、`prepareArtifactsWithResult`、`executeWithPreparationFailures`、旧清理 hook 和 `ArtifactSessionEventPort` 均已删除。
+4. `InstallerRuntime` 用 `Mutex` 串行化准备与私有工作区清理，并在 `NonCancellable` 中完成收尾，避免取消的旧协程删除新批次同名文件；固定来源仅保留合法 ZIP 断点 pair，动态下载和私有 APK 始终清理。
+5. 公共候选仍逐个校验包名、版本、受信发布者证书、大小和 SHA-256；`ArtifactCache`、目录准备与图标读取均使用短生命周期候选快照。MediaStore 临时复制和 ZIP / APK 流遇到 zero-read 时 fail closed；续传响应额外校验 `Content-Range` 起点与总大小，错误范围头拒绝并清理分片。
+6. `AndroidLanzouWebViewHost` 已兼容当前移动端 `/i -> /tp/i -> developer2.lanrar.com` 验证链：递归读取同源 frame，触发页面自带 `down_r` 动作，读取 `zip*.webgetstore.com` 临时地址后交给统一下载器；不打开外部浏览器、不让页面冒泡调用旧 `m_load()`，URL / Cookie / Referer 仍只在内存中传递。
+7. 在登记测试手机上完成一次真实 Android System WebView 分享页解析 smoke，约 3.6 秒收到 `webgetstore.com` 临时地址；证据只覆盖 URL 解析，不代表真实 ZIP 下载、解压或车机安装已自动通过。
+8. JDK17 下重新执行 `:app:testDebugUnitTest --no-daemon --rerun-tasks`，实际 `294` 项测试全部通过（0 failures / 0 errors / 0 skipped）；`:app:compileDebugAndroidTestKotlin`、`:app:lintDebug`、`:app:assembleDebug` 和 `:app:assembleDebugAndroidTest` 均通过。
+9. 最新 Debug 主包核对为 `com.ninepointnine.helper` / `0.1.0 (1)` / `.MainActivity`，主包 SHA-256 为 `952d91648420a188330c1193bd6d414f662660b4e7e35b858aed7c970ddf0566`，AndroidTest APK SHA-256 为 `e7d46eff4e1930d9e7a297398e50b63c5615eec303af2916deaae2ae34fc0f5d`；主包单 signer、APK Signature Scheme v2 有效，Debug 证书摘要为 `2990047fddf6d6ec1eb7f83731fcc1398616e5fb83aec97542a4f132c35a1a27`。
+10. 显式测试手机 serial `adb-RFCX412AN1X-gWfMRD._adb-tls-connect._tcp` 在线（Samsung SM-F946B，`device`）；主包与 AndroidTest 包保留数据覆盖安装成功，既有 `InstallAppActivitySmokeTest` 为 `2/2` 通过。smoke 后再次覆盖安装最新主包并启动核对，返回 `Status: ok`，解析入口为 `.MainActivity`，未执行清数据、卸载、降级或重启，也未对车机执行任何动作。
+11. 最终设备检查显示私有 `cache/install-artifacts` 只剩空目录，没有任何 `.apk` 文件；公共 `/sdcard/Download` 仍保留助手生成的 `03helper-desktop-1.apk` 与 `03helper-lyrics-114.apk`，证明跨会话来源落在公共 Download。
+12. `node scripts/check-project-docs.mjs`、`node scripts/check-skills.mjs` 和 `git diff --check` 已通过；当前仍未提交、推送或发布。真实 ZIP 下载 / 解压、正式 Cloud 发布资料及车机业务写入仍保留为用户人工主测范围，手机 instrumentation 不替代完整真实车机链路。
+
 ## 2026-08-28 真实车机安装与授权复测（通过）
 
 ### 测试前清理与设备证据
@@ -25,14 +40,14 @@
 
 本次真实车机复测通过，已覆盖此前“车机写入成功但助手提示授权失败 / 安装失败”的两个现场误报。当前版本的安装、授权和结果行在同一会话 / 批次边界内给出一致终态；本结论只覆盖本次 `S56_HQX` Android 9 的真实安装与授权闭环，不扩写为 Cloud 正式发布、其它设备兼容性或维护全量动作通过。
 
-## 2026-08-28 安装包来源审计（公共 Download 删除后仍可快速安装）
+## 2026-08-28 安装包来源审计（施工前历史事实）
 
 1. 对登记测试手机执行只读检查：`/data/user/0/com.ninepointnine.helper/cache/install-artifacts/verified-apks/` 仍有 4 个 APK，合计 `71,058,018` 字节（约 `67.77 MiB`）。文件权限为应用用户私有的 `600`，三星“我的文件”不会展示此目录。
 2. 四个文件均可解析为目标身份，且稳定键与组件 / 版本一致：`67e497f53d2b894b31a05a11.apk` = 03桌面 `0.1.0 (1)`，`71bd551c53e7fb2194532de5.apk` = 03歌词 `1.14-icar03 (114)`，`6d9d3b8e167b74324d1cd9c7.apk` = 03投屏 `0.1.0 (1)`，`37fc7aea1aae66cbf57c1465.apk` = 文件管理器 `1.6.1-car175.1 (14)`。文件摘要分别为 `773a3e63d517a56b42461c011f3a3ccae974cffe74ae6e86da72893f7c8f4c01`、`62b008140fb6a8eddeb0dd80690dd1293a639df34baa318612f35fcc3e03e5e1`、`889f328e54ece6f8c3696a4ac5a1e6157bced68c453754383bddf044497d23ca` 和 `8f64699f6fb2bb4b5006b57e20e994b6946518eb749fa07fa4ff6a7c1726c1b4`。
 3. 源码路径已确认：`ProductionInstallerRuntimeFactory` 将缓存根设为 `context.cacheDir/install-artifacts`；`ArtifactCache.retainVerifiedApk()` 把通过身份校验的 APK 复制到 `verified-apks`，`clearPrivateCache()` 明确保留该子目录；`ArtifactPreparationCoordinator.prepareFromExistingApk()` 每个组件先查该私有副本，再查公共 `Download`，通过包名、版本、证书、大小和 SHA-256 校验后直接复用，不再解析或下载 ZIP。
 4. 手机公共 `/sdcard/Download` 和 `MediaStore.Downloads` 当前均没有 `03helper-*`；三星“我的文件”回收站另有历史副本，但应用只查询 `MediaStore.Downloads`，不查询 `Android/.Trash`。对需要 APK 的组件，当前代码的第一命中候选是应用私有 `verified-apks`，不是回收站；若车机库存已满足补缺条件，则设备层可能完全跳过 APK 读取。
 5. 另一个可独立造成“秒装”的路径仍存在：维护“安装应用”使用 `INSTALL_MISSING_ONLY` 时，车机包名与目标 `versionCode` 精确匹配即可跳过推送和 `pm install -r`。因此当前现象可能同时包含“车机库存跳过”和“手机私有 APK 复用”；没有保存文件路径的终端收据，单凭 UI 速度不能区分二者。
-6. 本次只固定证据，没有改动代码或清理缓存。现行产品 / 架构文档仍把“公共 `Download` 是已校验 APK 的持久复用位置”作为目标口径；`verified-apks` 的长期保留是代码与该口径之间的待决策差异，后续若要严格恢复“公共 Download 未命中才下载”，应先在架构层决定是否移除这条第二复用来源，再施工并补充来源可观测证据。
+6. 本次只固定证据，没有改动代码或清理缓存。审计当时的代码与“公共 `Download` 是已校验 APK 的持久复用位置”目标口径存在差异；该差异已在 2026-08-29 的 APK 本地来源收口中完成施工，当前实现结论以本文件顶部章节为准。
 
 ## 2026-08-28 最终 Debug 产物与设备收尾复核（车机上线前，历史记录）
 
@@ -244,7 +259,7 @@
 3. 已落地 `CloudReleaseCatalogAdapter`、`ReleaseSourcePolicy`、`LanzouWebSourceAdapter`、隐藏 `AndroidLanzouWebViewHost`、`ArtifactDownloader`、`ArtifactCache`、`ArchiveIdentityVerifier`、`ArtifactArchiveExtractor`、`ArtifactIdentityVerifier` 和 `ArtifactPreparationCoordinator`；新增唯一 `android.permission.INTERNET`，并关闭明文流量，未新增存储、ADB、无障碍或定位权限。
 4. 隐藏 WebView 保持 Android System WebView 默认手机端标识，页面不挂载到视图层级、不接收触摸 / 焦点、不暴露 JavaScript bridge；下载上下文仅在内存中传递。下载使用应用私有 `.zip.part`，同一清单 / 来源类型才允许 Range 恢复，元数据不含短时 URL、Cookie 或 Referer。
 5. ZIP 必须先通过大小和 SHA-256；解压只接受清单指定的唯一根目录 APK，拒绝路径穿越、嵌套目录、多个 APK、额外文件、CRC / ZIP 结构异常和输出超限。APK 大小、SHA-256、包名、版本、证书全部通过后原子转正并立即删除 ZIP；失败清理 ZIP、部分 APK 和无效 APK。
-6. F1 会话已扩展为接收清单、来源选择 / 失败、归档 / 解压 / 产物证据；`ArtifactsVerified` 成功后停留在 `VERIFYING_ARTIFACTS`，F2 不发送 `InstallationStarted`、安装、授权或车机可用性事件。Compose 仍只走 `InstallationSessionSnapshot -> InstallUiStateMapper -> InstallApp`。
+6. F1 会话已扩展为接收清单、来源选择 / 失败、归档 / 解压 / 产物证据；F2 通过唯一 `ArtifactBatchPrepared` 原子结果把准备证据提交到 `ARTIFACTS_READY`，随后由生产运行时发送 `InstallationStarted` 进入安装。Compose 仍只走 `InstallationSessionSnapshot -> InstallUiStateMapper -> InstallApp`。
 7. 本机自动化已通过：F2 领域 / 适配器单测 21 项与既有 F1 / UI 单测合计 41 项全部通过；覆盖清单签名 / 字段、来源顺序、HTML 假响应、取消与恢复、ZIP / APK 反例、缓存清理、来源切换和会话阶段门禁。另通过 `:app:lintDebug`、`:app:assembleDebug`、`:app:assembleDebugAndroidTest`、`node scripts/check-project-docs.mjs`、`node scripts/check-skills.mjs`、`git diff --check` 和本机环境快检。
 8. 已只读核对 Cloud 仓库：当前仅 TileLauncher 有安装包 release profile，03歌词 / 03桌面只有产品或商业配置，不存在 03helper Android profile、组件 ZIP 对象、清单公钥或发布脚本。本轮没有修改 Cloud。真实 Android System WebView 隐藏回调、真实蓝奏云 ZIP、切网 / Range 续传、R2 / GitHub 对象一致性和手机画面主测仍未执行；这些已整理到 `docs/testing/验证矩阵.md` 的 F2 人工用例，不能用 fixture 结果替代。
 9. 用户复核后确认：Cloud profile、公钥和组件 ZIP 不应由测试用户自行获取；`docs/testing/验证矩阵.md` 已改为由项目 / Cloud 发布方提供候选，资料缺失时记录外部发布前置阻断。清单签名 / 字段反例继续由确定性自动化测试覆盖，不要求在手机上手工伪造。

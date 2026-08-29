@@ -5,6 +5,7 @@ import android.graphics.BitmapFactory
 import android.util.Log
 import com.ninepointnine.helper.domain.artifact.AppIconAsset
 import java.io.File
+import java.io.IOException
 import java.io.FileOutputStream
 import java.net.URI
 import java.net.URL
@@ -68,6 +69,7 @@ class UrlConnectionLogoAssetTransport(
                 while (true) {
                     val count = input.read(buffer)
                     if (count < 0) break
+                    if (count == 0) throw IOException("logo_zero_read")
                     total += count
                     if (total > maxBytes) throw IllegalStateException("logo_size_exceeded")
                     output.write(buffer, 0, count)

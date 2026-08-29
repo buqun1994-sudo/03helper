@@ -7,11 +7,10 @@ import com.ninepointnine.helper.application.artifact.ArtifactCatalogSessionAdapt
 import com.ninepointnine.helper.application.artifact.ArtifactPreparationCoordinator
 import com.ninepointnine.helper.application.artifact.ArtifactPreparationResult
 import com.ninepointnine.helper.application.artifact.PreparedArtifact
-import com.ninepointnine.helper.application.artifact.InstallerCatalogLoader
 import com.ninepointnine.helper.application.device.DeviceConnectionSessionAdapter
 import com.ninepointnine.helper.application.device.DeviceDiscoverySessionAdapter
 import com.ninepointnine.helper.application.device.DeviceInstallationCoordinator
-import com.ninepointnine.helper.application.session.InstallationSessionEventPort
+import com.ninepointnine.helper.application.session.InstallationSessionBoundary
 import com.ninepointnine.helper.application.maintenance.MaintenanceController
 import com.ninepointnine.helper.application.maintenance.MaintenanceDiagnosticStore
 import com.ninepointnine.helper.application.maintenance.MaintenanceSessionStore
@@ -28,15 +27,17 @@ import com.ninepointnine.helper.data.device.JdkLocalIpv4SubnetProvider
 import com.ninepointnine.helper.data.device.LanAdbDeviceDiscovery
 import com.ninepointnine.helper.data.download.ArtifactCache
 import com.ninepointnine.helper.data.download.ArtifactDownloader
-import com.ninepointnine.helper.data.download.DynamicArtifactDownloader
 import com.ninepointnine.helper.data.download.UrlConnectionArtifactTransport
 import com.ninepointnine.helper.data.web.AndroidLanzouWebViewHost
 import com.ninepointnine.helper.data.web.LanzouFolderSourceAdapter
 import com.ninepointnine.helper.data.web.LanzouFolderWebViewHostFactory
 import com.ninepointnine.helper.data.web.LanzouWebSourceAdapter
 import com.ninepointnine.helper.data.web.LanzouWebViewHostFactory
+import com.ninepointnine.helper.data.web.LanzouWebViewMountRegistry
 import com.ninepointnine.helper.domain.artifact.ReleaseSourcePolicy
 import com.ninepointnine.helper.domain.artifact.ArtifactVersion
+import com.ninepointnine.helper.domain.artifact.ArtifactFailure
+import com.ninepointnine.helper.domain.artifact.ArtifactFailurePhase
 import com.ninepointnine.helper.domain.device.DeviceActionFailure
 import com.ninepointnine.helper.domain.device.DeviceConnectionLease
 import com.ninepointnine.helper.domain.session.InstallationSession
@@ -49,7 +50,10 @@ import kotlinx.coroutines.withContext
 
 /** Production composition root. Missing Cloud trust data remains explicitly unavailable. */
 object ProductionInstallerRuntimeFactory {
-    fun create(context: Context): InstallerRuntime {
+    fun create(
+        context: Context,
+        webViewMountRegistry: LanzouWebViewMountRegistry,
+    ): InstallerRuntime {
         val applicationContext = context.applicationContext
         val catalogRuntime = ReleaseCatalogRuntimeConfig
         val sourcePolicy = catalogRuntime.sourcePolicy
@@ -77,30 +81,26 @@ object ProductionInstallerRuntimeFactory {
         val distributionConfigAdapter = catalogRuntime.createDistributionConfigAdapter(applicationContext).withRevisionStore(
             FileCatalogRevisionStore(File(applicationContext.filesDir, CATALOG_REVISION_FILE)),
         )
+        val folderSourceAdapter = LanzouFolderSourceAdapter(
+            hostFactory = LanzouFolderWebViewHostFactory {
+                AndroidLanzouWebViewHost(webViewMountRegistry, sourcePolicy)
+            },
+            sourcePolicy = sourcePolicy,
+        )
+        val lanzouSourceAdapter = LanzouWebSourceAdapter(
+            hostFactory = LanzouWebViewHostFactory {
+                AndroidLanzouWebViewHost(webViewMountRegistry, sourcePolicy)
+            },
+            sourcePolicy = sourcePolicy,
+        )
+        val artifactDownloader = ArtifactDownloader(
+            transport = UrlConnectionArtifactTransport(sourcePolicy = sourcePolicy),
+            cache = artifactCache,
+            sourcePolicy = sourcePolicy,
+        )
         val folderCatalogAdapter = FolderArtifactCatalogAdapter(
             configAdapter = distributionConfigAdapter,
-            folderSourceAdapter = LanzouFolderSourceAdapter(
-                hostFactory = LanzouFolderWebViewHostFactory {
-                    AndroidLanzouWebViewHost(applicationContext, sourcePolicy)
-                },
-                sourcePolicy = sourcePolicy,
-            ),
-            lanzouSourceAdapter = LanzouWebSourceAdapter(
-                hostFactory = LanzouWebViewHostFactory {
-                    AndroidLanzouWebViewHost(applicationContext, sourcePolicy)
-                },
-                sourcePolicy = sourcePolicy,
-            ),
-            downloader = DynamicArtifactDownloader(
-                transport = UrlConnectionArtifactTransport(sourcePolicy = sourcePolicy),
-                sourcePolicy = sourcePolicy,
-            ),
-            metadataReader = apkMetadataReader,
-            sourcePolicy = sourcePolicy,
-            artifactCache = artifactCache,
-            workingDirectory = File(applicationContext.cacheDir, DISTRIBUTION_CATALOG_DIRECTORY),
         )
-        val catalogLoader = InstallerCatalogLoader { folderCatalogAdapter.load() }
 
         val apkIconRepository = ApkIconRepository(
             context = applicationContext,
@@ -129,54 +129,55 @@ object ProductionInstallerRuntimeFactory {
             },
             loadCatalog = { eventPort ->
                 ArtifactCatalogSessionAdapter(
-                    catalogLoader = catalogLoader,
                     eventPort = eventPort,
                     selectionLoader = { folderCatalogAdapter.loadSelection() },
                 ).loadSelection()
             },
-            prepareSelectedCatalogWithBatch = { batch, eventPort ->
-                ArtifactCatalogSessionAdapter(
-                    catalogLoader = catalogLoader,
-                    eventPort = eventPort,
-                    selectedCatalogLoaderWithBatch = { immutableBatch, onProgress ->
-                        folderCatalogAdapter.prepareSelected(immutableBatch, onProgress)
-                    },
-                ).prepareSelected(batch)
-            },
-            prepareArtifactsWithResult = { manifests, eventPort ->
-                ArtifactPreparationCoordinator(
-                    sourcePolicy = sourcePolicy,
-                    lanzouSourceAdapter = LanzouWebSourceAdapter(
-                        hostFactory = LanzouWebViewHostFactory {
-                            AndroidLanzouWebViewHost(applicationContext, sourcePolicy)
-                        },
-                        sourcePolicy = sourcePolicy,
-                    ),
-                    downloader = ArtifactDownloader(
-                        transport = UrlConnectionArtifactTransport(sourcePolicy = sourcePolicy),
-                        cache = artifactCache,
-                        sourcePolicy = sourcePolicy,
-                    ),
-                    archiveVerifier = ArchiveIdentityVerifier(),
-                    archiveExtractor = ArtifactArchiveExtractor(),
-                    identityVerifier = ArtifactIdentityVerifier(
-                        apkMetadataReader,
-                    ),
-                    cache = artifactCache,
-                    eventPort = eventPort,
-                ).prepare(manifests).also { result ->
-                    // The APK identity gate has completed before the car write
-                    // starts. Persisting here makes a newly prepared version's
-                    // icon available even when a later device step is partial.
-                    if (result is ArtifactPreparationResult.Prepared) {
-                        apkIconRepository.persistIcons(result.artifacts.map {
-                            com.ninepointnine.helper.domain.device.InstallableArtifact(
-                                manifest = it.manifest,
-                                apkFile = it.finalApk,
-                                declarations = it.declarations,
-                            )
-                        })
+            prepareInstallationBatch = { batch, eventPort ->
+                when (val planResult = folderCatalogAdapter.buildPreparationPlan(batch)) {
+                    is com.ninepointnine.helper.data.catalog.ArtifactPreparationPlanResult.Failure -> {
+                        val failure = ArtifactFailure(
+                            phase = ArtifactFailurePhase.CATALOG,
+                            reasonCode = planResult.reasonCode,
+                            retryable = planResult.retryable,
+                        )
+                        ArtifactPreparationResult.Failed(failure)
                     }
+
+                    is com.ninepointnine.helper.data.catalog.ArtifactPreparationPlanResult.Ready -> {
+                        val prepared = ArtifactPreparationCoordinator(
+                            sourcePolicy = sourcePolicy,
+                            lanzouSourceAdapter = lanzouSourceAdapter,
+                            downloader = artifactDownloader,
+                            archiveVerifier = ArchiveIdentityVerifier(),
+                            archiveExtractor = ArtifactArchiveExtractor(),
+                            identityVerifier = ArtifactIdentityVerifier(apkMetadataReader),
+                            cache = artifactCache,
+                            eventPort = eventPort,
+                            folderSourceAdapter = folderSourceAdapter,
+                            metadataReader = apkMetadataReader,
+                        ).prepare(planResult.plan)
+                        // The APK identity gate has completed before the car
+                        // write starts, so icons can survive a partial device
+                        // step without retaining an APK privately.
+                        if (prepared is ArtifactPreparationResult.Prepared) {
+                            apkIconRepository.persistIcons(prepared.artifacts.map {
+                                com.ninepointnine.helper.domain.device.InstallableArtifact(
+                                    manifest = it.manifest,
+                                    apkFile = it.finalApk,
+                                    declarations = it.declarations,
+                                )
+                            })
+                        }
+                        prepared
+                    }
+                }
+            },
+            cleanupArtifactWorkspace = { mode ->
+                when (mode) {
+                    ArtifactWorkspaceCleanupMode.COMPLETE -> artifactCache.clearPrivateCache()
+                    ArtifactWorkspaceCleanupMode.PRESERVE_RESUMABLE_DOWNLOADS ->
+                        artifactCache.clearPrivateApkCopies()
                 }
             },
             executeDeviceInstallationWithBatch = object : InstallationBatchExecutor {
@@ -184,38 +185,15 @@ object ProductionInstallerRuntimeFactory {
                     connection: DeviceConnectionLease,
                     artifacts: List<PreparedArtifact>,
                     batchPlan: InstallationBatchPlan,
-                    eventPort: InstallationSessionEventPort,
-                ) {
-                    try {
-                        DeviceInstallationCoordinator(eventPort).executeBatch(
-                            connection = connection,
-                            artifacts = artifacts,
-                            batchPlan = batchPlan,
-                        )
-                    } finally {
-                        artifactCache.clearPrivateCache()
-                    }
-                }
-
-                override suspend fun executeWithPreparationFailures(
-                    connection: DeviceConnectionLease,
-                    artifacts: List<PreparedArtifact>,
-                    batchPlan: InstallationBatchPlan,
                     preparationFailures: Map<String, DeviceActionFailure>,
-                    eventPort: InstallationSessionEventPort,
+                    eventPort: InstallationSessionBoundary,
                 ) {
-                    try {
-                        DeviceInstallationCoordinator(eventPort).executeBatch(
-                            connection = connection,
-                            artifacts = artifacts,
-                            batchPlan = batchPlan,
-                            preparationFailures = preparationFailures,
-                        )
-                    } finally {
-                        // Every install attempt, including a partial failure, ends
-                        // with disposal of private transfer and extraction files.
-                        artifactCache.clearPrivateCache()
-                    }
+                    DeviceInstallationCoordinator(eventPort).executeBatch(
+                        connection = connection,
+                        artifacts = artifacts,
+                        batchPlan = batchPlan,
+                        preparationFailures = preparationFailures,
+                    )
                 }
             },
             maintenanceController = MaintenanceController(
@@ -223,7 +201,6 @@ object ProductionInstallerRuntimeFactory {
                 diagnosticStore = MaintenanceDiagnosticStore(
                     File(applicationContext.cacheDir, DIAGNOSTIC_CACHE_DIRECTORY),
                 ),
-                loadCatalog = { catalogLoader.load() },
                 loadDistributionConfig = { folderCatalogAdapter.loadConfiguration() },
                 loadDistributionSelection = { folderCatalogAdapter.loadSelection() },
                 selfVersion = ArtifactVersion(BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE.toLong()),
@@ -245,7 +222,6 @@ object ProductionInstallerRuntimeFactory {
 
     private const val ARTIFACT_CACHE_DIRECTORY = "install-artifacts"
     private const val INSTALLED_APK_VERIFICATION_DIRECTORY = "install-artifacts/installed-verification"
-    private const val DISTRIBUTION_CATALOG_DIRECTORY = "distribution-catalog"
     private const val DIAGNOSTIC_CACHE_DIRECTORY = "maintenance-diagnostics"
     private const val MAINTENANCE_SESSION_FILE = "maintenance-session.json"
     private const val CATALOG_REVISION_FILE = "android-catalog-revisions.properties"

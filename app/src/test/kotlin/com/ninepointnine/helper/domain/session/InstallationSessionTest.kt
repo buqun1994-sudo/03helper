@@ -1,6 +1,8 @@
 package com.ninepointnine.helper.domain.session
 
 import com.ninepointnine.helper.domain.artifact.ArtifactManifest
+import com.ninepointnine.helper.domain.artifact.ArtifactFailure
+import com.ninepointnine.helper.domain.artifact.ArtifactFailurePhase
 import com.ninepointnine.helper.domain.artifact.ArchiveDownloadEvidence
 import com.ninepointnine.helper.domain.artifact.ArchiveVerificationEvidence
 import com.ninepointnine.helper.domain.artifact.ApkExtractionEvidence
@@ -46,6 +48,10 @@ class InstallationSessionTest {
             componentStatusForReasonCode("distribution_archive_invalid"),
         )
         assertEquals(
+            ComponentStatus.ZIP_VALIDATION_FAILED,
+            componentStatusForReasonCode("download_not_zip"),
+        )
+        assertEquals(
             ComponentStatus.CLIENT_CAPABILITY_INSUFFICIENT,
             componentStatusForReasonCode("component_incompatible"),
         )
@@ -57,6 +63,8 @@ class InstallationSessionTest {
             InstallPhase.VERIFY,
             installPhaseForReasonCode("installation_installed_package_mismatch"),
         )
+        assertEquals(InstallPhase.FETCH, installPhaseForReasonCode("download_not_zip"))
+        assertEquals(FailureCategory.ARCHIVE, failureCategoryForReasonCode("download_not_zip"))
     }
 
     @Test
@@ -200,18 +208,10 @@ class InstallationSessionTest {
         session.dispatch(InstallationSessionCommand.StartInstallation)
         assertEquals(InstallationSessionState.SELECTION_CONFIRMED, session.currentSnapshot().state)
         session.dispatch(InstallationSessionCommand.BeginPipeline)
-        assertEquals(InstallationSessionState.RESOLVING_SOURCE, session.currentSnapshot().state)
+        assertEquals(InstallationSessionState.PREPARING_ARTIFACTS, session.currentSnapshot().state)
 
-        dispatchSourceResolved(session)
-        assertEquals(InstallationSessionState.DOWNLOADING_ARCHIVE, session.currentSnapshot().state)
-        dispatchArchivesDownloaded(session)
-        assertEquals(InstallationSessionState.VERIFYING_ARCHIVE, session.currentSnapshot().state)
-        dispatchArchivesVerified(session)
-        assertEquals(InstallationSessionState.EXTRACTING_APK, session.currentSnapshot().state)
-        dispatchApksExtracted(session)
-        assertEquals(InstallationSessionState.VERIFYING_ARTIFACTS, session.currentSnapshot().state)
-        dispatchArtifactsVerified(session)
-        assertEquals(InstallationSessionState.VERIFYING_ARTIFACTS, session.currentSnapshot().state)
+        dispatchArtifactBatchPrepared(session)
+        assertEquals(InstallationSessionState.ARTIFACTS_READY, session.currentSnapshot().state)
         session.dispatchEvent(InstallationSessionEvent.InstallationStarted())
         assertEquals(InstallationSessionState.INSTALLING, session.currentSnapshot().state)
         session.dispatchEvent(
@@ -378,18 +378,23 @@ class InstallationSessionTest {
         val session = connectedSession(includeOptional = false)
         session.dispatch(InstallationSessionCommand.StartInstallation)
         session.dispatch(InstallationSessionCommand.BeginPipeline)
-        session.dispatchEvent(InstallationSessionEvent.SourceResolved("fixture"))
         val oldSessionId = session.currentSnapshot().sessionId
 
         session.dispatch(InstallationSessionCommand.CancelInstallation)
         val paused = session.currentSnapshot()
         assertEquals(InstallationSessionState.PAUSED, paused.state)
-        assertEquals(InstallationSessionState.DOWNLOADING_ARCHIVE, paused.checkpoint?.state)
+        assertEquals(InstallationSessionState.PREPARING_ARTIFACTS, paused.checkpoint?.state)
         assertNotEquals(oldSessionId, paused.sessionId)
 
         session.dispatch(
             InstallationSessionCommand.AdapterEvent(
-                event = InstallationSessionEvent.ArchiveDownloaded(1024L, "old"),
+                event = InstallationSessionEvent.ComponentProgressUpdated(
+                    componentId = "desktop",
+                    phase = InstallPhase.FETCH,
+                    status = ComponentProgressStatus.COMPLETED,
+                    fraction = 1f,
+                    indeterminate = false,
+                ),
                 sessionId = oldSessionId,
                 sequence = 99L,
             ),
@@ -397,7 +402,7 @@ class InstallationSessionTest {
         assertEquals(paused, session.currentSnapshot())
 
         session.dispatch(InstallationSessionCommand.ContinueInstallation)
-        assertEquals(InstallationSessionState.DOWNLOADING_ARCHIVE, session.currentSnapshot().state)
+        assertEquals(InstallationSessionState.PREPARING_ARTIFACTS, session.currentSnapshot().state)
         assertNotEquals(paused.sessionId, session.currentSnapshot().sessionId)
     }
 
@@ -421,7 +426,6 @@ class InstallationSessionTest {
         val session = connectedSession(includeOptional = false)
         session.dispatch(InstallationSessionCommand.StartInstallation)
         session.dispatch(InstallationSessionCommand.BeginPipeline)
-        session.dispatchEvent(InstallationSessionEvent.SourceResolved("fixture"))
         session.dispatchEvent(InstallationSessionEvent.DeviceDisconnected(confirmedDevice.id))
         val paused = session.currentSnapshot()
         assertEquals(InstallationSessionState.PAUSED, paused.state)
@@ -439,7 +443,7 @@ class InstallationSessionTest {
             sessionId = reconnecting.sessionId,
             sequence = reconnecting.lastEventSequence + 1L,
         )
-        assertEquals(InstallationSessionState.DOWNLOADING_ARCHIVE, session.currentSnapshot().state)
+        assertEquals(InstallationSessionState.PREPARING_ARTIFACTS, session.currentSnapshot().state)
         assertEquals(DeviceConnectionStatus.CONFIRMED, session.currentSnapshot().device?.connectionStatus)
     }
 
@@ -527,17 +531,9 @@ class InstallationSessionTest {
 
         session.dispatch(InstallationSessionCommand.StartMaintenanceInstallation)
         session.dispatch(InstallationSessionCommand.BeginPipeline)
-        session.dispatchEvent(
-            InstallationSessionEvent.SourceResolved(
-                sourceId = "fixture",
-                selections = listOf(
-                    SourceSelectionEvidence(cast.componentId, ArtifactSourceKind.LANZOU_SHARE),
-                ),
-            ),
-        )
         val beforeDisconnect = session.currentSnapshot()
         val batch = checkNotNull(beforeDisconnect.installationBatch)
-        assertEquals(InstallationSessionState.DOWNLOADING_ARCHIVE, beforeDisconnect.state)
+        assertEquals(InstallationSessionState.PREPARING_ARTIFACTS, beforeDisconnect.state)
 
         session.dispatchEvent(InstallationSessionEvent.DeviceDisconnected(vehicle.id))
         val paused = session.currentSnapshot()
@@ -561,7 +557,7 @@ class InstallationSessionTest {
         )
 
         val restored = session.currentSnapshot()
-        assertEquals(InstallationSessionState.DOWNLOADING_ARCHIVE, restored.state)
+        assertEquals(InstallationSessionState.PREPARING_ARTIFACTS, restored.state)
         assertNotEquals(beforeDisconnect.sessionId, restored.sessionId)
         assertEquals(batch, restored.installationBatch)
         assertEquals(batch, restored.checkpoint?.installationBatch)
@@ -569,7 +565,13 @@ class InstallationSessionTest {
         val beforeStaleEvent = restored
         session.dispatch(
             InstallationSessionCommand.AdapterEvent(
-                event = InstallationSessionEvent.ArchiveDownloaded(100L, "stale"),
+                event = InstallationSessionEvent.ComponentProgressUpdated(
+                    componentId = cast.componentId,
+                    phase = InstallPhase.FETCH,
+                    status = ComponentProgressStatus.COMPLETED,
+                    fraction = 1f,
+                    indeterminate = false,
+                ),
                 sessionId = beforeDisconnect.sessionId,
                 sequence = 999L,
             ),
@@ -650,37 +652,24 @@ class InstallationSessionTest {
     }
 
     @Test
-    fun `out of order and failed verification never advance the pipeline`() {
+    fun `out of order and malformed atomic preparation never advance the pipeline`() {
         val session = connectedSession(includeOptional = false)
         session.dispatch(InstallationSessionCommand.StartInstallation)
-        session.dispatch(InstallationSessionCommand.BeginPipeline)
-        session.dispatchEvent(InstallationSessionEvent.ArchiveDownloaded(1024L, "too-early"))
+        session.dispatchEvent(InstallationSessionEvent.InstallationStarted())
 
         assertEquals(InstallationSessionState.FAILED, session.currentSnapshot().state)
-        assertEquals("archive_event_out_of_order", session.currentSnapshot().failure?.reasonCode)
+        assertEquals("installation_start_out_of_order", session.currentSnapshot().failure?.reasonCode)
 
-        val archiveFailure = connectedSession(includeOptional = false)
-        archiveFailure.dispatch(InstallationSessionCommand.StartInstallation)
-        archiveFailure.dispatch(InstallationSessionCommand.BeginPipeline)
-        archiveFailure.dispatchEvent(InstallationSessionEvent.SourceResolved("fixture"))
-        archiveFailure.dispatchEvent(InstallationSessionEvent.ArchiveDownloaded(1024L, "archive-sha"))
-        archiveFailure.dispatchEvent(InstallationSessionEvent.ArchiveVerified(false))
-        assertEquals(InstallationSessionState.FAILED, archiveFailure.currentSnapshot().state)
-        assertEquals("archive_verification_failed", archiveFailure.currentSnapshot().failure?.reasonCode)
-    }
-
-    @Test
-    fun `malformed extracted entry fails closed`() {
-        val session = connectedSession(includeOptional = false)
-        session.dispatch(InstallationSessionCommand.StartInstallation)
-        session.dispatch(InstallationSessionCommand.BeginPipeline)
-        session.dispatchEvent(InstallationSessionEvent.SourceResolved("fixture"))
-        session.dispatchEvent(InstallationSessionEvent.ArchiveDownloaded(1024L, "archive-sha"))
-        session.dispatchEvent(InstallationSessionEvent.ArchiveVerified(true))
-        session.dispatchEvent(InstallationSessionEvent.ApkExtracted("../component.apk", 512L, "apk-sha"))
-
-        assertEquals(InstallationSessionState.FAILED, session.currentSnapshot().state)
-        assertEquals("apk_identity_missing", session.currentSnapshot().failure?.reasonCode)
+        val malformed = connectedSession(includeOptional = false)
+        malformed.dispatch(InstallationSessionCommand.StartInstallation)
+        malformed.dispatch(InstallationSessionCommand.BeginPipeline)
+        malformed.dispatchEvent(
+            InstallationSessionEvent.ArtifactBatchPrepared(
+                batchId = checkNotNull(malformed.currentSnapshot().installationBatch).batchId,
+            ),
+        )
+        assertEquals(InstallationSessionState.FAILED, malformed.currentSnapshot().state)
+        assertEquals("artifact_batch_component_set_mismatch", malformed.currentSnapshot().failure?.reasonCode)
     }
 
     @Test
@@ -1036,24 +1025,42 @@ class InstallationSessionTest {
 
         session.dispatch(
             InstallationSessionCommand.AdapterEvent(
-                event = InstallationSessionEvent.SourceResolved("new"),
+                event = InstallationSessionEvent.ComponentProgressUpdated(
+                    componentId = "desktop",
+                    phase = InstallPhase.FETCH,
+                    status = ComponentProgressStatus.RUNNING,
+                    fraction = 0.5f,
+                    indeterminate = false,
+                ),
                 sessionId = sessionId,
                 sequence = 10L,
-                eventId = "new-source",
+                eventId = "new-progress",
             ),
         )
         val newer = session.currentSnapshot()
         session.dispatch(
             InstallationSessionCommand.AdapterEvent(
-                event = InstallationSessionEvent.SourceResolved("old"),
+                event = InstallationSessionEvent.ComponentProgressUpdated(
+                    componentId = "desktop",
+                    phase = InstallPhase.FETCH,
+                    status = ComponentProgressStatus.RUNNING,
+                    fraction = 0.2f,
+                    indeterminate = false,
+                ),
                 sessionId = sessionId,
                 sequence = 9L,
-                eventId = "old-source",
+                eventId = "old-progress",
             ),
         )
         session.dispatch(
             InstallationSessionCommand.AdapterEvent(
-                event = InstallationSessionEvent.ArchiveDownloaded(1024L, "archive-sha"),
+                event = InstallationSessionEvent.ComponentProgressUpdated(
+                    componentId = "desktop",
+                    phase = InstallPhase.FETCH,
+                    status = ComponentProgressStatus.COMPLETED,
+                    fraction = 1f,
+                    indeterminate = false,
+                ),
                 sessionId = sessionId,
                 sequence = 10L,
                 eventId = "duplicate-sequence",
@@ -1527,11 +1534,7 @@ class InstallationSessionTest {
         session.dispatch(InstallationSessionCommand.BeginPipeline)
 
         session.dispatchEvent(
-            InstallationSessionEvent.ArtifactUnavailable(
-                componentId = lyrics.componentId,
-                reasonCode = "distribution_archive_invalid",
-                retryable = false,
-            ),
+            artifactBatchFailureEvent(session, lyrics.componentId, "distribution_archive_invalid"),
         )
         session.dispatchEvent(
             InstallationSessionEvent.FatalError(
@@ -1564,22 +1567,14 @@ class InstallationSessionTest {
         val beforeStaleEvent = session.currentSnapshot()
         session.dispatch(
             InstallationSessionCommand.AdapterEvent(
-                event = InstallationSessionEvent.ArtifactUnavailable(
-                    componentId = lyrics.componentId,
-                    reasonCode = "stale_batch_event",
-                    retryable = false,
-                ),
+                event = artifactBatchFailureEvent(session, lyrics.componentId, "stale_batch_event"),
                 sessionId = firstBatchSessionId,
                 sequence = 999L,
             ),
         )
         assertEquals(beforeStaleEvent, session.currentSnapshot())
         session.dispatchEvent(
-            InstallationSessionEvent.ArtifactUnavailable(
-                componentId = lyrics.componentId,
-                reasonCode = "distribution_archive_invalid",
-                retryable = false,
-            ),
+            artifactBatchFailureEvent(session, lyrics.componentId, "distribution_archive_invalid"),
         )
         session.dispatchEvent(
             InstallationSessionEvent.FatalError(
@@ -1685,85 +1680,6 @@ class InstallationSessionTest {
         assertEquals(ArtifactCatalogStage.CONTROL_PLANE_READY, started.artifactCatalogStage)
         assertEquals(setOf("file-manager"), started.selectedOptionalComponentIds)
         assertEquals(null, started.failure)
-    }
-
-    @Test
-    fun `partial selected catalog keeps one concrete failure without requiring display metadata`() {
-        val desktop = fullManifest("desktop", versionCode = 1)
-        val fileManager = fullManifest("file-manager", versionCode = 1)
-        val desktopDescriptor = desktop.toComponentDescriptor()
-        val fileManagerDescriptor = ComponentDescriptor(
-            id = fileManager.componentId,
-            displayName = fileManager.displayName,
-            required = false,
-            versionLabel = "v1.0",
-            sizeLabel = "30M",
-            compatibilityState = ComponentCompatibility.UNKNOWN,
-            status = ComponentStatus.READING,
-        )
-        val descriptors = listOf(desktopDescriptor, fileManagerDescriptor)
-        val session = InstallationSession(
-            initialSnapshot = InstallationSessionSnapshot(
-                state = InstallationSessionState.MAINTENANCE,
-                device = confirmedDevice.copy(
-                    androidSdk = 28,
-                    capabilities = setOf(DeviceCapability.ADB_TCP, DeviceCapability.IDENTITY_READ),
-                ),
-                components = descriptors,
-                maintenance = MaintenanceSnapshot(
-                    availableComponents = descriptors,
-                    managedApplicationsState = MaintenanceInventoryState.READY,
-                    managedApplications = listOf(
-                        ManagedApplicationStatus(
-                            componentId = desktop.componentId,
-                            packageName = desktop.packageName,
-                            installed = true,
-                            versionCode = desktop.apkVersion.code,
-                        ),
-                    ),
-                    installedManifests = listOf(desktop),
-                    catalogControlPlaneOnly = true,
-                    installationSelection = MaintenanceInstallationSelection(
-                        actionId = MaintenanceActionId.INSTALL_APPLICATIONS,
-                        options = listOf(
-                            MaintenanceInstallationOption(
-                                componentId = desktop.componentId,
-                                displayName = desktop.displayName,
-                                installed = true,
-                                required = true,
-                            ),
-                            MaintenanceInstallationOption(
-                                componentId = fileManager.componentId,
-                                displayName = fileManager.displayName,
-                                installed = false,
-                            ),
-                        ),
-                        selectedComponentIds = setOf(fileManager.componentId),
-                    ),
-                ),
-            ),
-        )
-
-        session.dispatch(InstallationSessionCommand.StartMaintenanceInstallation)
-        session.dispatchEvent(
-            InstallationSessionEvent.SelectedCatalogResolved(
-                catalogVersion = "catalog-2",
-                keyId = "key-1",
-                signatureAlgorithm = "Ed25519",
-                manifests = emptyList(),
-                apps = descriptors,
-                appFailures = mapOf(fileManager.componentId to "distribution_archive_invalid"),
-                appFailureRetryable = mapOf(fileManager.componentId to true),
-            ),
-        )
-
-        val snapshot = session.currentSnapshot()
-        assertEquals(ArtifactCatalogStage.PREPARED, snapshot.artifactCatalogStage)
-        assertEquals(setOf(fileManager.componentId), snapshot.failedComponentIds)
-        assertEquals(listOf(fileManager.componentId), snapshot.componentResults.map { it.componentId })
-        assertEquals("distribution_archive_invalid", snapshot.componentResults.single().failureReason)
-        assertTrue(snapshot.componentResults.single().retryable)
-        assertNotEquals("component_metadata_incomplete", snapshot.failure?.reasonCode)
     }
 
     @Test
@@ -2013,37 +1929,6 @@ class InstallationSessionTest {
     }
 
     @Test
-    fun `selected catalog preparation never shrinks the retained full component configuration`() {
-        val desktop = fullManifest("desktop", versionCode = 2)
-        val session = InstallationSession(
-            initialSnapshot = InstallationSessionSnapshot(
-                state = InstallationSessionState.SELECTION_CONFIRMED,
-                device = confirmedDevice.copy(
-                    androidSdk = 28,
-                    capabilities = setOf(DeviceCapability.ADB_TCP, DeviceCapability.IDENTITY_READ),
-                ),
-                components = components,
-                selectedOptionalComponentIds = setOf("lyrics", "file-manager"),
-            ),
-        )
-
-        session.dispatchEvent(
-            InstallationSessionEvent.SelectedCatalogResolved(
-                catalogVersion = "catalog-2",
-                keyId = "key-1",
-                signatureAlgorithm = "Ed25519",
-                manifests = listOf(desktop),
-                apps = emptyList(),
-            ),
-        )
-
-        assertEquals(
-            components.map { it.id }.toSet(),
-            session.currentSnapshot().components.map { it.id }.toSet(),
-        )
-    }
-
-    @Test
     fun `control plane refresh invalidates the previous installation batch`() {
         val old = fullManifest("desktop", versionCode = 1)
         val session = InstallationSession(
@@ -2096,9 +1981,8 @@ class InstallationSessionTest {
                 ),
                 components = components.filter { it.id in selected },
                 selectedOptionalComponentIds = setOf("lyrics"),
-                // The selected-catalog response contains only the missing app;
-                // the maintenance catalog remains the trusted source for the
-                // installed desktop manifest.
+                // Only the missing app crosses artifact preparation; the
+                // installed desktop identity remains in maintenance evidence.
                 artifactManifests = listOf(lyrics),
                 maintenance = MaintenanceSnapshot(
                     availableManifests = listOf(desktop, lyrics),
@@ -2125,72 +2009,8 @@ class InstallationSessionTest {
             ),
         )
 
-        session.dispatchEvent(
-            InstallationSessionEvent.SelectedCatalogResolved(
-                catalogVersion = "catalog-2",
-                keyId = "key-1",
-                signatureAlgorithm = "Ed25519",
-                manifests = listOf(lyrics),
-                apps = components.filter { it.id in selected },
-                appFailures = mapOf("desktop" to "lanzou_folder_missing_desktop"),
-            ),
-        )
-        assertTrue(session.currentSnapshot().failedComponentIds.isEmpty())
-        assertEquals(null, session.currentSnapshot().components.first { it.id == "desktop" }.errorReason)
-
         session.dispatch(InstallationSessionCommand.BeginPipeline)
-        session.dispatchEvent(
-            InstallationSessionEvent.SourceResolved(
-                sourceId = "fixture",
-                selections = listOf(SourceSelectionEvidence("lyrics", ArtifactSourceKind.LANZOU_SHARE)),
-            ),
-        )
-        session.dispatchEvent(
-            InstallationSessionEvent.ArchiveDownloaded(
-                sizeBytes = lyrics.archiveSizeBytes,
-                sha256 = lyrics.archiveSha256,
-                archives = listOf(
-                    ArchiveDownloadEvidence("lyrics", lyrics.archiveSizeBytes, lyrics.archiveSha256),
-                ),
-            ),
-        )
-        session.dispatchEvent(
-            InstallationSessionEvent.ArchiveVerified(
-                verified = true,
-                verifications = listOf(
-                    ArchiveVerificationEvidence("lyrics", lyrics.archiveSizeBytes, lyrics.archiveSha256),
-                ),
-            ),
-        )
-        session.dispatchEvent(
-            InstallationSessionEvent.ApkExtracted(
-                entryName = lyrics.apkEntryName,
-                sizeBytes = lyrics.apkSizeBytes,
-                sha256 = lyrics.apkSha256,
-                extractions = listOf(
-                    ApkExtractionEvidence("lyrics", lyrics.apkEntryName, lyrics.apkSizeBytes, lyrics.apkSha256),
-                ),
-            ),
-        )
-        session.dispatchEvent(
-            InstallationSessionEvent.ArtifactsVerified(
-                checks = listOf(ComponentCheck("lyrics", passed = true)),
-                verifications = listOf(
-                    ArtifactVerification(
-                        componentId = "lyrics",
-                        sourceKind = ArtifactSourceKind.LANZOU_SHARE,
-                        archiveSizeBytes = lyrics.archiveSizeBytes,
-                        archiveSha256 = lyrics.archiveSha256,
-                        apkSizeBytes = lyrics.apkSizeBytes,
-                        apkSha256 = lyrics.apkSha256,
-                        packageName = lyrics.packageName,
-                        apkVersion = lyrics.apkVersion,
-                        certificateSha256 = lyrics.certificateSha256,
-                        archiveDeleted = true,
-                    ),
-                ),
-            ),
-        )
+        dispatchArtifactBatchPrepared(session)
         session.dispatchEvent(
             InstallationSessionEvent.InstallationStarted(listOf("lyrics", "desktop")),
         )
@@ -3361,15 +3181,13 @@ class InstallationSessionTest {
     private fun resolveTrustedCatalog(session: InstallationSession) {
         if (session.currentSnapshot().artifactCatalogStage == ArtifactCatalogStage.PREPARED) return
         val current = session.currentSnapshot()
-        val manifests = current.components.map { component -> fullManifest(component.id, versionCode = 1) }
         session.dispatchEvent(
-            InstallationSessionEvent.CatalogResolved(
-                catalogVersion = "fixture-catalog",
+            InstallationSessionEvent.DistributionConfigResolved(
+                configVersion = "fixture-catalog",
                 keyId = "fixture-key",
                 signatureAlgorithm = "Ed25519",
-                manifests = manifests,
+                components = current.components,
                 catalogRevision = 1L,
-                apps = current.components,
             ),
         )
     }
@@ -3377,65 +3195,30 @@ class InstallationSessionTest {
     private fun preparationManifests(session: InstallationSession): List<ArtifactManifest> {
         val snapshot = session.currentSnapshot()
         val preparationIds = checkNotNull(snapshot.installationBatch).preparationComponentIds
-        return snapshot.artifactManifests.filter { it.componentId in preparationIds }
+        return snapshot.artifactManifests
+            .filter { it.componentId in preparationIds }
+            .ifEmpty { preparationIds.map { fullManifest(it, versionCode = 1) } }
     }
 
-    private fun dispatchSourceResolved(session: InstallationSession) {
+    private fun dispatchArtifactBatchPrepared(session: InstallationSession) {
         val manifests = preparationManifests(session)
+        val batch = checkNotNull(session.currentSnapshot().installationBatch)
         session.dispatchEvent(
-            InstallationSessionEvent.SourceResolved(
-                sourceId = "fixture",
-                selections = manifests.map {
+            InstallationSessionEvent.ArtifactBatchPrepared(
+                batchId = batch.batchId,
+                manifests = manifests,
+                sourceSelections = manifests.map {
                     SourceSelectionEvidence(it.componentId, ArtifactSourceKind.LANZOU_SHARE)
                 },
-            ),
-        )
-    }
-
-    private fun dispatchArchivesDownloaded(session: InstallationSession) {
-        val manifests = preparationManifests(session)
-        session.dispatchEvent(
-            InstallationSessionEvent.ArchiveDownloaded(
-                sizeBytes = manifests.sumOf { it.archiveSizeBytes },
-                sha256 = manifests.first().archiveSha256,
                 archives = manifests.map {
                     ArchiveDownloadEvidence(it.componentId, it.archiveSizeBytes, it.archiveSha256)
                 },
-            ),
-        )
-    }
-
-    private fun dispatchArchivesVerified(session: InstallationSession) {
-        val manifests = preparationManifests(session)
-        session.dispatchEvent(
-            InstallationSessionEvent.ArchiveVerified(
-                verified = true,
-                verifications = manifests.map {
+                archiveVerifications = manifests.map {
                     ArchiveVerificationEvidence(it.componentId, it.archiveSizeBytes, it.archiveSha256)
                 },
-            ),
-        )
-    }
-
-    private fun dispatchApksExtracted(session: InstallationSession) {
-        val manifests = preparationManifests(session)
-        session.dispatchEvent(
-            InstallationSessionEvent.ApkExtracted(
-                entryName = manifests.first().apkEntryName,
-                sizeBytes = manifests.sumOf { it.apkSizeBytes },
-                sha256 = manifests.first().apkSha256,
                 extractions = manifests.map {
                     ApkExtractionEvidence(it.componentId, it.apkEntryName, it.apkSizeBytes, it.apkSha256)
                 },
-            ),
-        )
-    }
-
-    private fun dispatchArtifactsVerified(session: InstallationSession) {
-        val manifests = preparationManifests(session)
-        session.dispatchEvent(
-            InstallationSessionEvent.ArtifactsVerified(
-                checks = manifests.map { ComponentCheck(it.componentId, passed = true) },
                 verifications = manifests.map { manifest ->
                     ArtifactVerification(
                         componentId = manifest.componentId,
@@ -3454,15 +3237,29 @@ class InstallationSessionTest {
         )
     }
 
+    private fun artifactBatchFailureEvent(
+        session: InstallationSession,
+        componentId: String,
+        reasonCode: String,
+    ): InstallationSessionEvent.ArtifactBatchPrepared =
+        InstallationSessionEvent.ArtifactBatchPrepared(
+            batchId = checkNotNull(session.currentSnapshot().installationBatch).batchId,
+            failures = listOf(
+                ArtifactFailure(
+                    phase = ArtifactFailurePhase.ARCHIVE_VERIFICATION,
+                    componentId = componentId,
+                    sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                    reasonCode = reasonCode,
+                    retryable = false,
+                ),
+            ),
+        )
+
     private fun startToInstalling(session: InstallationSession) {
         resolveTrustedCatalog(session)
         session.dispatch(InstallationSessionCommand.StartInstallation)
         session.dispatch(InstallationSessionCommand.BeginPipeline)
-        dispatchSourceResolved(session)
-        dispatchArchivesDownloaded(session)
-        dispatchArchivesVerified(session)
-        dispatchApksExtracted(session)
-        dispatchArtifactsVerified(session)
+        dispatchArtifactBatchPrepared(session)
         session.dispatchEvent(InstallationSessionEvent.InstallationStarted())
     }
 
@@ -3472,11 +3269,6 @@ class InstallationSessionTest {
             InstallationSessionEvent.InstallationBatchCompleted(successfulReceipt(session)),
         )
     }
-
-    private fun checks(session: InstallationSession): List<ComponentCheck> =
-        session.currentSnapshot().components
-            .filter { it.required || it.id in session.currentSnapshot().selectedOptionalComponentIds }
-            .map { ComponentCheck(it.id, passed = true) }
 
     private fun validAuthorizationEvidence(
         plan: com.ninepointnine.helper.domain.device.AuthorizationPlan,

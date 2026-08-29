@@ -49,6 +49,14 @@ class ReleaseSourcePolicy(
     }
 
     fun validateResolvedRequest(request: ResolvedDownloadRequest): SourcePolicyValidation {
+        if (request.sourceKind == ArtifactSourceKind.LANZOU_SHARE) {
+            if (isLanzouVerificationPage(request.url)) {
+                return SourcePolicyValidation.Rejected("lanzou_verification_url_not_download")
+            }
+            if (!isLanzouTransientDownloadUrl(request.url)) {
+                return SourcePolicyValidation.Rejected("lanzou_transient_download_url_invalid")
+            }
+        }
         val source = ArtifactSource(request.sourceKind, request.url)
         val reason = hostPolicy.rejectReason(source, requireSingleSharePath = false)
         return if (reason == null) {

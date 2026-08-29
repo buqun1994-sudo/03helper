@@ -29,7 +29,7 @@ object InstallUiStateMapper {
             snapshot.state in setOf(InstallationSessionState.DISCOVERING, InstallationSessionState.CONNECTING)
         ) {
             return installingState(
-                snapshot.copy(state = snapshot.checkpoint?.state ?: InstallationSessionState.RESOLVING_SOURCE),
+                snapshot.copy(state = snapshot.checkpoint?.state ?: InstallationSessionState.PREPARING_ARTIFACTS),
             )
         }
         return when (snapshot.state) {
@@ -42,11 +42,8 @@ object InstallUiStateMapper {
 
         InstallationSessionState.CONNECTED -> selectionState(snapshot)
         InstallationSessionState.SELECTION_CONFIRMED,
-        InstallationSessionState.RESOLVING_SOURCE,
-        InstallationSessionState.DOWNLOADING_ARCHIVE,
-        InstallationSessionState.VERIFYING_ARCHIVE,
-        InstallationSessionState.EXTRACTING_APK,
-        InstallationSessionState.VERIFYING_ARTIFACTS,
+        InstallationSessionState.PREPARING_ARTIFACTS,
+        InstallationSessionState.ARTIFACTS_READY,
         InstallationSessionState.INSTALLING,
         InstallationSessionState.AUTHORIZING,
         InstallationSessionState.VERIFYING_DEVICE,
@@ -263,14 +260,12 @@ object InstallUiStateMapper {
 
     private fun installingState(snapshot: InstallationSessionSnapshot): InstallUiState.Installing {
         val currentPhase = when (snapshot.state) {
-            InstallationSessionState.RESOLVING_SOURCE,
-            InstallationSessionState.DOWNLOADING_ARCHIVE,
-            -> InstallPhase.FETCH
+            InstallationSessionState.PREPARING_ARTIFACTS -> snapshot.componentProgress.values
+                .firstOrNull { it.status == com.ninepointnine.helper.domain.session.ComponentProgressStatus.RUNNING }
+                ?.phase
+                ?: InstallPhase.FETCH
 
-            InstallationSessionState.VERIFYING_ARCHIVE,
-            InstallationSessionState.EXTRACTING_APK,
-            InstallationSessionState.VERIFYING_ARTIFACTS,
-            -> InstallPhase.CHECK
+            InstallationSessionState.ARTIFACTS_READY -> InstallPhase.CHECK
 
             InstallationSessionState.INSTALLING -> InstallPhase.SEND
             InstallationSessionState.AUTHORIZING -> InstallPhase.CONFIGURE
@@ -368,6 +363,7 @@ private fun String.toUserMessage(): String = when (this) {
     "desktop_prerequisite_failed" -> "03桌面未完成，无法继续处理此应用"
     "public_download_publish_failed" -> "安装包已下载，但暂时无法保存到手机的下载目录"
     "local_download_candidate_missing" -> "手机的下载目录中没有可复用的安装包"
+    "local_download_unavailable" -> "暂时无法读取手机的下载目录，请检查存储权限"
     "lanzou_folder_duplicate" -> "云端安装目录中存在重复文件，已停止使用"
     "lanzou_folder_missing" -> "云端安装目录中暂时没有这个应用"
     "lanzou_parse_timeout",
@@ -375,6 +371,9 @@ private fun String.toUserMessage(): String = when (this) {
     "lanzou_webview_create_failed",
     "lanzou_webview_start_failed",
     -> "暂时无法读取云端安装目录，请重试"
+    "lanzou_page_incompatible" -> "当前云端下载页面版本不兼容，请重试"
+    "lanzou_verification_required" -> "云端要求完成安全验证，暂时无法自动下载"
+    "lanzou_html_response" -> "云端返回了验证页面，请稍后重试"
 
     "install_apk_certificate_mismatch",
     "installation_installed_certificate_mismatch",

@@ -169,9 +169,9 @@ data class ComponentResult(
     ),
 ) {
     /**
-     * Recomputes the status from the evidence fields. The constructor status
-     * remains source-compatible for older callers, but it is never trusted by
-     * the result projection because restored snapshots may carry stale data.
+     * Recomputes the status from the evidence fields. The stored status is a
+     * denormalized snapshot field; projections always derive it again so a
+     * restored record cannot make stale status authoritative.
      */
     val derivedStatus: ComponentResultStatus
         get() = resolveComponentResultStatus(

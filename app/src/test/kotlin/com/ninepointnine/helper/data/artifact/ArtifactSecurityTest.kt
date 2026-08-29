@@ -3,6 +3,7 @@ package com.ninepointnine.helper.data.artifact
 import com.ninepointnine.helper.data.download.ArtifactCache
 import com.ninepointnine.helper.data.download.ArtifactDownloader
 import com.ninepointnine.helper.data.download.ArtifactDownloadResult
+import com.ninepointnine.helper.data.download.DynamicArchiveDownloadResult
 import com.ninepointnine.helper.data.download.ArtifactTransport
 import com.ninepointnine.helper.data.download.ArtifactTransportResponse
 import com.ninepointnine.helper.data.web.LanzouResolutionResult
@@ -191,6 +192,180 @@ class ArtifactSecurityTest {
     }
 
     @Test
+    fun `legacy private verified APKs are removed and never become public candidates`() {
+        val privateRoot = Files.createTempDirectory("artifact-cache-legacy-private").toFile()
+        val publicRoot = Files.createTempDirectory("artifact-cache-legacy-public").toFile()
+        try {
+            val legacyRoot = privateRoot.resolve("verified-apks").apply { mkdirs() }
+            val legacyApk = legacyRoot.resolve("legacy.apk").apply { writeBytes(byteArrayOf(1)) }
+            val publicApk = publicRoot.resolve("manual.apk").apply { writeBytes(byteArrayOf(2)) }
+
+            val cache = ArtifactCache(privateRoot, publicRoot)
+
+            assertFalse(legacyApk.exists())
+            assertEquals(listOf(publicApk.canonicalFile), cache.publicApkCandidates().map { it.canonicalFile })
+
+            // A directory with the old name created after startup is still
+            // outside the public source boundary and must not be scanned.
+            val lateLegacyRoot = privateRoot.resolve("verified-apks").apply { mkdirs() }
+            lateLegacyRoot.resolve("late-legacy.apk")
+                .writeBytes(byteArrayOf(3))
+            assertTrue(cache.refreshPublicApkCandidates().none { it.name == "late-legacy.apk" })
+        } finally {
+            privateRoot.deleteRecursively()
+            publicRoot.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `private cache cleanup removes working files without deleting public Download APKs`() {
+        val privateRoot = Files.createTempDirectory("artifact-cache-clean-private").toFile()
+        val publicRoot = Files.createTempDirectory("artifact-cache-clean-public").toFile()
+        try {
+            val cache = ArtifactCache(privateRoot, publicRoot)
+            privateRoot.resolve("archive.zip.part").writeBytes(byteArrayOf(1))
+            privateRoot.resolve(".public-candidate-7.apk").writeBytes(byteArrayOf(2))
+            privateRoot.resolve(".icon-candidates/.icon-candidate-7.apk").apply {
+                parentFile?.mkdirs()
+                writeBytes(byteArrayOf(6))
+            }
+            privateRoot.resolve("verified-apks").apply { mkdirs() }
+                .resolve("legacy.apk")
+                .writeBytes(byteArrayOf(3))
+            val helperApk = publicRoot.resolve("03helper-desktop-1.apk").apply { writeBytes(byteArrayOf(4)) }
+            val userApk = publicRoot.resolve("manual-desktop.apk").apply { writeBytes(byteArrayOf(5)) }
+
+            cache.clearPrivateCache()
+
+            assertTrue(privateRoot.listFiles().isNullOrEmpty())
+            assertTrue(helperApk.exists())
+            assertTrue(userApk.exists())
+        } finally {
+            privateRoot.deleteRecursively()
+            publicRoot.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `cache startup removes stale private APK material but keeps a valid fixed resume pair`() {
+        val privateRoot = Files.createTempDirectory("artifact-cache-startup-private").toFile()
+        val publicRoot = Files.createTempDirectory("artifact-cache-startup-public").toFile()
+        try {
+            val firstCache = ArtifactCache(privateRoot, publicRoot)
+            val manifest = manifestFor(
+                byteArrayOf(0x50, 0x4b, 0x03, 0x04, 1, 2),
+                byteArrayOf(3),
+            )
+            val paths = firstCache.paths(manifest)
+            paths.archivePart.writeBytes(byteArrayOf(0x50, 0x4b, 0x03))
+            firstCache.writeResumeMetadata(manifest, ArtifactSourceKind.R2.wireName)
+            privateRoot.resolve("0123456789abcdef01234567.apk").writeBytes(byteArrayOf(1))
+            privateRoot.resolve("old.apk.part").writeBytes(byteArrayOf(2))
+            privateRoot.resolve(".public-candidate-7.apk").writeBytes(byteArrayOf(3))
+            privateRoot.resolve("prepare-lyrics.zip").writeBytes(byteArrayOf(4))
+            privateRoot.resolve("prepare-lyrics.zip.part").writeBytes(byteArrayOf(5))
+            privateRoot.resolve("prepare-lyrics.apk").writeBytes(byteArrayOf(6))
+            privateRoot.resolve("installed-verification/old.apk").apply {
+                parentFile?.mkdirs()
+                writeBytes(byteArrayOf(7))
+            }
+            privateRoot.resolve("verified-apks/legacy.apk").apply {
+                parentFile?.mkdirs()
+                writeBytes(byteArrayOf(8))
+            }
+            val publicApk = publicRoot.resolve("manual.apk").apply { writeBytes(byteArrayOf(9)) }
+
+            ArtifactCache(privateRoot, publicRoot)
+
+            assertTrue(paths.archivePart.exists())
+            assertTrue(paths.resumeMetadata.exists())
+            assertTrue(publicApk.exists())
+            assertFalse(privateRoot.resolve("0123456789abcdef01234567.apk").exists())
+            assertFalse(privateRoot.resolve("old.apk.part").exists())
+            assertFalse(privateRoot.resolve(".public-candidate-7.apk").exists())
+            assertFalse(privateRoot.resolve("prepare-lyrics.zip").exists())
+            assertFalse(privateRoot.resolve("prepare-lyrics.zip.part").exists())
+            assertFalse(privateRoot.resolve("prepare-lyrics.apk").exists())
+            assertFalse(privateRoot.resolve("installed-verification").exists())
+            assertFalse(privateRoot.resolve("verified-apks").exists())
+        } finally {
+            privateRoot.deleteRecursively()
+            publicRoot.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `clear all with a shared root preserves user APKs`() {
+        val root = Files.createTempDirectory("artifact-cache-shared-root").toFile()
+        try {
+            val userApk = root.resolve("manual-download.apk").apply { writeBytes(byteArrayOf(1)) }
+            val helperApk = root.resolve("03helper-desktop-1.apk").apply { writeBytes(byteArrayOf(2)) }
+            root.resolve("prepare-desktop.apk").writeBytes(byteArrayOf(3))
+
+            ArtifactCache(root).clearAll()
+
+            assertTrue(userApk.exists())
+            assertFalse(helperApk.exists())
+            assertFalse(root.resolve("prepare-desktop.apk").exists())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `private cleanup never walks into a public Download subtree`() {
+        val privateRoot = Files.createTempDirectory("artifact-cache-public-child-private").toFile()
+        val publicRoot = privateRoot.resolve("Download").apply { mkdirs() }
+        try {
+            val cache = ArtifactCache(privateRoot, publicRoot)
+            val publicApk = publicRoot.resolve("manual.apk").apply { writeBytes(byteArrayOf(1)) }
+            val privateZip = privateRoot.resolve("prepare-desktop.zip").apply { writeBytes(byteArrayOf(2)) }
+
+            cache.clearPrivateCache()
+
+            assertTrue(publicApk.exists())
+            assertFalse(privateZip.exists())
+        } finally {
+            privateRoot.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `private cleanup still removes a workspace nested below public Download`() {
+        val publicRoot = Files.createTempDirectory("artifact-cache-public-parent").toFile()
+        val privateRoot = publicRoot.resolve(".03helper-work").apply { mkdirs() }
+        try {
+            val cache = ArtifactCache(privateRoot, publicRoot)
+            val publicApk = publicRoot.resolve("03helper-desktop-1.apk").apply { writeBytes(byteArrayOf(1)) }
+            val privateZip = privateRoot.resolve("prepare-desktop.zip").apply { writeBytes(byteArrayOf(2)) }
+
+            cache.clearPrivateCache()
+
+            assertTrue(publicApk.exists())
+            assertFalse(privateZip.exists())
+        } finally {
+            publicRoot.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `shared root cleanup does not delete an unrelated hexadecimal APK`() {
+        val root = Files.createTempDirectory("artifact-cache-shared-hex-apk").toFile()
+        try {
+            val userApk = root.resolve("0123456789abcdef01234567.apk").apply { writeBytes(byteArrayOf(1)) }
+            root.resolve("prepare-desktop.apk").writeBytes(byteArrayOf(2))
+            val cache = ArtifactCache(root)
+
+            cache.clearPrivateCache()
+
+            assertTrue(userApk.exists())
+            assertFalse(root.resolve("prepare-desktop.apk").exists())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun `source policy fixes order and recognizes only bounded Lanzou transient download hosts`() {
         val manifest = manifestFor(byteArrayOf(1), byteArrayOf(2)).copy(
             sources = listOf(
@@ -226,16 +401,16 @@ class ArtifactSecurityTest {
         assertTrue(com.ninepointnine.helper.domain.artifact.ReleaseSourcePolicy().plan(converter) is SourcePlan.Rejected)
 
         val policy = com.ninepointnine.helper.domain.artifact.ReleaseSourcePolicy()
-        val transientLanzouRequest = ResolvedDownloadRequest(
+        val verificationRequest = ResolvedDownloadRequest(
             sourceKind = ArtifactSourceKind.LANZOU_SHARE,
             url = "https://developer2.lanrar.com/file/?short-lived-token",
             userAgent = "Android System WebView",
         )
         assertTrue(
-            policy.validateResolvedRequest(transientLanzouRequest) is
-                com.ninepointnine.helper.domain.artifact.SourcePolicyValidation.Accepted,
+            policy.validateResolvedRequest(verificationRequest) is
+                com.ninepointnine.helper.domain.artifact.SourcePolicyValidation.Rejected,
         )
-        val transientCdnRequest = transientLanzouRequest.copy(
+        val transientCdnRequest = verificationRequest.copy(
             url = "https://zip1.webgetstore.com/2026/8/19/archive.zip?short-lived-token",
         )
         assertTrue(
@@ -243,8 +418,8 @@ class ArtifactSecurityTest {
                 com.ninepointnine.helper.domain.artifact.SourcePolicyValidation.Accepted,
         )
         assertTrue(policy.isLanzouSharePage("https://wwatl.lanzouw.com/tp/iabc123?token"))
-        assertFalse(policy.isLanzouSharePage(transientLanzouRequest.url))
-        assertFalse(policy.isLanzouTransientDownloadUrl(transientLanzouRequest.url))
+        assertFalse(policy.isLanzouSharePage(verificationRequest.url))
+        assertFalse(policy.isLanzouTransientDownloadUrl(verificationRequest.url))
         assertTrue(policy.isLanzouVerificationPage("https://developer2.lanrar.com/file/?short-lived-token"))
         assertTrue(policy.isLanzouTransientDownloadUrl(transientCdnRequest.url))
         assertFalse(policy.isLanzouTransientDownloadUrl("https://zip1.webgetstore.com/"))
@@ -253,7 +428,7 @@ class ArtifactSecurityTest {
             "lanzou_manifest_host_forbidden",
             (
                 policy.validateManifestSource(
-                    ArtifactSource(ArtifactSourceKind.LANZOU_SHARE, transientLanzouRequest.url),
+                    ArtifactSource(ArtifactSourceKind.LANZOU_SHARE, verificationRequest.url),
                 ) as com.ninepointnine.helper.domain.artifact.SourcePolicyValidation.Rejected
             ).reasonCode,
         )
@@ -464,9 +639,288 @@ class ArtifactSecurityTest {
     }
 
     @Test
+    fun `downloader removes a stale resume pair after a non retryable HTTP response`() = runBlocking {
+        val directory = Files.createTempDirectory("artifact-download-http-terminal").toFile()
+        val archive = byteArrayOf(0x50, 0x4b, 0x03, 0x04, 1, 2)
+        val manifest = manifestFor(archive, byteArrayOf(4))
+        val cache = ArtifactCache(directory)
+        val paths = cache.paths(manifest)
+        paths.archivePart.writeBytes(archive.copyOfRange(0, 3))
+        cache.writeResumeMetadata(manifest, ArtifactSourceKind.R2.wireName)
+        val downloader = ArtifactDownloader(
+            transport = ArtifactTransport { _, rangeStart ->
+                if (rangeStart > 0L) {
+                    assertEquals(3L, rangeStart)
+                    return@ArtifactTransport ArtifactTransportResponse(
+                        statusCode = 200,
+                        contentLength = archive.size.toLong(),
+                        contentType = "application/zip",
+                        body = ByteArrayInputStream(archive),
+                    )
+                }
+                ArtifactTransportResponse(
+                    statusCode = 404,
+                    contentLength = 0L,
+                    contentType = "text/plain",
+                    body = ByteArrayInputStream(ByteArray(0)),
+                )
+            },
+            cache = cache,
+        )
+
+        val result = downloader.download(
+            manifest,
+            ResolvedDownloadRequest(ArtifactSourceKind.R2, "https://assets.r2.dev/item.zip"),
+        ) as ArtifactDownloadResult.Failed
+
+        assertEquals("download_http_404", result.failure.reasonCode)
+        assertFalse(result.failure.retryable)
+        assertFalse(paths.archivePart.exists())
+        assertFalse(paths.resumeMetadata.exists())
+    }
+
+    @Test
+    fun `downloader rejects binary content without a zip signature`() = runBlocking {
+        val directory = Files.createTempDirectory("artifact-download-magic").toFile()
+        val bytes = "not an archive".toByteArray()
+        val manifest = manifestFor(bytes, byteArrayOf(4))
+        val cache = ArtifactCache(directory)
+        val downloader = ArtifactDownloader(
+            transport = ArtifactTransport { _, _ ->
+                ArtifactTransportResponse(
+                    statusCode = 200,
+                    contentLength = bytes.size.toLong(),
+                    contentType = "application/octet-stream",
+                    body = ByteArrayInputStream(bytes),
+                )
+            },
+            cache = cache,
+        )
+
+        val result = downloader.download(
+            manifest,
+            ResolvedDownloadRequest(ArtifactSourceKind.R2, "https://assets.r2.dev/item.zip"),
+        ) as ArtifactDownloadResult.Failed
+
+        assertEquals("download_not_zip", result.failure.reasonCode)
+        assertFalse(cache.paths(manifest).archivePart.exists())
+    }
+
+    @Test
+    fun `dynamic downloader rejects binary content without a zip signature`() = runBlocking {
+        val directory = Files.createTempDirectory("dynamic-download-magic").toFile()
+        val destination = directory.resolve("dynamic.zip")
+        val bytes = "not an archive".toByteArray()
+        val downloader = ArtifactDownloader(
+            transport = ArtifactTransport { _, _ ->
+                ArtifactTransportResponse(
+                    statusCode = 200,
+                    contentLength = bytes.size.toLong(),
+                    contentType = "application/octet-stream",
+                    body = ByteArrayInputStream(bytes),
+                )
+            },
+            cache = ArtifactCache(directory),
+        )
+
+        val result = downloader.downloadDynamic(
+            ResolvedDownloadRequest(ArtifactSourceKind.R2, "https://assets.r2.dev/item.zip"),
+            destination,
+        ) as DynamicArchiveDownloadResult.Failed
+
+        assertEquals("dynamic_archive_not_zip", result.reasonCode)
+        assertFalse(destination.exists())
+    }
+
+    @Test
+    fun `dynamic downloader removes a stale destination when the retry fails`() = runBlocking {
+        val directory = Files.createTempDirectory("dynamic-download-stale").toFile()
+        val destination = directory.resolve("dynamic.zip").apply { writeBytes(byteArrayOf(9, 9, 9)) }
+        val downloader = ArtifactDownloader(
+            transport = ArtifactTransport { _, _ ->
+                ArtifactTransportResponse(
+                    statusCode = 200,
+                    contentLength = 18,
+                    contentType = "text/html",
+                    body = ByteArrayInputStream("<html>challenge</html>".toByteArray()),
+                )
+            },
+            cache = ArtifactCache(directory),
+        )
+
+        val result = downloader.downloadDynamic(
+            ResolvedDownloadRequest(ArtifactSourceKind.R2, "https://assets.r2.dev/item.zip"),
+            destination,
+        ) as DynamicArchiveDownloadResult.Failed
+
+        assertEquals("dynamic_archive_non_binary", result.reasonCode)
+        assertFalse(destination.exists())
+        assertFalse(destination.resolveSibling("${destination.name}.part").exists())
+    }
+
+    @Test
+    fun `dynamic downloader rejects a content length mismatch and leaves no working file`() = runBlocking {
+        val directory = Files.createTempDirectory("dynamic-download-length").toFile()
+        val destination = directory.resolve("dynamic.zip")
+        val bytes = zipBytes(listOf("app.apk" to byteArrayOf(1, 2, 3)))
+        val downloader = ArtifactDownloader(
+            transport = ArtifactTransport { _, _ ->
+                ArtifactTransportResponse(
+                    statusCode = 200,
+                    contentLength = bytes.size.toLong() + 1L,
+                    contentType = "application/zip",
+                    body = ByteArrayInputStream(bytes),
+                )
+            },
+            cache = ArtifactCache(directory),
+        )
+
+        val result = downloader.downloadDynamic(
+            ResolvedDownloadRequest(ArtifactSourceKind.R2, "https://assets.r2.dev/item.zip"),
+            destination,
+        ) as DynamicArchiveDownloadResult.Failed
+
+        assertEquals("dynamic_archive_incomplete", result.reasonCode)
+        assertTrue(result.retryable)
+        assertFalse(destination.exists())
+        assertFalse(destination.resolveSibling("${destination.name}.part").exists())
+    }
+
+    @Test
+    fun `downloader fails closed when the transport returns a zero byte read`() = runBlocking {
+        val directory = Files.createTempDirectory("artifact-download-zero-read").toFile()
+        val archive = byteArrayOf(0x50, 0x4b, 0x03, 0x04)
+        val manifest = manifestFor(archive, byteArrayOf(9))
+        val cache = ArtifactCache(directory)
+        val downloader = ArtifactDownloader(
+            transport = ArtifactTransport { _, _ ->
+                ArtifactTransportResponse(
+                    statusCode = 200,
+                    contentLength = archive.size.toLong(),
+                    contentType = "application/zip",
+                    body = object : InputStream() {
+                        override fun read(): Int = 0
+
+                        override fun read(buffer: ByteArray, offset: Int, length: Int): Int = 0
+                    },
+                )
+            },
+            cache = cache,
+        )
+
+        val result = downloader.download(
+            manifest,
+            ResolvedDownloadRequest(ArtifactSourceKind.R2, "https://assets.r2.dev/item.zip"),
+        ) as ArtifactDownloadResult.Failed
+
+        assertEquals("download_io_failed", result.failure.reasonCode)
+        assertTrue(result.failure.retryable)
+        assertEquals(0L, result.partialBytes)
+    }
+
+    @Test
+    fun `resumed downloader rejects a successful response that is not partial content`() = runBlocking {
+        val directory = Files.createTempDirectory("artifact-download-range").toFile()
+        val bytes = byteArrayOf(0x50, 0x4b, 0x03, 0x04, 5, 6)
+        val manifest = manifestFor(bytes, byteArrayOf(9))
+        val cache = ArtifactCache(directory)
+        val paths = cache.paths(manifest)
+        paths.archivePart.writeBytes(bytes.copyOfRange(0, 3))
+        cache.writeResumeMetadata(manifest, ArtifactSourceKind.R2.wireName)
+        val downloader = ArtifactDownloader(
+            transport = ArtifactTransport { _, rangeStart ->
+                assertEquals(3L, rangeStart)
+                ArtifactTransportResponse(
+                    statusCode = 201,
+                    contentLength = 3,
+                    contentType = "application/zip",
+                    body = ByteArrayInputStream(bytes.copyOfRange(3, bytes.size)),
+                )
+            },
+            cache = cache,
+        )
+
+        val result = downloader.download(
+            manifest,
+            ResolvedDownloadRequest(ArtifactSourceKind.R2, "https://assets.r2.dev/item.zip"),
+        ) as ArtifactDownloadResult.Failed
+
+        assertEquals("download_range_response_invalid", result.failure.reasonCode)
+        assertFalse(paths.archivePart.exists())
+        assertFalse(paths.resumeMetadata.exists())
+    }
+
+    @Test
+    fun `resumed downloader rejects a partial response for the wrong byte range`() = runBlocking {
+        val directory = Files.createTempDirectory("artifact-download-range-header").toFile()
+        val bytes = byteArrayOf(0x50, 0x4b, 0x03, 0x04, 5, 6)
+        val manifest = manifestFor(bytes, byteArrayOf(9))
+        val cache = ArtifactCache(directory)
+        val paths = cache.paths(manifest)
+        paths.archivePart.writeBytes(bytes.copyOfRange(0, 3))
+        cache.writeResumeMetadata(manifest, ArtifactSourceKind.R2.wireName)
+        val downloader = ArtifactDownloader(
+            transport = ArtifactTransport { _, rangeStart ->
+                assertEquals(3L, rangeStart)
+                ArtifactTransportResponse(
+                    statusCode = 206,
+                    contentLength = 3,
+                    contentType = "application/zip",
+                    body = ByteArrayInputStream(bytes.copyOfRange(3, bytes.size)),
+                    contentRangeStartBytes = 2L,
+                    contentRangeTotalBytes = bytes.size.toLong(),
+                )
+            },
+            cache = cache,
+        )
+
+        val result = downloader.download(
+            manifest,
+            ResolvedDownloadRequest(ArtifactSourceKind.R2, "https://assets.r2.dev/item.zip"),
+        ) as ArtifactDownloadResult.Failed
+
+        assertEquals("download_range_response_invalid", result.failure.reasonCode)
+        assertFalse(paths.archivePart.exists())
+        assertFalse(paths.resumeMetadata.exists())
+    }
+
+    @Test
+    fun `incomplete resumed downloader clears an unsatisfiable range response`() = runBlocking {
+        val directory = Files.createTempDirectory("artifact-download-range-416").toFile()
+        val bytes = byteArrayOf(0x50, 0x4b, 0x03, 0x04, 5, 6)
+        val manifest = manifestFor(bytes, byteArrayOf(9))
+        val cache = ArtifactCache(directory)
+        val paths = cache.paths(manifest)
+        paths.archivePart.writeBytes(bytes.copyOfRange(0, 3))
+        cache.writeResumeMetadata(manifest, ArtifactSourceKind.R2.wireName)
+        val downloader = ArtifactDownloader(
+            transport = ArtifactTransport { _, rangeStart ->
+                assertEquals(3L, rangeStart)
+                ArtifactTransportResponse(
+                    statusCode = 416,
+                    contentLength = 0L,
+                    contentType = "text/plain",
+                    body = ByteArrayInputStream(ByteArray(0)),
+                )
+            },
+            cache = cache,
+        )
+
+        val result = downloader.download(
+            manifest,
+            ResolvedDownloadRequest(ArtifactSourceKind.R2, "https://assets.r2.dev/item.zip"),
+        ) as ArtifactDownloadResult.Failed
+
+        assertEquals("download_range_response_invalid", result.failure.reasonCode)
+        assertTrue(result.failure.retryable)
+        assertFalse(paths.archivePart.exists())
+        assertFalse(paths.resumeMetadata.exists())
+    }
+
+    @Test
     fun `downloader resumes same source without persisting url or cookie`() = runBlocking {
         val directory = Files.createTempDirectory("artifact-download-resume").toFile()
-        val bytes = byteArrayOf(1, 2, 3, 4, 5, 6)
+        val bytes = byteArrayOf(0x50, 0x4b, 0x03, 0x04, 5, 6)
         val manifest = manifestFor(bytes, byteArrayOf(9))
         val cache = ArtifactCache(directory)
         val calls = AtomicInteger(0)
@@ -515,7 +969,12 @@ class ArtifactSecurityTest {
     @Test
     fun `downloader cancellation preserves a resumable part`() = runBlocking {
         val directory = Files.createTempDirectory("artifact-download-cancel").toFile()
-        val bytes = ByteArray(32) { it.toByte() }
+        val bytes = ByteArray(32) { it.toByte() }.also {
+            it[0] = 0x50
+            it[1] = 0x4b
+            it[2] = 0x03
+            it[3] = 0x04
+        }
         val manifest = manifestFor(bytes, byteArrayOf(9))
         val cache = ArtifactCache(directory)
         lateinit var downloadJob: kotlinx.coroutines.Job
@@ -559,7 +1018,7 @@ class ArtifactSecurityTest {
         val destroyed = AtomicInteger(0)
         val request = ResolvedDownloadRequest(
             sourceKind = ArtifactSourceKind.LANZOU_SHARE,
-            url = "https://developer2.lanrar.com/file/?short-lived-token",
+            url = "https://zip1.webgetstore.com/2026/8/19/archive.zip?short-lived-token",
             userAgent = "Android System WebView",
             mimeType = "application/zip",
         )
@@ -568,10 +1027,20 @@ class ArtifactSecurityTest {
                 shareUrl: String,
                 onDownload: (ResolvedDownloadRequest) -> Unit,
                 onFailure: (com.ninepointnine.helper.domain.artifact.ArtifactFailure) -> Unit,
-            ) = onDownload(request)
+            ) {
+                onDownload(request)
+                onFailure(
+                    com.ninepointnine.helper.domain.artifact.ArtifactFailure(
+                        phase = com.ninepointnine.helper.domain.artifact.ArtifactFailurePhase.SOURCE_RESOLUTION,
+                        sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                        reasonCode = "late_failure",
+                        retryable = false,
+                    ),
+                )
+            }
 
             override fun stopAndDestroy() {
-                destroyed.incrementAndGet()
+                if (destroyed.incrementAndGet() == 1) error("webview_already_destroyed")
             }
         }
         val adapter = LanzouWebSourceAdapter(LanzouWebViewHostFactory { host }, timeoutMillis = 100)

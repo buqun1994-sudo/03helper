@@ -779,11 +779,8 @@ class InstallUiStateMapperTest {
     fun `every internal state maps to one of the five stable screens`() {
         val installingStates = listOf(
             InstallationSessionState.SELECTION_CONFIRMED,
-            InstallationSessionState.RESOLVING_SOURCE,
-            InstallationSessionState.DOWNLOADING_ARCHIVE,
-            InstallationSessionState.VERIFYING_ARCHIVE,
-            InstallationSessionState.EXTRACTING_APK,
-            InstallationSessionState.VERIFYING_ARTIFACTS,
+            InstallationSessionState.PREPARING_ARTIFACTS,
+            InstallationSessionState.ARTIFACTS_READY,
             InstallationSessionState.INSTALLING,
             InstallationSessionState.AUTHORIZING,
             InstallationSessionState.VERIFYING_DEVICE,

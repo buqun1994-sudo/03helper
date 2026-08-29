@@ -7,11 +7,8 @@ enum class InstallationSessionState {
     CONNECTING,
     CONNECTED,
     SELECTION_CONFIRMED,
-    RESOLVING_SOURCE,
-    DOWNLOADING_ARCHIVE,
-    VERIFYING_ARCHIVE,
-    EXTRACTING_APK,
-    VERIFYING_ARTIFACTS,
+    PREPARING_ARTIFACTS,
+    ARTIFACTS_READY,
     INSTALLING,
     AUTHORIZING,
     VERIFYING_DEVICE,
@@ -176,6 +173,7 @@ fun componentStatusForReasonCode(reasonCode: String): ComponentStatus = when {
         reasonCode.startsWith("apk_extraction_") ||
         reasonCode in setOf(
             "download_non_archive_response",
+            "download_not_zip",
             "archive_verification_evidence_invalid",
             "archive_verification_failed",
             "apk_identity_missing",
@@ -261,6 +259,7 @@ fun installPhaseForReasonCode(reasonCode: String): InstallPhase = when {
         reasonCode.startsWith("distribution_archive_") ||
         reasonCode.startsWith("apk_entry_") ||
         reasonCode.startsWith("apk_extraction_") ||
+        reasonCode == "download_not_zip" ||
         reasonCode.startsWith("artifact_") ||
         reasonCode.startsWith("catalog_") ||
         reasonCode.startsWith("distribution_config_") ||
@@ -270,6 +269,7 @@ fun installPhaseForReasonCode(reasonCode: String): InstallPhase = when {
         reasonCode in setOf(
             "all_sources_failed",
             "local_download_candidate_missing",
+            "local_download_unavailable",
             "public_download_publish_failed",
             "public_download_output_unavailable",
         ) -> InstallPhase.FETCH
@@ -280,10 +280,11 @@ fun installPhaseForReasonCode(reasonCode: String): InstallPhase = when {
 /** Converts a concrete reason into the top-level session failure category. */
 fun failureCategoryForReasonCode(reasonCode: String): FailureCategory = when {
     reasonCode.startsWith("archive_") ||
-        reasonCode.startsWith("dynamic_archive_") ||
+    reasonCode.startsWith("dynamic_archive_") ||
         reasonCode.startsWith("distribution_archive_") ||
         reasonCode.startsWith("apk_entry_") ||
-        reasonCode.startsWith("apk_extraction_") -> FailureCategory.ARCHIVE
+        reasonCode.startsWith("apk_extraction_") ||
+        reasonCode == "download_not_zip" -> FailureCategory.ARCHIVE
 
     reasonCode.startsWith("download_") ||
         reasonCode.startsWith("lanzou_") ||
@@ -291,6 +292,7 @@ fun failureCategoryForReasonCode(reasonCode: String): FailureCategory = when {
         reasonCode in setOf(
             "all_sources_failed",
             "local_download_candidate_missing",
+            "local_download_unavailable",
             "public_download_publish_failed",
             "public_download_output_unavailable",
         ) -> FailureCategory.DOWNLOAD

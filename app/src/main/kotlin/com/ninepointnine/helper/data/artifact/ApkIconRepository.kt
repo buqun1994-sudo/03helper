@@ -14,6 +14,7 @@ import com.ninepointnine.helper.domain.artifact.InstallerPublisherTrustRegistry
 import com.ninepointnine.helper.domain.device.InstallableArtifact
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.StandardCopyOption
@@ -57,15 +58,16 @@ class ApkIconRepository(
         manifests: List<ArtifactManifest> = emptyList(),
     ): Map<String, Bitmap> = withContext(Dispatchers.IO) {
         if (requests.isEmpty()) return@withContext emptyMap()
-        val files = artifactCache.withPublicApkCandidates {
-            buildList {
-                addAll(it)
+        artifactCache.withEphemeralPublicApkCandidates { candidates ->
+            val files = buildList {
+                addAll(candidates)
                 manifests.forEach { manifest ->
                     artifactCache.paths(manifest).apk.takeIf(File::isFile)?.let(::add)
                 }
             }
-        }.distinctBy { runCatching { it.canonicalPath }.getOrDefault(it.absolutePath) }
-        requests.mapNotNull { request -> loadRequestIcon(request, files) }.toMap()
+                .distinctBy { runCatching { it.canonicalPath }.getOrDefault(it.absolutePath) }
+            requests.mapNotNull { request -> loadRequestIcon(request, files) }.toMap()
+        }
     }
 
     /** Resolves one icon without allowing a stale cache entry to outrank a newer APK. */
@@ -407,7 +409,8 @@ class ApkIconRepository(
             while (true) {
                 val count = input.read(buffer)
                 if (count < 0) break
-                if (count > 0) digest.update(buffer, 0, count)
+                if (count == 0) throw IOException("apk_icon_digest_zero_read")
+                digest.update(buffer, 0, count)
             }
         }
         return digest.digest().joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }

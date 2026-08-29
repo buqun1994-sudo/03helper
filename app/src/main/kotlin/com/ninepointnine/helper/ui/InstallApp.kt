@@ -100,7 +100,7 @@ fun InstallApp(
     // asset must invalidate the previous image immediately.
     var localApkIcons by remember { mutableStateOf<Map<ApkIconRequest, ImageBitmap>>(emptyMap()) }
     val localRequestsByComponent = iconRequests.associateBy { it.componentId }
-    LaunchedEffect(apkIconRepository, iconRequests, iconManifests, snapshot.revision) {
+    LaunchedEffect(apkIconRepository, iconRequests, iconManifests) {
         val localResult = apkIconRepository
             ?.loadIcons(iconRequests, iconManifests)
             .orEmpty()

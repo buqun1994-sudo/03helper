@@ -13,6 +13,7 @@ import com.ninepointnine.helper.domain.device.ManagedAppOp
 import com.ninepointnine.helper.domain.device.ManagedRuntimePermission
 import com.ninepointnine.helper.domain.device.ManagedSecureComponentList
 import com.ninepointnine.helper.domain.device.ManagedSecureFlag
+import com.ninepointnine.helper.domain.session.InstallationBatchPlan
 import java.io.File
 import java.nio.ByteBuffer
 import java.nio.charset.CodingErrorAction
@@ -46,10 +47,10 @@ data class SignedInstallerConfigEnvelope(
 }
 
 /**
- * The v4 payload is a complete signed snapshot.  The legacy fields remain
- * deserializable only so source-compatible test/build tooling can be migrated;
- * [CloudInstallerDistributionConfigAdapter] rejects schema v2 and only reads
- * the dynamic [apps] list. v3 remains readable only for snapshots without [InstallerAppSourceDocument.icon].
+ * The v4 payload is a complete signed snapshot. Optional envelope aliases keep
+ * the wire format readable for the explicitly supported v3 history; the
+ * adapter rejects unsupported schemas and only projects the signed [apps]
+ * list. v3 remains readable only for snapshots without an icon field.
  */
 @Serializable
 data class InstallerDistributionConfigPayload(
@@ -177,16 +178,6 @@ data class InstallerSecureComponentDocument(
 )
 
 /**
- * Source-compatible v2 DTO. It is not consumed by the runtime v3 parser.
- */
-@Serializable
-data class InstallerComponentSourceDocument(
-    val componentId: String,
-    val archiveFileName: String,
-    val required: Boolean,
-)
-
-/**
  * Runtime application source. The componentId name is retained internally so
  * the installation state machine does not need a second parallel model.
  */
@@ -226,8 +217,6 @@ data class InstallerComponentSource(
 
 }
 
-typealias InstallerAppSource = InstallerComponentSource
-
 data class InstallerDistributionConfig(
     val configVersion: String = "",
     val channel: String = "",
@@ -236,8 +225,6 @@ data class InstallerDistributionConfig(
     val folderPassword: String = "",
     val previousVersionsUrl: String = "",
     val previousVersionsPassword: String = "",
-    /** Deprecated alias; production code uses [apps]. */
-    val components: List<InstallerComponentSource> = emptyList(),
     val keyId: String = "",
     val signatureAlgorithm: String = "",
     /** Blank by default so a missing environment can never silently become production. */
@@ -247,7 +234,6 @@ data class InstallerDistributionConfig(
     val catalogRevision: Long = 0L,
     val apps: List<InstallerComponentSource> = emptyList(),
 ) {
-    /** Canonical dynamic list. Deprecated components are never consulted by runtime code. */
     fun declaredApps(): List<InstallerComponentSource> = apps
 
     fun effectiveCatalogVersion(): String = catalogVersion.ifBlank { configVersion }
@@ -256,6 +242,26 @@ data class InstallerDistributionConfig(
         "InstallerDistributionConfig(catalogVersion=${effectiveCatalogVersion()}, channel=$channel, " +
             "environment=$environment, expiresAt=$expiresAt, folderUrl=<redacted>, folderPassword=<redacted>, " +
             "apps=${declaredApps()}, keyId=$keyId, signatureAlgorithm=$signatureAlgorithm)"
+}
+
+/**
+ * Immutable hand-off from the signed control plane to the single artifact
+ * preparation owner. It contains decisions only; APK/ZIP files never live in
+ * this plan and are resolved by the preparation coordinator.
+ */
+data class ArtifactPreparationPlan(
+    val batch: InstallationBatchPlan,
+    val config: InstallerDistributionConfig,
+    val components: List<InstallerComponentSource>,
+)
+
+sealed interface ArtifactPreparationPlanResult {
+    data class Ready(val plan: ArtifactPreparationPlan) : ArtifactPreparationPlanResult
+
+    data class Failure(
+        val reasonCode: String,
+        val retryable: Boolean,
+    ) : ArtifactPreparationPlanResult
 }
 
 sealed interface DistributionConfigLoadResult {
@@ -516,7 +522,6 @@ class CloudInstallerDistributionConfigAdapter(
                 folderPassword = document.folderPassword,
                 previousVersionsUrl = document.previousVersionsUrl,
                 previousVersionsPassword = document.previousVersionsPassword,
-                components = emptyList(),
                 keyId = envelope.keyId,
                 signatureAlgorithm = envelope.signatureAlgorithm,
                 environment = document.environment,

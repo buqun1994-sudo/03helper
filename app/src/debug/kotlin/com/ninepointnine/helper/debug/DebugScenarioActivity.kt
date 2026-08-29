@@ -32,8 +32,10 @@ import com.ninepointnine.helper.domain.session.AuthorizationStageReceipt
 import com.ninepointnine.helper.domain.session.AuthorizationStageReceiptStatus
 import com.ninepointnine.helper.domain.session.AvailabilityStageReceipt
 import com.ninepointnine.helper.domain.session.AvailabilityStageReceiptStatus
-import com.ninepointnine.helper.domain.session.ComponentCheck
 import com.ninepointnine.helper.domain.session.ComponentDescriptor
+import com.ninepointnine.helper.domain.session.ComponentProgressStatus
+import com.ninepointnine.helper.domain.session.FailureCategory
+import com.ninepointnine.helper.domain.session.InstallPhase
 import com.ninepointnine.helper.domain.session.DeviceConnectionStatus
 import com.ninepointnine.helper.domain.session.DeviceSummary
 import com.ninepointnine.helper.domain.session.InstallationSession
@@ -344,23 +346,27 @@ internal object DebugScenarioFixtures {
             "progress" -> {
                 driver.connect(selectOptional = false)
                 driver.beginInstallation()
-                driver.event(InstallationSessionEvent.SourceResolved("debug-source"))
+                driver.preparationProgress()
             }
 
             "success" -> install(driver, includeOptional = true, animated = false)
             "paused" -> {
                 driver.connect(selectOptional = false)
                 driver.beginInstallation()
-                driver.event(InstallationSessionEvent.SourceResolved("debug-source"))
+                driver.preparationProgress()
                 driver.command(InstallationSessionCommand.CancelInstallation)
             }
 
             "failed" -> {
                 driver.connect(selectOptional = false)
                 driver.beginInstallation()
-                driver.event(InstallationSessionEvent.SourceResolved("debug-source"))
-                driver.event(InstallationSessionEvent.ArchiveDownloaded(1024L, "debug-archive-sha"))
-                driver.event(InstallationSessionEvent.ArchiveVerified(verified = false))
+                driver.preparationProgress()
+                driver.event(
+                    InstallationSessionEvent.FatalError(
+                        category = FailureCategory.ARCHIVE,
+                        reasonCode = "archive_verification_failed",
+                    ),
+                )
             }
 
             "maintenance" -> {
@@ -383,11 +389,8 @@ internal object DebugScenarioFixtures {
     ) {
         driver.connect(selectOptional = includeOptional, animated = animated)
         driver.beginInstallation(animated)
-        driver.sourceResolved(animated)
-        driver.archivesDownloaded(animated)
-        driver.archivesVerified(animated)
-        driver.apksExtracted(animated)
-        driver.artifactsVerified(animated)
+        driver.preparationProgress(animated)
+        driver.artifactBatchPrepared(animated)
         driver.event(InstallationSessionEvent.InstallationStarted(), animated)
         driver.event(
             InstallationSessionEvent.InstallationBatchCompleted(driver.successfulReceipt()),
@@ -438,65 +441,40 @@ private class FakeSessionDriver(
         command(InstallationSessionCommand.BeginPipeline, animated)
     }
 
-    suspend fun sourceResolved(animated: Boolean) {
+    suspend fun preparationProgress(animated: Boolean = false) {
+        val componentId = preparationManifests().first().componentId
         event(
-            InstallationSessionEvent.SourceResolved(
-                sourceId = "debug-source",
-                selections = preparationManifests().map {
-                    SourceSelectionEvidence(it.componentId, ArtifactSourceKind.LANZOU_SHARE)
-                },
+            InstallationSessionEvent.ComponentProgressUpdated(
+                componentId = componentId,
+                phase = InstallPhase.FETCH,
+                status = ComponentProgressStatus.RUNNING,
+                bytesWritten = 25L,
+                totalBytes = 100L,
+                indeterminate = false,
             ),
             animated,
         )
     }
 
-    suspend fun archivesDownloaded(animated: Boolean) {
+    suspend fun artifactBatchPrepared(animated: Boolean) {
         val manifests = preparationManifests()
+        val batch = checkNotNull(session.currentSnapshot().installationBatch)
         event(
-            InstallationSessionEvent.ArchiveDownloaded(
-                sizeBytes = manifests.sumOf { it.archiveSizeBytes },
-                sha256 = manifests.first().archiveSha256,
+            InstallationSessionEvent.ArtifactBatchPrepared(
+                batchId = batch.batchId,
+                manifests = manifests,
+                sourceSelections = manifests.map {
+                    SourceSelectionEvidence(it.componentId, ArtifactSourceKind.LANZOU_SHARE)
+                },
                 archives = manifests.map {
                     ArchiveDownloadEvidence(it.componentId, it.archiveSizeBytes, it.archiveSha256)
                 },
-            ),
-            animated,
-        )
-    }
-
-    suspend fun archivesVerified(animated: Boolean) {
-        val manifests = preparationManifests()
-        event(
-            InstallationSessionEvent.ArchiveVerified(
-                verified = true,
-                verifications = manifests.map {
+                archiveVerifications = manifests.map {
                     ArchiveVerificationEvidence(it.componentId, it.archiveSizeBytes, it.archiveSha256)
                 },
-            ),
-            animated,
-        )
-    }
-
-    suspend fun apksExtracted(animated: Boolean) {
-        val manifests = preparationManifests()
-        event(
-            InstallationSessionEvent.ApkExtracted(
-                entryName = manifests.first().apkEntryName,
-                sizeBytes = manifests.sumOf { it.apkSizeBytes },
-                sha256 = manifests.first().apkSha256,
                 extractions = manifests.map {
                     ApkExtractionEvidence(it.componentId, it.apkEntryName, it.apkSizeBytes, it.apkSha256)
                 },
-            ),
-            animated,
-        )
-    }
-
-    suspend fun artifactsVerified(animated: Boolean) {
-        val manifests = preparationManifests()
-        event(
-            InstallationSessionEvent.ArtifactsVerified(
-                checks = manifests.map { ComponentCheck(it.componentId, passed = true) },
                 verifications = manifests.map { manifest ->
                     ArtifactVerification(
                         componentId = manifest.componentId,
@@ -625,9 +603,4 @@ private class FakeSessionDriver(
         )
     }
 
-    fun checks(): List<ComponentCheck> = session.currentSnapshot().components
-        .filter {
-            it.required || it.id in session.currentSnapshot().selectedOptionalComponentIds
-        }
-        .map { ComponentCheck(componentId = it.id, passed = true) }
 }

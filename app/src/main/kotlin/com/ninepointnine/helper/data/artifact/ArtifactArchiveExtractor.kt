@@ -105,10 +105,11 @@ class ArtifactArchiveExtractor(
                 if (entry.size > manifest.apkSizeBytes) throw ExtractionRejected("apk_size_exceeds_manifest")
                 BufferedOutputStream(FileOutputStream(apkPart)).use { output ->
                     val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                    while (true) {
-                        val count = zip.read(buffer)
-                        if (count < 0) break
-                        bytesWritten += count
+                        while (true) {
+                            val count = zip.read(buffer)
+                            if (count < 0) break
+                            if (count == 0) throw ExtractionRejected("archive_zero_read")
+                            bytesWritten += count
                         if (bytesWritten > manifest.apkSizeBytes) {
                             throw ExtractionRejected("apk_size_exceeds_manifest")
                         }
@@ -163,7 +164,12 @@ class ArtifactArchiveExtractor(
     private fun hasZipSignature(file: File): Boolean {
         FileInputStream(file).use { input ->
             val header = ByteArray(4)
-            if (input.read(header) != header.size) return false
+            var offset = 0
+            while (offset < header.size) {
+                val count = input.read(header, offset, header.size - offset)
+                if (count <= 0) return false
+                offset += count
+            }
             return header.contentEquals(byteArrayOf(0x50, 0x4b, 0x03, 0x04)) ||
                 header.contentEquals(byteArrayOf(0x50, 0x4b, 0x05, 0x06)) ||
                 header.contentEquals(byteArrayOf(0x50, 0x4b, 0x07, 0x08))

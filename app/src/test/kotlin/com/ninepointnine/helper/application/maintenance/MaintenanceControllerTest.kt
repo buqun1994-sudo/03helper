@@ -1,8 +1,9 @@
 package com.ninepointnine.helper.application.maintenance
 
 import com.ninepointnine.helper.application.session.InstallationSessionEventPort
-import com.ninepointnine.helper.data.catalog.CatalogLoadResult
-import com.ninepointnine.helper.data.catalog.TrustedArtifactCatalog
+import com.ninepointnine.helper.data.catalog.DistributionConfigLoadResult
+import com.ninepointnine.helper.data.catalog.InstallerComponentSource
+import com.ninepointnine.helper.data.catalog.InstallerDistributionConfig
 import com.ninepointnine.helper.data.download.ArtifactCache
 import com.ninepointnine.helper.domain.artifact.ArtifactManifest
 import com.ninepointnine.helper.domain.artifact.ArtifactSource
@@ -19,6 +20,7 @@ import com.ninepointnine.helper.domain.device.DeviceIdentity
 import com.ninepointnine.helper.domain.device.DeviceInstallResult
 import com.ninepointnine.helper.domain.device.DeviceShortcut
 import com.ninepointnine.helper.domain.device.DeviceShortcutResult
+import com.ninepointnine.helper.domain.device.AuthorizationPlan
 import com.ninepointnine.helper.domain.device.ManagedApplicationProbe
 import com.ninepointnine.helper.domain.device.ManagedApplicationsResult
 import com.ninepointnine.helper.domain.device.MaintenanceCommandGateway
@@ -32,6 +34,7 @@ import com.ninepointnine.helper.domain.session.InstallationSessionSnapshot
 import com.ninepointnine.helper.domain.session.InstallationSessionState
 import com.ninepointnine.helper.domain.session.InstallationStrategy
 import com.ninepointnine.helper.domain.session.MaintenanceActionId
+import com.ninepointnine.helper.domain.session.MaintenanceApplicationActionId
 import com.ninepointnine.helper.domain.session.MaintenanceAuthorizationFlowState
 import com.ninepointnine.helper.domain.session.MaintenanceAuthorizationSnapshot
 import com.ninepointnine.helper.domain.session.MaintenanceSnapshot
@@ -45,23 +48,14 @@ import org.junit.Test
 
 class MaintenanceControllerTest {
     @Test
-    fun `check updates emits a trusted catalog event and distinguishes changed versions`() = runBlocking {
+    fun `check updates reads the signed control plane and distinguishes changed versions`() = runBlocking {
         val current = manifest("desktop", versionCode = 1)
         val updated = manifest("desktop", versionCode = 2)
         val events = mutableListOf<InstallationSessionEvent>()
         val controller = MaintenanceController(
             artifactCache = tempCache(),
             diagnosticStore = tempDiagnostics(),
-            loadCatalog = {
-                CatalogLoadResult.Success(
-                    TrustedArtifactCatalog(
-                        catalogVersion = "catalog-2",
-                        keyId = "test-key",
-                        signatureAlgorithm = "Ed25519",
-                        manifests = listOf(updated),
-                    ),
-                )
-            },
+            loadDistributionConfig = { distributionConfig(updated) },
         )
 
         controller.execute(
@@ -74,7 +68,9 @@ class MaintenanceControllerTest {
         assertEquals(2, events.size)
         val refreshed = events[0] as InstallationSessionEvent.MaintenanceCatalogRefreshed
         assertEquals("catalog-2", refreshed.catalogVersion)
-        assertEquals(updated, refreshed.manifests.single())
+        assertTrue(refreshed.controlPlaneOnly)
+        assertTrue(refreshed.manifests.isEmpty())
+        assertEquals("v1.2", refreshed.apps.single { it.id == "desktop" }.versionLabel)
         assertEquals(
             InstallationSessionEvent.MaintenanceActionCompleted(
                 actionId = MaintenanceActionId.CHECK_UPDATES,
@@ -147,36 +143,6 @@ class MaintenanceControllerTest {
             com.ninepointnine.helper.domain.session.MaintenanceUpdateState.CURRENT,
             refreshed.updateStatuses.single { it.componentId == "desktop" }.state,
         )
-    }
-
-    @Test
-    fun `check updates detects archive or APK size changes even when hashes and version stay equal`() = runBlocking {
-        val current = manifest("desktop", versionCode = 1)
-        val updated = manifest("desktop", versionCode = 1, archiveSizeBytes = 101, apkSizeBytes = 51)
-        val events = mutableListOf<InstallationSessionEvent>()
-        val controller = MaintenanceController(
-            artifactCache = tempCache(),
-            diagnosticStore = tempDiagnostics(),
-            loadCatalog = {
-                CatalogLoadResult.Success(
-                    TrustedArtifactCatalog(
-                        catalogVersion = "catalog-2",
-                        keyId = "test-key",
-                        signatureAlgorithm = "Ed25519",
-                        manifests = listOf(updated),
-                    ),
-                )
-            },
-        )
-
-        controller.execute(
-            actionId = MaintenanceActionId.CHECK_UPDATES,
-            snapshot = maintenanceSnapshot(listOf(current)),
-            connection = null,
-            eventPort = InstallationSessionEventPort { events += it },
-        )
-
-        assertEquals("updates_available", (events[1] as InstallationSessionEvent.MaintenanceActionCompleted).resultCode)
     }
 
     @Test
@@ -440,16 +406,7 @@ class MaintenanceControllerTest {
         MaintenanceController(
             artifactCache = tempCache(),
             diagnosticStore = tempDiagnostics(),
-            loadCatalog = {
-                CatalogLoadResult.Success(
-                    TrustedArtifactCatalog(
-                        catalogVersion = "catalog-2",
-                        keyId = "test-key",
-                        signatureAlgorithm = "Ed25519",
-                        manifests = listOf(app),
-                    ),
-                )
-            },
+            loadDistributionConfig = { distributionConfig(app) },
         ).execute(
             actionId = MaintenanceActionId.CHECK_UPDATES,
             snapshot = maintenanceSnapshot(listOf(manifest("desktop", 1))),
@@ -529,6 +486,35 @@ class MaintenanceControllerTest {
         sources = listOf(ArtifactSource(ArtifactSourceKind.LANZOU_SHARE, "https://wwatl.lanzouw.com/i$componentId")),
     )
 
+    private fun distributionConfig(manifest: ArtifactManifest): DistributionConfigLoadResult.Success =
+        DistributionConfigLoadResult.Success(
+            InstallerDistributionConfig(
+                channel = "debug",
+                environment = "staging",
+                expiresAt = java.time.Instant.parse("2099-01-01T00:00:00Z"),
+                catalogVersion = "catalog-2",
+                catalogRevision = 2L,
+                keyId = "test-key",
+                signatureAlgorithm = "Ed25519",
+                folderUrl = "https://wwatl.lanzouw.com/b0fqlrcyb",
+                apps = listOf(
+                    InstallerComponentSource(
+                        componentId = manifest.componentId,
+                        archiveFileName = manifest.archiveFileName,
+                        required = manifest.required,
+                        displayName = manifest.displayName,
+                        versionCode = manifest.apkVersion.code,
+                        versionName = manifest.apkVersion.name,
+                        apkSizeBytes = manifest.apkSizeBytes,
+                        packageName = manifest.packageName,
+                        certificateSha256 = manifest.certificateSha256,
+                        apkEntryName = manifest.apkEntryName,
+                        trustProfileId = "nine-studio",
+                    ),
+                ),
+            ),
+        )
+
     private fun tempCache(): ArtifactCache =
         ArtifactCache(Files.createTempDirectory("maintenance-artifacts").toFile())
 
@@ -563,22 +549,28 @@ class MaintenanceControllerTest {
         override suspend fun runShortcut(
             shortcut: DeviceShortcut,
             selectedComponentIds: Set<String>,
+            authorizationPlan: AuthorizationPlan,
         ): DeviceShortcutResult =
             DeviceShortcutResult.Failed(
                 com.ninepointnine.helper.domain.device.DeviceShortcutFailureStage.AUTHORIZATION,
                 com.ninepointnine.helper.domain.device.DeviceActionFailure("unused", retryable = false),
             )
 
-        override suspend fun repairAuthorization(manifests: List<ArtifactManifest>): MaintenanceDeviceResult {
+        override suspend fun repairAuthorization(
+            manifests: List<ArtifactManifest>,
+            declarationsByComponent: Map<String, com.ninepointnine.helper.domain.device.ApkDeclarationMetadata>,
+        ): MaintenanceDeviceResult {
             repairManifests = manifests
             return repairResult
         }
 
-        override suspend fun inspectManagedApplications(): ManagedApplicationsResult = managedApplications
-
-        override suspend fun inspectComponentAuthorization(
+        override suspend fun inspectManagedApplications(
             components: List<com.ninepointnine.helper.domain.device.ManagedComponent>,
-        ): com.ninepointnine.helper.domain.device.MaintenanceAuthorizationResult = authorizationStatuses
+        ): ManagedApplicationsResult = managedApplications
+
+        override suspend fun inspectInstalledApplicationInventory(
+            components: List<com.ninepointnine.helper.domain.device.ManagedComponent>,
+        ): ManagedApplicationsResult = managedApplications
 
         override suspend fun inspectComponentAuthorization(
             components: List<com.ninepointnine.helper.domain.device.ManagedComponent>,
@@ -588,8 +580,35 @@ class MaintenanceControllerTest {
             return authorizationStatuses
         }
 
-        override suspend fun launchManagedComponent(componentId: String): MaintenanceDeviceResult =
+        override suspend fun launchManagedComponent(
+            component: com.ninepointnine.helper.domain.device.ManagedComponent,
+        ): MaintenanceDeviceResult =
             MaintenanceDeviceResult.Completed("component_launched")
+
+        override suspend fun performApplicationAction(
+            component: com.ninepointnine.helper.domain.device.ManagedComponent,
+            actionId: MaintenanceApplicationActionId,
+        ): MaintenanceDeviceResult = when (actionId) {
+            MaintenanceApplicationActionId.START -> MaintenanceDeviceResult.Completed("component_launched")
+            else -> MaintenanceDeviceResult.Failed(
+                com.ninepointnine.helper.domain.device.DeviceActionFailure(
+                    "unused",
+                    component.componentId,
+                    retryable = false,
+                ),
+            )
+        }
+
+        override suspend fun inspectManagedApplicationDetails(
+            component: com.ninepointnine.helper.domain.device.ManagedComponent,
+        ): com.ninepointnine.helper.domain.device.ManagedApplicationDetailsProbeResult =
+            com.ninepointnine.helper.domain.device.ManagedApplicationDetailsProbeResult.Failed(
+                com.ninepointnine.helper.domain.device.DeviceActionFailure(
+                    "unused",
+                    component.componentId,
+                    retryable = false,
+                ),
+            )
     }
 
     private fun ConnectedDevice.toSummary() = com.ninepointnine.helper.domain.session.DeviceSummary(

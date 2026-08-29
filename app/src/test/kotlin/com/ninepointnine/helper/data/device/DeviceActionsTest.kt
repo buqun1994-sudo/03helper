@@ -3,7 +3,7 @@ package com.ninepointnine.helper.data.device
 import com.ninepointnine.helper.application.artifact.PreparedArtifact
 import com.ninepointnine.helper.application.device.DeviceInstallationCoordinator
 import com.ninepointnine.helper.application.device.DeviceInstallationExecutionResult
-import com.ninepointnine.helper.application.session.InstallationSessionEventPort
+import com.ninepointnine.helper.application.session.InstallationSessionBoundary
 import com.ninepointnine.helper.data.artifact.ApkMetadata
 import com.ninepointnine.helper.domain.artifact.ArtifactManifest
 import com.ninepointnine.helper.domain.artifact.ArtifactSource
@@ -1034,6 +1034,7 @@ class DeviceActionsTest {
             override suspend fun runShortcut(
                 shortcut: DeviceShortcut,
                 selectedComponentIds: Set<String>,
+                authorizationPlan: AuthorizationPlan,
             ): DeviceShortcutResult {
                 commandSelections += selectedComponentIds
                 val installables = artifacts.map {
@@ -1059,7 +1060,7 @@ class DeviceActionsTest {
         }
 
         val result = kotlinx.coroutines.runBlocking {
-            DeviceInstallationCoordinator(InstallationSessionEventPort { events += it })
+            DeviceInstallationCoordinator(activeBoundary(events))
                 .executeBatch(actionLease(gateway), artifacts, initialBatchPlan(artifacts))
         }
 
@@ -1114,6 +1115,7 @@ class DeviceActionsTest {
             override suspend fun runShortcut(
                 shortcut: DeviceShortcut,
                 selectedComponentIds: Set<String>,
+                authorizationPlan: AuthorizationPlan,
             ): DeviceShortcutResult {
                 val installable = com.ninepointnine.helper.domain.device.InstallableArtifact(
                     desktop.manifest,
@@ -1141,7 +1143,7 @@ class DeviceActionsTest {
         }
 
         val result = runBlocking {
-            DeviceInstallationCoordinator(InstallationSessionEventPort { events += it })
+            DeviceInstallationCoordinator(activeBoundary(events))
                 .executeBatch(
                     connection = actionLease(gateway),
                     artifacts = listOf(desktop),
@@ -1191,14 +1193,17 @@ class DeviceActionsTest {
             override suspend fun runShortcut(
                 shortcut: DeviceShortcut,
                 selectedComponentIds: Set<String>,
+                authorizationPlan: AuthorizationPlan,
             ): DeviceShortcutResult = error("stale batch must not authorize")
         }
-        val eventPort = object : InstallationSessionEventPort {
+        val eventPort = object : InstallationSessionBoundary {
             override fun emit(event: InstallationSessionEvent) {
                 events += event
             }
 
             override fun isBatchActive(batchId: Long): Boolean = false
+
+            override fun isArtifactPreparationActive(batchId: Long): Boolean = true
         }
 
         val result = runBlocking {
@@ -1235,9 +1240,10 @@ class DeviceActionsTest {
             override suspend fun runShortcut(
                 shortcut: DeviceShortcut,
                 selectedComponentIds: Set<String>,
+                authorizationPlan: AuthorizationPlan,
             ): DeviceShortcutResult = error("stale batch must not authorize")
         }
-        val eventPort = object : InstallationSessionEventPort {
+        val eventPort = object : InstallationSessionBoundary {
             override fun emit(event: InstallationSessionEvent) {
                 events += event
             }
@@ -1249,6 +1255,8 @@ class DeviceActionsTest {
                 // was in flight.
                 return activeChecks == 1
             }
+
+            override fun isArtifactPreparationActive(batchId: Long): Boolean = true
         }
 
         val result = runBlocking {
@@ -1287,11 +1295,12 @@ class DeviceActionsTest {
             override suspend fun runShortcut(
                 shortcut: DeviceShortcut,
                 selectedComponentIds: Set<String>,
+                authorizationPlan: AuthorizationPlan,
             ): DeviceShortcutResult = error("authorization must not run without an installed identity")
         }
 
         val result = runBlocking {
-            DeviceInstallationCoordinator(InstallationSessionEventPort { events += it })
+            DeviceInstallationCoordinator(activeBoundary(events))
                 .executeBatch(
                     connection = actionLease(gateway),
                     artifacts = emptyList(),
@@ -1341,11 +1350,12 @@ class DeviceActionsTest {
             override suspend fun runShortcut(
                 shortcut: DeviceShortcut,
                 selectedComponentIds: Set<String>,
+                authorizationPlan: AuthorizationPlan,
             ): DeviceShortcutResult = error("pending installation must not authorize")
         }
 
         kotlinx.coroutines.runBlocking {
-            DeviceInstallationCoordinator(InstallationSessionEventPort { events += it })
+            DeviceInstallationCoordinator(activeBoundary(events))
                 .executeBatch(actionLease(gateway), artifacts, initialBatchPlan(artifacts))
         }
 
@@ -1381,6 +1391,7 @@ class DeviceActionsTest {
             override suspend fun runShortcut(
                 shortcut: DeviceShortcut,
                 selectedComponentIds: Set<String>,
+                authorizationPlan: AuthorizationPlan,
             ): DeviceShortcutResult {
                 authorizationCalls += 1
                 error("pending installation must not authorize")
@@ -1388,7 +1399,7 @@ class DeviceActionsTest {
         }
 
         runBlocking {
-            DeviceInstallationCoordinator(InstallationSessionEventPort { events += it })
+            DeviceInstallationCoordinator(activeBoundary(events))
                 .executeBatch(actionLease(gateway), artifacts, initialBatchPlan(artifacts))
         }
 
@@ -1430,11 +1441,12 @@ class DeviceActionsTest {
             override suspend fun runShortcut(
                 shortcut: DeviceShortcut,
                 selectedComponentIds: Set<String>,
+                authorizationPlan: AuthorizationPlan,
             ): DeviceShortcutResult = error("the failed batch must not authorize")
         }
 
         runBlocking {
-            DeviceInstallationCoordinator(InstallationSessionEventPort { events += it })
+            DeviceInstallationCoordinator(activeBoundary(events))
                 .executeBatch(actionLease(gateway), listOf(desktop, fileManager), plan)
         }
 
@@ -1472,11 +1484,12 @@ class DeviceActionsTest {
             override suspend fun runShortcut(
                 shortcut: DeviceShortcut,
                 selectedComponentIds: Set<String>,
+                authorizationPlan: AuthorizationPlan,
             ): DeviceShortcutResult = error("a failed installation must not authorize")
         }
 
         runBlocking {
-            DeviceInstallationCoordinator(InstallationSessionEventPort { events += it })
+            DeviceInstallationCoordinator(activeBoundary(events))
                 .executeBatch(actionLease(gateway), listOf(desktop), initialBatchPlan(listOf(desktop)))
         }
 
@@ -1510,11 +1523,12 @@ class DeviceActionsTest {
             override suspend fun runShortcut(
                 shortcut: DeviceShortcut,
                 selectedComponentIds: Set<String>,
+                authorizationPlan: AuthorizationPlan,
             ): DeviceShortcutResult = error("identity mismatch must not authorize")
         }
 
         kotlinx.coroutines.runBlocking {
-            DeviceInstallationCoordinator(InstallationSessionEventPort { events += it })
+            DeviceInstallationCoordinator(activeBoundary(events))
                 .executeBatch(actionLease(gateway), artifacts, initialBatchPlan(artifacts))
         }
 
@@ -1553,6 +1567,7 @@ class DeviceActionsTest {
             override suspend fun runShortcut(
                 shortcut: DeviceShortcut,
                 selectedComponentIds: Set<String>,
+                authorizationPlan: AuthorizationPlan,
             ): DeviceShortcutResult {
                 val installable = artifacts.map {
                     com.ninepointnine.helper.domain.device.InstallableArtifact(it.manifest, it.finalApk, it.declarations)
@@ -1577,7 +1592,7 @@ class DeviceActionsTest {
         }
 
         kotlinx.coroutines.runBlocking {
-            DeviceInstallationCoordinator(InstallationSessionEventPort { events += it })
+            DeviceInstallationCoordinator(activeBoundary(events))
                 .executeBatch(actionLease(gateway), artifacts, initialBatchPlan(artifacts))
         }
 
@@ -1623,11 +1638,6 @@ class DeviceActionsTest {
             override suspend fun runShortcut(
                 shortcut: DeviceShortcut,
                 selectedComponentIds: Set<String>,
-            ): DeviceShortcutResult = error("the plan-aware shortcut overload is required")
-
-            override suspend fun runShortcut(
-                shortcut: DeviceShortcut,
-                selectedComponentIds: Set<String>,
                 authorizationPlan: AuthorizationPlan,
             ): DeviceShortcutResult {
                 shortcuts += shortcut
@@ -1650,7 +1660,7 @@ class DeviceActionsTest {
         }
 
         val result = kotlinx.coroutines.runBlocking {
-            DeviceInstallationCoordinator(InstallationSessionEventPort { events += it })
+            DeviceInstallationCoordinator(activeBoundary(events))
                 .executeBatch(actionLease(gateway), artifacts, plan)
         }
 
@@ -1695,11 +1705,12 @@ class DeviceActionsTest {
             override suspend fun runShortcut(
                 shortcut: DeviceShortcut,
                 selectedComponentIds: Set<String>,
+                authorizationPlan: AuthorizationPlan,
             ): DeviceShortcutResult = error("shortcut must not run")
         }
         val events = mutableListOf<InstallationSessionEvent>()
         val result = kotlinx.coroutines.runBlocking {
-            DeviceInstallationCoordinator(InstallationSessionEventPort { events += it })
+            DeviceInstallationCoordinator(activeBoundary(events))
                 .executeBatch(actionLease(gateway), artifacts, plan)
         }
 
@@ -1738,6 +1749,7 @@ class DeviceActionsTest {
             override suspend fun runShortcut(
                 shortcut: DeviceShortcut,
                 selectedComponentIds: Set<String>,
+                authorizationPlan: AuthorizationPlan,
             ): DeviceShortcutResult {
                 shortcutCalls += 1
                 return error("desktop-only batch must not authorize")
@@ -1745,7 +1757,7 @@ class DeviceActionsTest {
         }
 
         val result = kotlinx.coroutines.runBlocking {
-            DeviceInstallationCoordinator(InstallationSessionEventPort { events += it })
+            DeviceInstallationCoordinator(activeBoundary(events))
                 .executeBatch(actionLease(gateway), artifacts, plan)
         }
 
@@ -1794,6 +1806,7 @@ class DeviceActionsTest {
             override suspend fun runShortcut(
                 shortcut: DeviceShortcut,
                 selectedComponentIds: Set<String>,
+                authorizationPlan: AuthorizationPlan,
             ): DeviceShortcutResult {
                 shortcutCalls += 1
                 error("pending reusable identity must not authorize")
@@ -1801,7 +1814,7 @@ class DeviceActionsTest {
         }
 
         val result = runBlocking {
-            DeviceInstallationCoordinator(InstallationSessionEventPort { events += it })
+            DeviceInstallationCoordinator(activeBoundary(events))
                 .executeBatch(actionLease(gateway), listOf(desktop), plan)
         }
 
@@ -1836,6 +1849,7 @@ class DeviceActionsTest {
             override suspend fun runShortcut(
                 shortcut: DeviceShortcut,
                 selectedComponentIds: Set<String>,
+                authorizationPlan: AuthorizationPlan,
             ): DeviceShortcutResult {
                 val plan = AuthorizationPlanFactory.create(
                     artifacts.map {
@@ -1863,7 +1877,7 @@ class DeviceActionsTest {
                 )
             }
         }
-        val eventPort = InstallationSessionEventPort { event ->
+        val eventPort = activeBoundary { event ->
             if (event is InstallationSessionEvent.ComponentProgressUpdated) {
                 error("progress observer unavailable")
             }
@@ -1899,6 +1913,7 @@ class DeviceActionsTest {
             override suspend fun runShortcut(
                 shortcut: DeviceShortcut,
                 selectedComponentIds: Set<String>,
+                authorizationPlan: AuthorizationPlan,
             ): DeviceShortcutResult {
                 val installables = artifacts.map {
                     com.ninepointnine.helper.domain.device.InstallableArtifact(it.manifest, it.finalApk, it.declarations)
@@ -1918,7 +1933,7 @@ class DeviceActionsTest {
         }
 
         val result = kotlinx.coroutines.runBlocking {
-            DeviceInstallationCoordinator(InstallationSessionEventPort { events += it })
+            DeviceInstallationCoordinator(activeBoundary(events))
                 .executeBatch(actionLease(gateway), artifacts, initialBatchPlan(artifacts))
         }
 
@@ -1950,6 +1965,7 @@ class DeviceActionsTest {
             override suspend fun runShortcut(
                 shortcut: DeviceShortcut,
                 selectedComponentIds: Set<String>,
+                authorizationPlan: AuthorizationPlan,
             ): DeviceShortcutResult {
                 val plan = AuthorizationPlanFactory.create(
                     artifacts.map {
@@ -1975,7 +1991,7 @@ class DeviceActionsTest {
         }
 
         kotlinx.coroutines.runBlocking {
-            DeviceInstallationCoordinator(InstallationSessionEventPort { events += it })
+            DeviceInstallationCoordinator(activeBoundary(events))
                 .executeBatch(actionLease(gateway), artifacts, initialBatchPlan(artifacts))
         }
 
@@ -2012,6 +2028,7 @@ class DeviceActionsTest {
             override suspend fun runShortcut(
                 shortcut: DeviceShortcut,
                 selectedComponentIds: Set<String>,
+                authorizationPlan: AuthorizationPlan,
             ): DeviceShortcutResult {
                 val plan = AuthorizationPlanFactory.create(
                     artifacts.map {
@@ -2037,7 +2054,7 @@ class DeviceActionsTest {
         }
 
         runBlocking {
-            DeviceInstallationCoordinator(InstallationSessionEventPort { events += it })
+            DeviceInstallationCoordinator(activeBoundary(events))
                 .executeBatch(actionLease(gateway), artifacts, initialBatchPlan(artifacts))
         }
 
@@ -2074,6 +2091,7 @@ class DeviceActionsTest {
             override suspend fun runShortcut(
                 shortcut: DeviceShortcut,
                 selectedComponentIds: Set<String>,
+                authorizationPlan: AuthorizationPlan,
             ): DeviceShortcutResult {
                 shortcutSelections += selectedComponentIds
                 return DeviceShortcutResult.Failed(
@@ -2084,7 +2102,7 @@ class DeviceActionsTest {
         }
 
         val result = kotlinx.coroutines.runBlocking {
-            DeviceInstallationCoordinator(InstallationSessionEventPort { events += it })
+            DeviceInstallationCoordinator(activeBoundary(events))
                 .executeBatch(actionLease(gateway), artifacts, initialBatchPlan(artifacts))
         }
 
@@ -2123,11 +2141,6 @@ class DeviceActionsTest {
             override suspend fun runShortcut(
                 shortcut: DeviceShortcut,
                 selectedComponentIds: Set<String>,
-            ): DeviceShortcutResult = error("the typed authorization plan is required")
-
-            override suspend fun runShortcut(
-                shortcut: DeviceShortcut,
-                selectedComponentIds: Set<String>,
                 authorizationPlan: AuthorizationPlan,
             ): DeviceShortcutResult {
                 shortcuts += shortcut
@@ -2143,7 +2156,7 @@ class DeviceActionsTest {
         }
 
         runBlocking {
-            DeviceInstallationCoordinator(InstallationSessionEventPort { events += it })
+            DeviceInstallationCoordinator(activeBoundary(events))
                 .executeBatch(actionLease(gateway), artifacts, plan)
         }
 
@@ -2182,11 +2195,6 @@ class DeviceActionsTest {
             override suspend fun runShortcut(
                 shortcut: DeviceShortcut,
                 selectedComponentIds: Set<String>,
-            ): DeviceShortcutResult = error("the typed authorization plan is required")
-
-            override suspend fun runShortcut(
-                shortcut: DeviceShortcut,
-                selectedComponentIds: Set<String>,
                 authorizationPlan: AuthorizationPlan,
             ): DeviceShortcutResult {
                 shortcuts += shortcut
@@ -2201,7 +2209,7 @@ class DeviceActionsTest {
         }
 
         runBlocking {
-            DeviceInstallationCoordinator(InstallationSessionEventPort { events += it })
+            DeviceInstallationCoordinator(activeBoundary(events))
                 .executeBatch(actionLease(gateway), artifacts, plan)
         }
 
@@ -2236,11 +2244,6 @@ class DeviceActionsTest {
             override suspend fun runShortcut(
                 shortcut: DeviceShortcut,
                 selectedComponentIds: Set<String>,
-            ): DeviceShortcutResult = error("the typed authorization plan is required")
-
-            override suspend fun runShortcut(
-                shortcut: DeviceShortcut,
-                selectedComponentIds: Set<String>,
                 authorizationPlan: AuthorizationPlan,
             ): DeviceShortcutResult = DeviceShortcutResult.Completed(
                 configuredComponentIds = selectedComponentIds,
@@ -2252,7 +2255,7 @@ class DeviceActionsTest {
         }
 
         runBlocking {
-            DeviceInstallationCoordinator(InstallationSessionEventPort { events += it })
+            DeviceInstallationCoordinator(activeBoundary(events))
                 .executeBatch(actionLease(gateway), artifacts, maintenanceBatchPlan(artifacts, setOf("desktop")))
         }
 
@@ -2323,6 +2326,20 @@ class DeviceActionsTest {
         assertEquals(setOf("file-manager"), result.configuredComponentIds)
         assertEquals(5, result.authorizationEvidence.size)
     }
+
+    private fun activeBoundary(
+        onEvent: (InstallationSessionEvent) -> Unit = {},
+    ): InstallationSessionBoundary = object : InstallationSessionBoundary {
+        override fun emit(event: InstallationSessionEvent) = onEvent(event)
+
+        override fun isBatchActive(batchId: Long): Boolean = true
+
+        override fun isArtifactPreparationActive(batchId: Long): Boolean = true
+    }
+
+    private fun activeBoundary(
+        events: MutableList<InstallationSessionEvent>,
+    ): InstallationSessionBoundary = activeBoundary { events += it }
 
     private fun initialBatchPlan(artifacts: List<PreparedArtifact>): InstallationBatchPlan {
         val ids = artifacts.mapTo(linkedSetOf()) { it.manifest.componentId }

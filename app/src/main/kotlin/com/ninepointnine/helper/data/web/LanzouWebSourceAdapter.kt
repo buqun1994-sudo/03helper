@@ -8,6 +8,7 @@ import com.ninepointnine.helper.domain.artifact.ArtifactSourceKind
 import com.ninepointnine.helper.domain.artifact.ReleaseSourcePolicy
 import com.ninepointnine.helper.domain.artifact.ResolvedDownloadRequest
 import kotlin.coroutines.resume
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -77,11 +78,14 @@ class LanzouWebSourceAdapter(
         return try {
             withTimeout(timeoutMillis) {
                 suspendCancellableCoroutine { continuation ->
+                    val completed = AtomicBoolean(false)
                     val completeFailure: (ArtifactFailure) -> Unit = { failure ->
-                        if (continuation.isActive) continuation.resume(LanzouResolutionResult.Failure(failure))
+                        if (completed.compareAndSet(false, true) && continuation.isActive) {
+                            continuation.resume(LanzouResolutionResult.Failure(failure))
+                        }
                     }
                     val completeDownload: (ResolvedDownloadRequest) -> Unit = { request ->
-                        if (continuation.isActive) {
+                        if (completed.compareAndSet(false, true) && continuation.isActive) {
                             continuation.resume(validateDownloadRequest(request))
                         }
                     }
@@ -97,7 +101,10 @@ class LanzouWebSourceAdapter(
                             ),
                         )
                     }
-                    continuation.invokeOnCancellation { host.stopAndDestroy() }
+                    continuation.invokeOnCancellation {
+                        completed.set(true)
+                        runCatching { host.stopAndDestroy() }
+                    }
                 }
             }
         } catch (_: TimeoutCancellationException) {
@@ -112,7 +119,9 @@ class LanzouWebSourceAdapter(
         } catch (cancelled: CancellationException) {
             throw cancelled
         } finally {
-            host.stopAndDestroy()
+            // Teardown is best-effort and must not replace the resolution
+            // result (or cancellation) with a UI/WebView cleanup exception.
+            runCatching { host.stopAndDestroy() }
         }
     }
 
@@ -124,6 +133,26 @@ class LanzouWebSourceAdapter(
                     sourceKind = request.sourceKind,
                     reasonCode = "lanzou_callback_source_invalid",
                     retryable = false,
+                ),
+            )
+        }
+        if (sourcePolicy.isLanzouVerificationPage(request.url)) {
+            return LanzouResolutionResult.Failure(
+                ArtifactFailure(
+                    phase = ArtifactFailurePhase.SOURCE_RESOLUTION,
+                    sourceKind = request.sourceKind,
+                    reasonCode = "lanzou_verification_url_not_download",
+                    retryable = false,
+                ),
+            )
+        }
+        if (!sourcePolicy.isLanzouTransientDownloadUrl(request.url)) {
+            return LanzouResolutionResult.Failure(
+                ArtifactFailure(
+                    phase = ArtifactFailurePhase.SOURCE_RESOLUTION,
+                    sourceKind = request.sourceKind,
+                    reasonCode = "lanzou_transient_download_url_invalid",
+                    retryable = true,
                 ),
             )
         }

@@ -1,7 +1,7 @@
 package com.ninepointnine.helper.application.device
 
 import com.ninepointnine.helper.application.artifact.PreparedArtifact
-import com.ninepointnine.helper.application.session.InstallationSessionEventPort
+import com.ninepointnine.helper.application.session.InstallationSessionBoundary
 import com.ninepointnine.helper.domain.device.AdbCommandGateway
 import com.ninepointnine.helper.domain.device.AuthorizationActionEvidence
 import com.ninepointnine.helper.domain.device.AuthorizationDeclarationValidator
@@ -53,7 +53,7 @@ sealed interface DeviceInstallationExecutionResult {
  * crosses back into the installation session.
  */
 class DeviceInstallationCoordinator(
-    private val eventPort: InstallationSessionEventPort,
+    private val eventPort: InstallationSessionBoundary,
 ) {
     suspend fun executeBatch(
         connection: DeviceConnectionLease,
@@ -84,9 +84,8 @@ class DeviceInstallationCoordinator(
                 installable.map { it.manifest.componentId }.sorted(),
             ),
         )
-        // `emit` is intentionally fire-and-forget so old test ports remain
-        // source-compatible. The production dispatcher therefore supplies an
-        // explicit acceptance checkpoint before the first device write.
+        // Accept the batch only while its generation is still current. This
+        // checkpoint must precede the first device write.
         if (!eventPort.isBatchActive(batchPlan.batchId)) {
             return DeviceInstallationExecutionResult.Stale
         }
@@ -206,9 +205,8 @@ class DeviceInstallationCoordinator(
         val writeIds = result.writeConfirmedComponentIds()
         val evidence = result.verifiedEvidence()
         // Identity evidence itself proves that the device accepted the
-        // operation. Unioning it with the explicit adapter receipt keeps old
-        // test gateways source-compatible while making the operation fact
-        // visible for mixed reusable/fresh batches.
+        // operation. Union it with the explicit adapter receipt so mixed
+        // reusable/fresh batches retain every confirmed operation fact.
         val operationIds = result.operationConfirmedComponentIds() + evidence.map { it.componentId } + writeIds
         val failure = result.failureOrNull()
         val confirmationPendingIds = (result as? DeviceInstallResult.WrittenButUnverified)

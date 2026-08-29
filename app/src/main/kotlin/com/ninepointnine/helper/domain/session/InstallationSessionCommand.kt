@@ -3,8 +3,8 @@ package com.ninepointnine.helper.domain.session
 import com.ninepointnine.helper.domain.artifact.ArchiveDownloadEvidence
 import com.ninepointnine.helper.domain.artifact.ArchiveVerificationEvidence
 import com.ninepointnine.helper.domain.artifact.ApkExtractionEvidence
+import com.ninepointnine.helper.domain.artifact.ArtifactFailure
 import com.ninepointnine.helper.domain.artifact.ArtifactManifest
-import com.ninepointnine.helper.domain.artifact.ArtifactSourceKind
 import com.ninepointnine.helper.domain.artifact.ArtifactVerification
 import com.ninepointnine.helper.domain.artifact.SourceSelectionEvidence
 import com.ninepointnine.helper.domain.device.ManagedApplicationAuthorizationStatus
@@ -81,17 +81,6 @@ sealed interface InstallationSessionEvent {
         val retryable: Boolean = true,
     ) : InstallationSessionEvent
 
-    data class CatalogResolved(
-        val catalogVersion: String,
-        val keyId: String,
-        val signatureAlgorithm: String,
-        val manifests: List<ArtifactManifest>,
-        val catalogRevision: Long = 0L,
-        val apps: List<ComponentDescriptor> = emptyList(),
-        val appFailures: Map<String, String> = emptyMap(),
-        val appFailureRetryable: Map<String, Boolean> = emptyMap(),
-    ) : InstallationSessionEvent
-
     /** Folder-based distribution exposes component choices before APK metadata is known. */
     data class DistributionConfigResolved(
         val configVersion: String,
@@ -103,73 +92,20 @@ sealed interface InstallationSessionEvent {
         val catalogRevision: Long = 0L,
     ) : InstallationSessionEvent
 
-    /** The selected applications' manifests are ready after the user confirms the selection. */
-    data class SelectedCatalogResolved(
-        val catalogVersion: String,
-        val keyId: String,
-        val signatureAlgorithm: String,
-        val manifests: List<ArtifactManifest>,
-        val catalogRevision: Long = 0L,
-        val apps: List<ComponentDescriptor> = emptyList(),
-        val appFailures: Map<String, String> = emptyMap(),
-        val appFailureRetryable: Map<String, Boolean> = emptyMap(),
-        /** Echo of the immutable request; production responses must carry it unchanged. */
-        val batch: InstallationBatchPlan? = null,
+    /** Atomic result of the sole artifact-preparation owner for one batch. */
+    data class ArtifactBatchPrepared(
+        val batchId: Long,
+        val manifests: List<ArtifactManifest> = emptyList(),
+        val sourceSelections: List<SourceSelectionEvidence> = emptyList(),
+        val archives: List<ArchiveDownloadEvidence> = emptyList(),
+        val archiveVerifications: List<ArchiveVerificationEvidence> = emptyList(),
+        val extractions: List<ApkExtractionEvidence> = emptyList(),
+        val verifications: List<ArtifactVerification> = emptyList(),
+        val failures: List<ArtifactFailure> = emptyList(),
     ) : InstallationSessionEvent
 
     data class CatalogFailed(
         val reasonCode: String,
-        val retryable: Boolean = false,
-    ) : InstallationSessionEvent
-
-    data class SourceResolved(
-        val sourceId: String,
-        val componentId: String? = null,
-        val sourceKind: ArtifactSourceKind? = null,
-        val selections: List<SourceSelectionEvidence> = emptyList(),
-    ) : InstallationSessionEvent
-
-    data class SourceFailed(
-        val componentId: String,
-        val sourceKind: ArtifactSourceKind,
-        val reasonCode: String,
-        val retryable: Boolean = true,
-        val terminal: Boolean = false,
-    ) : InstallationSessionEvent
-
-    data class ArchiveDownloaded(
-        val sizeBytes: Long,
-        val sha256: String,
-        val componentId: String? = null,
-        val resumed: Boolean = false,
-        val archives: List<ArchiveDownloadEvidence> = emptyList(),
-    ) : InstallationSessionEvent
-
-    data class ArchiveVerified(
-        val verified: Boolean,
-        val componentId: String? = null,
-        val verification: ArchiveVerificationEvidence? = null,
-        val verifications: List<ArchiveVerificationEvidence> = emptyList(),
-    ) : InstallationSessionEvent
-
-    data class ApkExtracted(
-        val entryName: String,
-        val sizeBytes: Long,
-        val sha256: String,
-        val componentId: String? = null,
-        val extractions: List<ApkExtractionEvidence> = emptyList(),
-    ) : InstallationSessionEvent
-
-    data class ArtifactsVerified(
-        val checks: List<ComponentCheck>,
-        val verifications: List<ArtifactVerification> = emptyList(),
-        val archiveDeleted: Boolean = false,
-    ) : InstallationSessionEvent
-
-    data class ArtifactUnavailable(
-        val componentId: String,
-        val reasonCode: String,
-        val sourceKind: ArtifactSourceKind? = null,
         val retryable: Boolean = false,
     ) : InstallationSessionEvent
 
@@ -279,9 +215,3 @@ sealed interface InstallationSessionEvent {
 
     data object Unknown : InstallationSessionEvent
 }
-
-/** A passed/failed proof for one selected component. */
-data class ComponentCheck(
-    val componentId: String,
-    val passed: Boolean,
-)

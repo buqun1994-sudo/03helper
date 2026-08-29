@@ -180,7 +180,7 @@
 1. `IDLE -> DISCOVERING` 由连接页进入前台或用户开始查找触发；同一前台周期不重复启动扫描，发现列表必须去重，未确认的设备不能进入 `CONNECTING`。
 2. 用户点击已确认设备后进入 `CONNECTING`，应用层执行第二次 ADB 身份握手；只有 `DeviceConnectionConfirmed` 事件到达后才进入 `CONNECTED`，并保持一个连接租约。
 3. `CONNECTED -> SELECTION_CONFIRMED` 只接受 desktop 必装且已选应用元数据完整的选择；desktop 永远不能被取消，其它应用按需切换。
-4. `SELECTION_CONFIRMED` 之后按 `RESOLVING_SOURCE`、`DOWNLOADING_ARCHIVE`、`VERIFYING_ARCHIVE`、`EXTRACTING_APK`、`VERIFYING_ARTIFACTS`、`INSTALLING`、`AUTHORIZING`、`VERIFYING_DEVICE` 顺序推进；单个组件前置结果缺失只记录该组件失败并跳过，批次仍须继续，结构化批次证据缺失才进入 `FAILED`。
+4. `SELECTION_CONFIRMED` 之后统一进入 `PREPARING_ARTIFACTS`；来源解析、下载、ZIP 校验、解压和 APK 校验是协调器内部步骤，只产生逐组件 `ComponentProgressUpdated`，全部结果通过一次 `ArtifactBatchPrepared` 后进入 `ARTIFACTS_READY`，再由 `INSTALLING`、`AUTHORIZING`、`VERIFYING_DEVICE` 继续推进。单个组件前置结果缺失只记录该组件失败并跳过，批次仍须继续，结构化批次证据缺失才进入 `FAILED`。
 5. 取消、断线和可恢复错误进入 `PAUSED` 并保存会话检查点；重复事件、旧会话事件和未知事件不得覆盖更新后的快照。
 6. 只有安装、授权和可用性三类结构化结果同时成立时，才允许 `SUCCEEDED`；成功动作进入维护态的意图仍由同一会话接收。
 
@@ -197,7 +197,7 @@
 
 ### F2：下载与发布清单
 
-施工目标：把 F1 已有的 `RESOLVING_SOURCE`、`DOWNLOADING_ARCHIVE`、`VERIFYING_ARCHIVE`、`EXTRACTING_APK` 和 `VERIFYING_ARTIFACTS` 接上真实的受控下载与发布物完整性链路；本阶段不接 LAN、ADB、车机安装、授权或可用性验证。
+施工目标：把 F1 的 `PREPARING_ARTIFACTS -> ARTIFACTS_READY` 准备边界接上真实的受控下载与发布物完整性链路；来源解析、下载、ZIP 校验、解压和 APK 校验不再作为会话内部状态；本阶段不接 LAN、ADB、车机安装、授权或可用性验证。
 
 物理边界与入口：
 
@@ -205,16 +205,16 @@
 2. 按长期总纲的 owner 建立 `ReleaseSourcePolicy`、`CloudInstallerDistributionConfigAdapter`、`FolderArtifactCatalogAdapter`、`LanzouFolderSourceAdapter`、`LanzouWebSourceAdapter`、`ArtifactDownloader`、`ArchiveIdentityVerifier`、`ArtifactArchiveExtractor` 和 `ArtifactIdentityVerifier`；它们通过端口把结构化结果送入 `InstallationSession`，不直接操作 Compose 状态。
 3. 当前来源固定为“签名配置（含 `versionCode` / `versionName` / `apkSizeBytes`）-> 公共 `Download` 优先 -> 蓝奏密码根文件夹中的声明 ZIP 按需获取”；选择页版本 / 体积只显示 Cloud 字段，公共 APK 或 ZIP 内 APK 只负责安装前包名 / 发布者证书身份复核，大小与摘要作为传输证据保留。R2 / GitHub 不参与当前版本判断，密码文件夹、合并 ZIP 和第三方直链转换器不进入自动会话。
 4. 隐藏 WebView 使用 Android 默认手机端标识，挂载在当前安装页面背后并由不透明进度层遮挡；完成密码验证、目录枚举和下载回调后立即停止加载并销毁。不启动外部浏览器、不接收用户触摸 / 焦点、不暴露 JavaScript bridge。
-5. 下载器只写入应用私有缓存的 `.zip.part`；ZIP 大小与 SHA-256 通过后才允许受控解压。唯一 APK 的 entry 名称、大小、SHA-256、包名、版本和签名证书全部通过后，才向会话发送产物校验成功，并把 APK 发布到用户公共 `Download` 后删除临时 ZIP。
-6. F2 实际文件边界固定为 `domain/artifact/`（清单、类型和策略）、`data/catalog/`（Cloud 验签与解析）、`data/web/`（隐藏 WebView）、`data/download/`（私有临时缓存、公共 `Download` 适配与下载）、`data/artifact/`（ZIP / APK 校验）和 `application/artifact/`（事件编排）；事件只经 `InstallationSessionArtifactEventPort` 进入 F1 会话。
-7. `ArtifactsVerified` 只记录完整性成功并停在 `VERIFYING_ARTIFACTS`；F2 不发送 `InstallationStarted`、安装、授权或车机可用性事件。
+5. 下载器只写入应用私有缓存的 `.zip.part`；ZIP 大小与 SHA-256 通过后才允许受控解压。唯一 APK 的 entry 名称、大小、SHA-256、包名、版本和签名证书全部通过后，才向会话发送产物校验成功，并把 APK 发布到用户公共 `Download` 后删除临时 ZIP；私有目录不得保留完整 APK 的跨会话副本。
+6. F2 实际文件边界固定为 `domain/artifact/`（清单、类型和策略）、`data/catalog/`（Cloud 验签与解析）、`data/web/`（隐藏 WebView）、`data/download/`（私有临时缓存、公共 `Download` 适配与下载）、`data/artifact/`（ZIP / APK 校验）和 `application/artifact/`（事件编排）；事件统一经 `InstallationSessionEventPort` 进入 F1 会话。
+7. `ArtifactBatchPrepared` 是准备阶段唯一跨会话边界的原子结果；F2 只把完整性证据提交到 `ARTIFACTS_READY`，不发送 `InstallationStarted`、安装、授权或车机可用性事件。
 
 F2 验证门槛：
 
 1. 先用确定性 fixture 覆盖清单签名 / 字段缺失、来源切换、HTML 假响应、解析超时、断点 / 重试、ZIP 哈希不符、ZIP 结构异常、路径穿越、多个 APK、APK 哈希 / 包身份 / 证书不符和缓存清理；任何失败都必须 fail closed，并把结构化原因送入现有会话。
 2. 在真实 Android System WebView、密码根文件夹和动态 ZIP 证据具备前，不把模拟 User-Agent、桌面浏览器或 Debug fixture 记录为真实主源通过。
 3. F2 完成后，F1 的页面仍只消费 `InstallUiStateMapper`；目录枚举、版本变化、下载与校验进度、失败原因不得通过页面内特判表达。
-4. 本轮按用户确认的最简自动化口径，只执行上述确定性 fixture、编译和直接相关单测；真实 WebView、真实 ZIP、网络切换和页面可见性由用户按 `docs/testing/验证矩阵.md` 的 F2 人工用例主测，不将未执行 smoke 计作失败或通过。
+4. 本轮已在登记测试手机上完成一次真实 Android System WebView 分享页解析 smoke（移动端 `/i` -> `/tp/i` -> `developer2.lanrar.com` -> `zip*.webgetstore.com`，未打开外部浏览器）；真实 ZIP 下载 / 解压、网络切换和页面可见性仍由用户按 `docs/testing/验证矩阵.md` 的 F2 人工用例主测，不能把这次 URL 解析证据扩写为完整下载通过。
 
 当前施工起点：先读取 `docs/architecture/项目长期总纲.md` 第 2、5、7 节、`docs/plans/03helper首版安装流程计划.md` 的 ZIP 自动处理契约、`docs/architecture/Cloud项目能力接线.md` 和 `docs/testing/验证矩阵.md`，再给出文件级物理锚点；未冻结清单 schema 前禁止自由创建外部协议。
 

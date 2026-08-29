@@ -4,10 +4,13 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.view.ViewGroup
+import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.ui.platform.ComposeView
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -17,6 +20,9 @@ import com.ninepointnine.helper.ui.InstallApp
 import com.ninepointnine.helper.ui.state.InstallUiIntent
 
 class MainActivity : ComponentActivity() {
+    private val webViewMountRegistry: com.ninepointnine.helper.data.web.LanzouWebViewMountRegistry
+        get() = (application as InstallerApplication).lanzouWebViewMountRegistry
+    private var webViewMount: FrameLayout? = null
     private val installerRuntime: InstallerRuntime
         get() = (application as InstallerApplication).installerRuntime
     private var storagePermissionPrompted = false
@@ -31,9 +37,23 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        setContent {
-            InstallerRoot(installerRuntime)
-        }
+        val root = FrameLayout(this)
+        val webViewLayer = FrameLayout(this)
+        webViewLayer.layoutParams = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+        )
+        root.addView(webViewLayer)
+        val composeView = ComposeView(this)
+        composeView.layoutParams = FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT,
+            ViewGroup.LayoutParams.MATCH_PARENT,
+        )
+        webViewMount = webViewLayer
+        webViewMountRegistry.register(webViewLayer)
+        composeView.setContent { InstallerRoot(installerRuntime) }
+        root.addView(composeView)
+        setContentView(root)
     }
 
     override fun onResume() {
@@ -53,6 +73,12 @@ class MainActivity : ComponentActivity() {
             return
         }
         installerRuntime.onForeground()
+    }
+
+    override fun onDestroy() {
+        webViewMount?.let(webViewMountRegistry::unregister)
+        webViewMount = null
+        super.onDestroy()
     }
 
     private fun requiresLegacyStoragePermission(): Boolean {

@@ -1,6 +1,7 @@
 package com.ninepointnine.helper.data.catalog
 
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.net.URL
 import javax.net.ssl.HttpsURLConnection
 import kotlinx.coroutines.Dispatchers
@@ -35,6 +36,7 @@ class UrlConnectionReleaseCatalogTransport(
                 while (true) {
                     val count = input.read(buffer)
                     if (count < 0) break
+                    if (count == 0) throw IOException("catalog_zero_read")
                     total += count
                     if (total > CloudReleaseCatalogAdapter.MAX_CATALOG_BYTES) {
                         throw IllegalStateException("catalog_size_invalid")

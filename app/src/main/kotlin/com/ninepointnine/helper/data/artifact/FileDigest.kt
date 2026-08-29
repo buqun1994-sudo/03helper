@@ -2,6 +2,7 @@ package com.ninepointnine.helper.data.artifact
 
 import java.io.File
 import java.io.FileInputStream
+import java.io.IOException
 import java.security.MessageDigest
 
 internal fun sha256(file: File): String {
@@ -11,6 +12,7 @@ internal fun sha256(file: File): String {
         while (true) {
             val count = input.read(buffer)
             if (count < 0) break
+            if (count == 0) throw IOException("file_digest_zero_read")
             digest.update(buffer, 0, count)
         }
     }

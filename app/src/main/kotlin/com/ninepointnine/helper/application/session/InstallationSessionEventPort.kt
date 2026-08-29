@@ -7,20 +7,27 @@ import java.util.concurrent.atomic.AtomicLong
 
 fun interface InstallationSessionEventPort {
     fun emit(event: InstallationSessionEvent)
-
-    /**
-     * Returns whether the batch that owns the current adapter call is still
-     * active. Lightweight test ports keep the source-compatible default; the
-     * production dispatcher binds the check to its session generation.
-     */
-    fun isBatchActive(batchId: Long): Boolean = true
 }
+
+/** Activity checks for work that can write to the device or publish artifacts. */
+interface InstallationSessionActivityGate {
+    fun isBatchActive(batchId: Long): Boolean
+
+    fun isArtifactPreparationActive(batchId: Long): Boolean
+}
+
+/**
+ * The generation-bound boundary required by installation work. Lightweight
+ * adapters only need [InstallationSessionEventPort]; write-capable owners must
+ * receive this stronger contract from the runtime.
+ */
+interface InstallationSessionBoundary : InstallationSessionEventPort, InstallationSessionActivityGate
 
 /** One monotonic event sequence shared by all adapters in a session generation. */
 class InstallationSessionEventDispatcher(
     private val session: InstallationSession,
     private val sessionId: Long,
-) : InstallationSessionEventPort {
+) : InstallationSessionBoundary {
     private val sequence = AtomicLong(0L)
 
     override fun emit(event: InstallationSessionEvent) {
@@ -35,6 +42,14 @@ class InstallationSessionEventDispatcher(
         val snapshot = session.currentSnapshot()
         return snapshot.sessionId == sessionId &&
             snapshot.state == InstallationSessionState.INSTALLING &&
+            snapshot.installationBatch?.batchId == batchId &&
+            snapshot.installationBatchReceipt == null
+    }
+
+    override fun isArtifactPreparationActive(batchId: Long): Boolean {
+        val snapshot = session.currentSnapshot()
+        return snapshot.sessionId == sessionId &&
+            snapshot.state == InstallationSessionState.PREPARING_ARTIFACTS &&
             snapshot.installationBatch?.batchId == batchId &&
             snapshot.installationBatchReceipt == null
     }

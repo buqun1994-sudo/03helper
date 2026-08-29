@@ -144,14 +144,23 @@ class ArtifactIdentityVerifier(
             }
         }
         try {
-            Files.move(
-                extractedApk.file.toPath(),
-                finalApk.toPath(),
-                StandardCopyOption.ATOMIC_MOVE,
-                StandardCopyOption.REPLACE_EXISTING,
-            )
-        } catch (_: AtomicMoveNotSupportedException) {
-            return failed(manifest, verifiedArchive.file, extractedApk.file, finalApk, "apk_atomic_move_unsupported")
+            try {
+                Files.move(
+                    extractedApk.file.toPath(),
+                    finalApk.toPath(),
+                    StandardCopyOption.ATOMIC_MOVE,
+                    StandardCopyOption.REPLACE_EXISTING,
+                )
+            } catch (_: AtomicMoveNotSupportedException) {
+                // Some Android-backed filesystems do not expose an atomic
+                // rename. The source has already passed identity checks, so a
+                // regular replace is the correct portable finalization path.
+                Files.move(
+                    extractedApk.file.toPath(),
+                    finalApk.toPath(),
+                    StandardCopyOption.REPLACE_EXISTING,
+                )
+            }
         } catch (_: Exception) {
             return failed(manifest, verifiedArchive.file, extractedApk.file, finalApk, "apk_finalize_failed")
         }

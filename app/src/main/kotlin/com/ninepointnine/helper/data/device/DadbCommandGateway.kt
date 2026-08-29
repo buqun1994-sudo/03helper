@@ -300,25 +300,6 @@ internal class DadbCommandGateway(
     override suspend fun runShortcut(
         shortcut: DeviceShortcut,
         selectedComponentIds: Set<String>,
-    ): DeviceShortcutResult {
-        val components = AuthorizationPlanFactory.allManagedComponents()
-            .filter { it.componentId in selectedComponentIds }
-        val plan = when (val result = AuthorizationPlanFactory.createForComponents(
-            components,
-            requireDesktop = shortcut == DeviceShortcut.CONFIGURE_ALL_INSTALLED_APPS_AND_START_DESKTOP,
-        )) {
-            is AuthorizationPlanBuildResult.Ready -> result.plan
-            is AuthorizationPlanBuildResult.Rejected -> return DeviceShortcutResult.Failed(
-                stage = DeviceShortcutFailureStage.AUTHORIZATION,
-                failure = DeviceActionFailure(result.reasonCode, retryable = false),
-            )
-        }
-        return runShortcutWithPlan(shortcut, selectedComponentIds, plan)
-    }
-
-    override suspend fun runShortcut(
-        shortcut: DeviceShortcut,
-        selectedComponentIds: Set<String>,
         authorizationPlan: com.ninepointnine.helper.domain.device.AuthorizationPlan,
     ): DeviceShortcutResult = runShortcutWithPlan(shortcut, selectedComponentIds, authorizationPlan)
 
@@ -533,10 +514,6 @@ internal class DadbCommandGateway(
 
     override suspend fun repairAuthorization(
         manifests: List<com.ninepointnine.helper.domain.artifact.ArtifactManifest>,
-    ): MaintenanceDeviceResult = repairAuthorization(manifests, emptyMap())
-
-    override suspend fun repairAuthorization(
-        manifests: List<com.ninepointnine.helper.domain.artifact.ArtifactManifest>,
         declarationsByComponent: Map<String, com.ninepointnine.helper.domain.device.ApkDeclarationMetadata>,
     ): MaintenanceDeviceResult = withLease(
         whenClosed = MaintenanceDeviceResult.Failed(
@@ -634,9 +611,6 @@ internal class DadbCommandGateway(
         }
     }
 
-    override suspend fun inspectManagedApplications(): ManagedApplicationsResult =
-        inspectManagedApplications(AuthorizationPlanFactory.allManagedComponents())
-
     override suspend fun inspectManagedApplications(
         components: List<ManagedComponent>,
     ): ManagedApplicationsResult = withLease(
@@ -672,38 +646,6 @@ internal class DadbCommandGateway(
         ),
     ) {
         inspectInstalledApplicationInventoryLocked(components)
-    }
-
-    override suspend fun inspectAuthorization(
-        manifests: List<com.ninepointnine.helper.domain.artifact.ArtifactManifest>,
-    ): MaintenanceAuthorizationResult = withLease(
-        whenClosed = MaintenanceAuthorizationResult.Failed(
-            DeviceActionFailure("adb_connection_closed", retryable = true),
-        ),
-    ) {
-        if (manifests.isEmpty() || manifests.map { it.componentId }.toSet().size != manifests.size) {
-            return@withLease MaintenanceAuthorizationResult.Failed(
-                DeviceActionFailure("maintenance_manifest_selection_mismatch", retryable = false),
-            )
-        }
-        inspectComponentAuthorizationLocked(manifests.map {
-            ManagedComponent(
-                componentId = it.componentId,
-                packageName = it.packageName,
-                setup = it.deviceSetup,
-                order = it.sortOrder,
-            )
-        })
-    }
-
-    override suspend fun inspectComponentAuthorization(
-        components: List<ManagedComponent>,
-    ): MaintenanceAuthorizationResult = withLease(
-        whenClosed = MaintenanceAuthorizationResult.Failed(
-            DeviceActionFailure("adb_connection_closed", retryable = true),
-        ),
-    ) {
-        inspectComponentAuthorizationLocked(components)
     }
 
     override suspend fun inspectComponentAuthorization(
@@ -1252,38 +1194,6 @@ internal class DadbCommandGateway(
                 ),
             )
         }
-    }
-
-    override suspend fun launchManagedComponent(componentId: String): MaintenanceDeviceResult = withLease(
-        whenClosed = MaintenanceDeviceResult.Failed(
-            DeviceActionFailure("adb_connection_closed", retryable = true),
-        ),
-    ) {
-        val component = AuthorizationPlanFactory.allManagedComponents().firstOrNull {
-            it.componentId == componentId
-        } ?: return@withLease MaintenanceDeviceResult.Failed(
-            DeviceActionFailure("maintenance_component_unapproved", componentId, retryable = false),
-        )
-        val launchComponent = AuthorizationPlanFactory.fixedLaunchComponent(component)
-            ?: return@withLease MaintenanceDeviceResult.Failed(
-                DeviceActionFailure("maintenance_launch_unavailable", componentId, retryable = false),
-            )
-        when (val installed = inspectInstalledPackage(component.componentId, component.packageName)) {
-            is PackageInspection.Failed -> return@withLease MaintenanceDeviceResult.Failed(installed.failure)
-            is PackageInspection.Completed -> if (!installed.installed) {
-                return@withLease MaintenanceDeviceResult.Failed(
-                    DeviceActionFailure("maintenance_component_not_installed", componentId, retryable = false),
-                )
-            }
-        }
-        val launch = shell("am start -n $launchComponent")
-        waitForProcess(component.packageName)
-        if (!isLaunchAccepted(launch)) {
-            return@withLease MaintenanceDeviceResult.Failed(
-                DeviceActionFailure("maintenance_launch_failed", componentId, retryable = true),
-            )
-        }
-        MaintenanceDeviceResult.Completed("component_launched")
     }
 
     override suspend fun launchManagedComponent(

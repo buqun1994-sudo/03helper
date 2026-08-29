@@ -22,10 +22,10 @@ data class ArtifactCachePaths(
 )
 
 /**
- * Owns the installer's temporary cache and the APK files published to the
- * user's public Download directory. The two roots intentionally have
- * different cleanup rules: temporary files are disposable, while user-visible
- * APKs are retained for reuse and are never bulk-deleted with other files.
+ * Owns the installer's temporary working files and APKs published to the
+ * user's public Download directory. APKs in the public directory are the only
+ * cross-session reuse source; everything under [root] is disposable working
+ * state for the current operation.
  */
 class ArtifactCache(
     private val root: File,
@@ -34,9 +34,6 @@ class ArtifactCache(
 ) {
     private val mediaStoreEnabled: Boolean = contentResolver != null && Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
     private val candidateLock = Any()
-    private val verifiedApkRoot = root.resolve(VERIFIED_APK_DIRECTORY).apply {
-        require(mkdirs() || isDirectory) { "verified_apk_cache_unavailable" }
-    }
     @Volatile
     private var candidateSnapshot: List<File>? = null
 
@@ -46,6 +43,16 @@ class ArtifactCache(
 
     init {
         require(root.mkdirs() || root.isDirectory) { "artifact_cache_unavailable" }
+        // Versions before the public-Download-only policy left complete APKs
+        // under this private directory. Remove that legacy source once the
+        // cache owner starts so an upgrade cannot silently reuse it.
+        if (!rootsShareDirectory()) {
+            root.resolve(LEGACY_VERIFIED_APK_DIRECTORY).deleteRecursively()
+        }
+        // A process can be killed after preparation has produced a private
+        // APK or while a MediaStore item is being copied. Those files are not
+        // a reusable source. Keep only a valid fixed-download resume pair.
+        clearPrivateApkCopies()
     }
 
     fun paths(manifest: ArtifactManifest): ArtifactCachePaths {
@@ -83,44 +90,6 @@ class ArtifactCache(
         synchronized(candidateLock) { candidateSnapshot = null }
     }
 
-    /** Keeps a verified APK stable across the catalog and preparation phases. */
-    fun retainVerifiedApk(manifest: ArtifactManifest, source: File): File? = synchronized(candidateLock) {
-        if (!source.isFile) return@synchronized null
-        if (!verifiedApkRoot.mkdirs() && !verifiedApkRoot.isDirectory) return@synchronized null
-        val target = verifiedApkRoot.resolve("${stableKey(manifest)}.apk")
-        if (runCatching { source.canonicalFile == target.canonicalFile }.getOrDefault(false)) {
-            return@synchronized target.takeIf { it.isFile }
-        }
-        val temporary = target.resolveSibling(".${target.name}.part")
-        try {
-            Files.copy(source.toPath(), temporary.toPath(), StandardCopyOption.REPLACE_EXISTING)
-            if (!temporary.isFile || temporary.length() != source.length()) return@synchronized null
-            try {
-                Files.move(
-                    temporary.toPath(),
-                    target.toPath(),
-                    StandardCopyOption.ATOMIC_MOVE,
-                    StandardCopyOption.REPLACE_EXISTING,
-                )
-            } catch (_: AtomicMoveNotSupportedException) {
-                Files.move(
-                    temporary.toPath(),
-                    target.toPath(),
-                    StandardCopyOption.REPLACE_EXISTING,
-                )
-            }
-            target.takeIf { it.isFile && it.length() == source.length() }
-        } catch (_: Exception) {
-            null
-        } finally {
-            temporary.delete()
-        }
-    }
-
-    fun verifiedApkFor(manifest: ArtifactManifest): File? = synchronized(candidateLock) {
-        verifiedApkRoot.resolve("${stableKey(manifest)}.apk").takeIf { it.isFile && it.length() > 0L }
-    }
-
     /** Executes a candidate read while the MediaStore snapshot cannot be replaced. */
     fun <T> withPublicApkCandidates(
         forceRefresh: Boolean = false,
@@ -129,7 +98,46 @@ class ArtifactCache(
         block(publicApkCandidates(forceRefresh))
     }
 
+    /**
+     * Reads public APKs for a short-lived consumer such as icon extraction.
+     * MediaStore rows must be copied to a File for the APK parser, but those
+     * copies are unrelated to an active installation preparation and must not
+     * share its candidate snapshot or survive this callback.
+     */
+    fun <T> withEphemeralPublicApkCandidates(
+        block: (List<File>) -> T,
+    ): T = synchronized(candidateLock) {
+        if (!mediaStoreEnabled) {
+            return@synchronized block(
+                publicDownloadRoot.listFiles()
+                    .orEmpty()
+                    .filter { it.isFile && it.extension.equals("apk", ignoreCase = true) }
+                    .sortedWith(compareBy<File> { it.name }.thenByDescending { it.lastModified() }),
+            )
+        }
+        val ephemeralRoot = root.resolve(EPHEMERAL_CANDIDATE_DIRECTORY)
+        try {
+            // A process can be killed between the copy and callback. Remove
+            // only this namespace before and after the ownership window so a
+            // later icon read never observes stale private APK bytes.
+            ephemeralRoot.listFiles().orEmpty().forEach { it.deleteRecursively() }
+            val candidates = scanPublicApkCandidates(
+                candidateRoot = ephemeralRoot,
+                candidatePrefix = EPHEMERAL_CANDIDATE_PREFIX,
+            )
+            block(candidates)
+        } finally {
+            // The callback is the complete ownership window for these parser
+            // inputs. A later UI recomposition therefore cannot accumulate APK
+            // copies in the installer's private cache.
+            ephemeralRoot.deleteRecursively()
+        }
+    }
+
     fun publicDownloadDirectory(): File = publicDownloadRoot
+
+    /** Private working root used only for the current preparation operation. */
+    fun privateWorkingDirectory(): File = root
 
     /** Publishes a verified APK to the user's public Download collection. */
     @TargetApi(Build.VERSION_CODES.Q)
@@ -240,10 +248,8 @@ class ArtifactCache(
 
     fun clearAll() {
         invalidatePublicApkCandidates()
-        root.listFiles()?.forEach { file ->
-            file.deleteRecursively()
-        }
-        if (publicDownloadRoot != root) {
+        clearPrivateCache()
+        if (!rootsShareDirectory()) {
             if (mediaStoreEnabled) {
                 runCatching {
                     mediaStoreApkUris()
@@ -256,16 +262,31 @@ class ArtifactCache(
                     .filter { it.isFile && it.name.startsWith(MANAGED_APK_PREFIX) }
                     .forEach { it.delete() }
             }
+        } else {
+            // Tests and pre-Q callers may intentionally use one directory for
+            // both roots. In that configuration the directory is public, so
+            // only the installer's managed APK names are removable.
+            root.listFiles()
+                .orEmpty()
+                .filter { it.isFile && it.name.startsWith(MANAGED_APK_PREFIX) }
+                .forEach { it.delete() }
         }
     }
 
     /** Removes only the installer's private working files after an install run. */
     fun clearPrivateCache() {
         invalidatePublicApkCandidates()
-        root.listFiles()
-            .orEmpty()
-            .filterNot { it.canonicalFile == verifiedApkRoot.canonicalFile }
-            .forEach { file -> file.deleteRecursively() }
+        cleanupPrivateWorkingFiles(preserveResumableArchives = false)
+    }
+
+    /**
+     * Removes private APK material while retaining fixed-download resume
+     * pairs. This is safe to call when a preparation attempt is interrupted;
+     * public Download files are never removed.
+     */
+    fun clearPrivateApkCopies() {
+        invalidatePublicApkCandidates()
+        cleanupPrivateWorkingFiles(preserveResumableArchives = true)
     }
 
     fun writeResumeMetadata(manifest: ArtifactManifest, sourceKind: String) {
@@ -310,37 +331,68 @@ class ArtifactCache(
     private fun managedApkName(manifest: ArtifactManifest): String =
         "$MANAGED_APK_PREFIX${manifest.componentId}-${manifest.apkVersion.code}.apk"
 
-    private fun scanPublicApkCandidates(): List<File> = runCatching {
-        val verified = verifiedApkRoot.listFiles()
-            .orEmpty()
-            .filter { it.isFile && it.extension.equals("apk", ignoreCase = true) }
-        val public = if (mediaStoreEnabled) mediaStoreApkCandidates() else {
+    private fun scanPublicApkCandidates(
+        candidateRoot: File = root,
+        candidatePrefix: String = PUBLIC_CANDIDATE_PREFIX,
+    ): List<File> = runCatching {
+        val public = if (mediaStoreEnabled) {
+            mediaStoreApkCandidates(candidateRoot, candidatePrefix)
+        } else {
             publicDownloadRoot.listFiles()
                 .orEmpty()
                 .filter { it.isFile && it.extension.equals("apk", ignoreCase = true) }
         }
-        (verified + public)
+        public
             .distinctBy { runCatching { it.canonicalPath }.getOrDefault(it.absolutePath) }
             .sortedWith(compareBy<File> { it.name }.thenByDescending { it.lastModified() })
     }.getOrDefault(emptyList())
 
     @TargetApi(Build.VERSION_CODES.Q)
-    private fun mediaStoreApkCandidates(): List<File> = runCatching {
+    private fun mediaStoreApkCandidates(
+        candidateRoot: File,
+        candidatePrefix: String,
+    ): List<File> = runCatching {
         val resolver = contentResolver ?: return@runCatching emptyList()
+        if (!ensureDirectory(candidateRoot)) return@runCatching emptyList()
         val uris = mediaStoreApkUris()
         uris.mapNotNull { uri ->
             runCatching {
                 val name = displayName(uri)
                 if (!name.endsWith(".apk", ignoreCase = true)) return@runCatching null
-                val target = root.resolve(".public-candidate-${uri.lastPathSegment ?: name}.apk")
-                // Always refresh the private candidate. A user can replace a
-                // MediaStore item without changing its byte length, so a
-                // length-only cache check could reuse stale content.
+                // Provider-controlled URI segments must never become path
+                // components. A stable digest also lets a later refresh
+                // replace the same candidate atomically without trusting the
+                // provider's display name.
+                val target = candidateRoot.resolve("$candidatePrefix${candidateKey(uri)}.apk")
+                val temporary = target.resolveSibling(".${target.name}.part")
+                // Always refresh through a private atomic temporary file. A
+                // user can replace a MediaStore item without changing its byte
+                // length, and a killed copy must never look installable.
                 target.delete()
-                resolver.openInputStream(uri)?.use { input ->
-                    FileOutputStream(target).use { output -> input.copyTo(output) }
-                } ?: return@runCatching null
-                target.takeIf { it.isFile && it.length() > 0L }
+                temporary.delete()
+                try {
+                    resolver.openInputStream(uri)?.use { input ->
+                        FileOutputStream(temporary).use { output -> input.copyTo(output) }
+                    } ?: return@runCatching null
+                    if (!temporary.isFile || temporary.length() <= 0L) return@runCatching null
+                    try {
+                        Files.move(
+                            temporary.toPath(),
+                            target.toPath(),
+                            StandardCopyOption.ATOMIC_MOVE,
+                            StandardCopyOption.REPLACE_EXISTING,
+                        )
+                    } catch (_: AtomicMoveNotSupportedException) {
+                        Files.move(
+                            temporary.toPath(),
+                            target.toPath(),
+                            StandardCopyOption.REPLACE_EXISTING,
+                        )
+                    }
+                    target.takeIf { it.isFile && it.length() > 0L }
+                } finally {
+                    temporary.delete()
+                }
             }.getOrNull()
         }.sortedBy { it.name }
     }.getOrDefault(emptyList())
@@ -397,9 +449,120 @@ class ArtifactCache(
         directory.mkdirs() || directory.isDirectory
     }.getOrDefault(false)
 
+    private fun cleanupPrivateWorkingFiles(preserveResumableArchives: Boolean) = synchronized(candidateLock) {
+        candidateSnapshot = null
+        val sharedRoot = rootsShareDirectory()
+        val resumableKeys = if (preserveResumableArchives) {
+            root.listFiles()
+                .orEmpty()
+                .filter { it.isFile && RESUMABLE_PART_PATTERN.matches(it.name) }
+                .filter { it.resolveSibling("${it.name}.meta").isFile }
+                .mapTo(mutableSetOf()) { it.name.removeSuffix(".zip.part") }
+        } else {
+            emptySet()
+        }
+        root.listFiles().orEmpty().forEach { file ->
+            cleanupEntry(
+                file = file,
+                sharedRoot = sharedRoot,
+                preserveResumableArchives = preserveResumableArchives,
+                resumableKeys = resumableKeys,
+            )
+        }
+    }
+
+    private fun cleanupEntry(
+        file: File,
+        sharedRoot: Boolean,
+        preserveResumableArchives: Boolean,
+        resumableKeys: Set<String>,
+    ) {
+        // A custom public root may live below the private root. Never walk
+        // into that subtree while cleaning the installer's workspace.
+        if (!sharedRoot && isUnderPublicRoot(file)) return
+        if (file.isDirectory) {
+            if (file.name == LEGACY_VERIFIED_APK_DIRECTORY ||
+                file.name == INSTALLED_VERIFICATION_DIRECTORY
+            ) {
+                file.deleteRecursively()
+                return
+            }
+            file.listFiles().orEmpty().forEach { child ->
+                cleanupEntry(child, sharedRoot, preserveResumableArchives, resumableKeys)
+            }
+            if (file.listFiles().isNullOrEmpty() && (!sharedRoot || isKnownPrivateDirectory(file))) {
+                file.delete()
+            }
+            return
+        }
+
+        val isFixedPart = RESUMABLE_PART_PATTERN.matches(file.name)
+        val isFixedMetadata = RESUMABLE_META_PATTERN.matches(file.name)
+        val fixedKey = when {
+            isFixedPart -> file.name.removeSuffix(".zip.part")
+            isFixedMetadata -> file.name.removeSuffix(".zip.part.meta")
+            else -> null
+        }
+        if (preserveResumableArchives && fixedKey != null && fixedKey in resumableKeys) return
+
+        val delete = if (!sharedRoot) {
+            // The private root is application-owned in production.
+            true
+        } else {
+            isKnownPrivateFile(file.name)
+        }
+        if (delete) file.delete()
+    }
+
+    private fun isKnownPrivateDirectory(file: File): Boolean =
+        file.name == LEGACY_VERIFIED_APK_DIRECTORY ||
+            file.name == INSTALLED_VERIFICATION_DIRECTORY ||
+            file.name == EPHEMERAL_CANDIDATE_DIRECTORY ||
+            file.name.startsWith("prepare-", ignoreCase = true)
+
+    private fun isKnownPrivateFile(name: String): Boolean =
+        name.startsWith(".public-candidate-", ignoreCase = true) ||
+            name.startsWith(".icon-candidate-", ignoreCase = true) ||
+            name.startsWith("prepare-", ignoreCase = true) ||
+            name.endsWith(".apk.part", ignoreCase = true) ||
+            name.endsWith(".zip", ignoreCase = true) ||
+            name.endsWith(".zip.part", ignoreCase = true) ||
+            name.endsWith(".zip.part.meta", ignoreCase = true)
+
+    private fun rootsShareDirectory(): Boolean = runCatching {
+        root.canonicalFile == publicDownloadRoot.canonicalFile
+    }.getOrDefault(root.absoluteFile == publicDownloadRoot.absoluteFile)
+
+    private fun isUnderPublicRoot(file: File): Boolean = runCatching {
+        val rootPath = root.canonicalPath
+        val publicPath = publicDownloadRoot.canonicalPath
+        val filePath = file.canonicalPath
+        // Only a public directory nested inside the private root is excluded
+        // from private cleanup. If the private root itself is nested below the
+        // public directory, it is still an application-owned workspace and
+        // must be cleaned normally.
+        if (publicPath == rootPath || !publicPath.startsWith(rootPath + File.separator)) {
+            false
+        } else {
+            filePath == publicPath || filePath.startsWith(publicPath + File.separator)
+        }
+    }.getOrDefault(false)
+
+    private fun candidateKey(uri: android.net.Uri): String {
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(uri.toString().toByteArray(Charsets.UTF_8))
+        return digest.joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }.take(32)
+    }
+
     private companion object {
         const val MANAGED_APK_PREFIX = "03helper-"
         const val APK_MIME_TYPE = "application/vnd.android.package-archive"
-        const val VERIFIED_APK_DIRECTORY = "verified-apks"
+        const val PUBLIC_CANDIDATE_PREFIX = ".public-candidate-"
+        const val EPHEMERAL_CANDIDATE_DIRECTORY = ".icon-candidates"
+        const val EPHEMERAL_CANDIDATE_PREFIX = ".icon-candidate-"
+        const val LEGACY_VERIFIED_APK_DIRECTORY = "verified-apks"
+        const val INSTALLED_VERIFICATION_DIRECTORY = "installed-verification"
+        val RESUMABLE_PART_PATTERN = Regex("^[0-9a-f]{24}\\.zip\\.part$", RegexOption.IGNORE_CASE)
+        val RESUMABLE_META_PATTERN = Regex("^[0-9a-f]{24}\\.zip\\.part\\.meta$", RegexOption.IGNORE_CASE)
     }
 }

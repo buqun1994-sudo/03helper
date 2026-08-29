@@ -76,6 +76,8 @@ class UrlConnectionArtifactTransport(
                 contentType = connection.contentType,
                 body = stream,
                 closeAction = { connection.disconnect() },
+                contentRangeStartBytes = parseContentRangeStart(connection.getHeaderField("Content-Range")),
+                contentRangeTotalBytes = parseContentRangeTotal(connection.getHeaderField("Content-Range")),
             )
         }
         throw IllegalStateException("artifact_redirect_limit")
@@ -86,9 +88,29 @@ class UrlConnectionArtifactTransport(
         ?.lowercase()
         .orEmpty()
 
+    private fun parseContentRangeStart(value: String?): Long? = value
+        ?.trim()
+        ?.let(CONTENT_RANGE_PATTERN::matchEntire)
+        ?.groups
+        ?.get("start")
+        ?.value
+        ?.toLongOrNull()
+
+    private fun parseContentRangeTotal(value: String?): Long? = value
+        ?.trim()
+        ?.let(CONTENT_RANGE_PATTERN::matchEntire)
+        ?.groups
+        ?.get("total")
+        ?.value
+        ?.toLongOrNull()
+
     companion object {
         private const val MAX_REDIRECTS = 3
         private val REDIRECT_STATUSES = setOf(301, 302, 303, 307, 308)
+        private val CONTENT_RANGE_PATTERN = Regex(
+            "^bytes\\s+(?:\\*|(?<start>[0-9]+)-[0-9]+)/(?<total>[0-9]+|\\*)$",
+            RegexOption.IGNORE_CASE,
+        )
         private const val TAG = "03helper.Download"
     }
 }

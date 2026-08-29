@@ -6,12 +6,20 @@ import com.ninepointnine.helper.data.artifact.ArchiveIdentityVerifier
 import com.ninepointnine.helper.data.artifact.ArtifactArchiveExtractor
 import com.ninepointnine.helper.data.artifact.ArtifactIdentityResult
 import com.ninepointnine.helper.data.artifact.ArtifactIdentityVerifier
+import com.ninepointnine.helper.data.artifact.ApkMetadata
+import com.ninepointnine.helper.data.artifact.ApkMetadataReader
 import com.ninepointnine.helper.data.artifact.ExtractedApk
 import com.ninepointnine.helper.data.artifact.VerifiedApk
 import com.ninepointnine.helper.data.artifact.VerifiedArchive
+import com.ninepointnine.helper.data.artifact.sha256
+import com.ninepointnine.helper.data.catalog.ArtifactPreparationPlan
+import com.ninepointnine.helper.data.catalog.InstallerComponentSource
 import com.ninepointnine.helper.data.download.ArtifactCache
 import com.ninepointnine.helper.data.download.ArtifactDownloadResult
 import com.ninepointnine.helper.data.download.ArtifactDownloader
+import com.ninepointnine.helper.data.download.DynamicArchiveDownloadResult
+import com.ninepointnine.helper.data.web.LanzouFolderResolutionResult
+import com.ninepointnine.helper.data.web.LanzouFolderSourceAdapter
 import com.ninepointnine.helper.data.web.LanzouResolutionResult
 import com.ninepointnine.helper.data.web.LanzouWebSourceAdapter
 import com.ninepointnine.helper.domain.artifact.ArchiveDownloadEvidence
@@ -23,18 +31,29 @@ import com.ninepointnine.helper.domain.artifact.ArtifactManifest
 import com.ninepointnine.helper.domain.artifact.ArtifactManifestValidator
 import com.ninepointnine.helper.domain.artifact.ArtifactSource
 import com.ninepointnine.helper.domain.artifact.ArtifactSourceKind
+import com.ninepointnine.helper.domain.artifact.ArtifactVersion
+import com.ninepointnine.helper.domain.artifact.CompatibilityRange
+import com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
+import com.ninepointnine.helper.domain.artifact.InstallerPublisherTrustRegistry
+import com.ninepointnine.helper.domain.artifact.InstallerSelfIdentity
 import com.ninepointnine.helper.domain.artifact.ManifestValidation
 import com.ninepointnine.helper.domain.artifact.ReleaseSourcePolicy
-import com.ninepointnine.helper.domain.artifact.ResolvedDownloadRequest
 import com.ninepointnine.helper.domain.artifact.SourcePlan
 import com.ninepointnine.helper.domain.artifact.SourceSelectionEvidence
 import com.ninepointnine.helper.domain.device.ApkDeclarationMetadata
-import com.ninepointnine.helper.domain.session.ComponentCheck
+import com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
+import com.ninepointnine.helper.domain.device.ManagedComponent
 import com.ninepointnine.helper.domain.session.ComponentProgressStatus
-import com.ninepointnine.helper.domain.session.FailureCategory
 import com.ninepointnine.helper.domain.session.InstallPhase
 import com.ninepointnine.helper.domain.session.InstallationSessionEvent
+import com.ninepointnine.helper.application.session.InstallationSessionBoundary
 import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
+import java.security.MessageDigest
+import java.util.zip.ZipInputStream
 import kotlinx.coroutines.CancellationException
 
 data class PreparedArtifact(
@@ -65,399 +84,658 @@ class ArtifactPreparationCoordinator(
     private val archiveExtractor: ArtifactArchiveExtractor,
     private val identityVerifier: ArtifactIdentityVerifier,
     private val cache: ArtifactCache,
-    private val eventPort: ArtifactSessionEventPort,
+    private val eventPort: InstallationSessionBoundary,
+    private val folderSourceAdapter: LanzouFolderSourceAdapter,
+    private val metadataReader: ApkMetadataReader,
 ) {
-    suspend fun prepare(manifests: List<ArtifactManifest>): ArtifactPreparationResult {
-        if (manifests.isEmpty()) {
-            emitEmptyPreparationEvidence()
+    /**
+     * Production entry point. A plan is prepared exactly once: public Download
+     * is checked first, and only unresolved components open the configured
+     * Lanzou folder. The result crosses the session boundary as one atomic
+     * [InstallationSessionEvent.ArtifactBatchPrepared] event.
+     */
+    suspend fun prepare(plan: ArtifactPreparationPlan): ArtifactPreparationResult =
+        prepareInternal(plan)
+
+    private suspend fun prepareInternal(plan: ArtifactPreparationPlan): ArtifactPreparationResult {
+        val expectedIds = plan.batch.preparationComponentIds
+        if (plan.components.map { it.componentId }.toSet() != expectedIds) {
+            val failure = ArtifactFailure(
+                phase = ArtifactFailurePhase.CATALOG,
+                reasonCode = "artifact_preparation_plan_component_set_invalid",
+                retryable = false,
+            )
+            return ArtifactPreparationResult.Failed(failure)
+        }
+        if (!eventPort.isArtifactPreparationActive(plan.batch.batchId)) {
             return ArtifactPreparationResult.Prepared(emptyList())
         }
-        when (val validation = ArtifactManifestValidator.validateCatalog(manifests)) {
-            is ManifestValidation.Invalid -> {
-                val failure = ArtifactFailure(
-                    phase = ArtifactFailurePhase.CATALOG,
-                    reasonCode = validation.reasonCode,
-                    retryable = false,
-                )
-                eventPort.emit(
-                    InstallationSessionEvent.FatalError(
-                        category = FailureCategory.VERIFICATION,
-                        reasonCode = failure.reasonCode,
-                    ),
-                )
-                return ArtifactPreparationResult.Failed(failure)
-            }
 
-            ManifestValidation.Valid -> Unit
+        // Remove private APK material left by a previous process while keeping
+        // valid fixed-download resume pairs owned by the cache.
+        cache.clearPrivateApkCopies()
+        val localCandidates = if (cache.publicDirectoryAvailable) {
+            cache.refreshPublicApkCandidates()
+        } else {
+            emptyList()
         }
-
-        val prepared = mutableListOf<AttemptSuccess>()
+        val prepared = mutableListOf<PlanAttemptSuccess>()
         val failures = mutableListOf<ArtifactFailure>()
-        try {
-            manifests.forEach { manifest ->
-                try {
-                    val local = prepareFromExistingApk(manifest)
-                    if (local is AttemptResult.Success) {
-                        prepared += local.value
-                        return@forEach
+        val unresolved = mutableListOf<InstallerComponentSource>()
+
+        // One immutable candidate snapshot is shared by every component. A
+        // non-matching APK is a miss and never blocks the remote source.
+        plan.components.forEach { component ->
+            val candidate = localCandidates.asSequence()
+                .mapNotNull { file -> reusableLocalCandidate(plan.config, component, file, metadataReader) }
+                .sortedWith(
+                    compareByDescending<LocalCandidate> {
+                        it.identity.track == InstallerPublisherTrustRegistry.trackFor(
+                            plan.config.environment,
+                            plan.config.channel,
+                        )
                     }
-                    if (manifest.localOnly && local is AttemptResult.Failed) {
-                        failures += local.failure
-                        emitProgress(
-                            manifest.componentId,
-                            InstallPhase.CHECK,
-                            ComponentProgressStatus.FAILED,
-                            indeterminate = false,
-                        )
-                        eventPort.emit(
-                            InstallationSessionEvent.ArtifactUnavailable(
-                                componentId = manifest.componentId,
-                                reasonCode = local.failure.reasonCode,
-                                sourceKind = ArtifactSourceKind.LOCAL_DOWNLOAD,
-                                retryable = local.failure.retryable,
-                            ),
-                        )
-                        return@forEach
-                    }
-                    val plan = sourcePolicy.plan(manifest)
-                    if (plan is SourcePlan.Rejected) {
-                        val failure = ArtifactFailure(
-                            phase = ArtifactFailurePhase.SOURCE_RESOLUTION,
-                            componentId = manifest.componentId,
-                            reasonCode = plan.reasonCode,
-                            retryable = false,
-                        )
-                        failures += failure
-                        eventPort.emit(
-                            InstallationSessionEvent.ArtifactUnavailable(
-                                componentId = manifest.componentId,
-                                reasonCode = failure.reasonCode,
-                                sourceKind = failure.sourceKind,
-                                retryable = failure.retryable,
-                            ),
-                        )
-                        return@forEach
-                    }
-                    val sources = (plan as SourcePlan.Accepted).sources
-                    var success: AttemptSuccess? = null
-                    var lastFailure: ArtifactFailure? = null
-                    sources.forEachIndexed { index, source ->
-                        if (success != null) return@forEachIndexed
-                        when (val attempt = prepareFromSource(manifest, source)) {
-                            is AttemptResult.Success -> success = attempt.value
-                            is AttemptResult.Failed -> {
-                                lastFailure = attempt.failure
-                                emitProgress(
-                                    manifest.componentId,
-                                    when (attempt.failure.phase) {
-                                        ArtifactFailurePhase.DOWNLOAD,
-                                        ArtifactFailurePhase.SOURCE_RESOLUTION,
-                                        -> InstallPhase.FETCH
-                                        else -> InstallPhase.CHECK
-                                    },
-                                    ComponentProgressStatus.FAILED,
-                                    indeterminate = false,
-                                )
-                                val terminal = index == sources.lastIndex
-                                eventPort.emit(
-                                    InstallationSessionEvent.SourceFailed(
-                                        componentId = manifest.componentId,
-                                        sourceKind = source.kind,
-                                        reasonCode = attempt.failure.reasonCode,
-                                        retryable = attempt.failure.retryable,
-                                        terminal = terminal,
-                                    ),
-                                )
-                                if (!terminal) cache.clearArtifact(manifest)
-                            }
-                        }
-                    }
-                    if (success == null) {
-                        val failure = lastFailure ?: ArtifactFailure(
-                            phase = ArtifactFailurePhase.SOURCE_RESOLUTION,
-                            componentId = manifest.componentId,
-                            reasonCode = "all_sources_failed",
-                            retryable = true,
-                        )
-                        failures += failure
-                        eventPort.emit(
-                            InstallationSessionEvent.ArtifactUnavailable(
-                                componentId = manifest.componentId,
-                                reasonCode = failure.reasonCode,
-                                sourceKind = failure.sourceKind,
-                                retryable = failure.retryable,
-                            ),
-                        )
-                        return@forEach
-                    }
-                    prepared += success!!
-                } catch (cancelled: CancellationException) {
-                    throw cancelled
-                } catch (_: Exception) {
-                    val failure = ArtifactFailure(
-                        phase = ArtifactFailurePhase.CACHE,
-                        componentId = manifest.componentId,
-                        reasonCode = "artifact_app_processing_failed",
-                        retryable = true,
-                    )
-                    failures += failure
-                    runCatching { cache.clearArtifact(manifest) }
-                    emitProgress(
-                        manifest.componentId,
-                        InstallPhase.CHECK,
-                        ComponentProgressStatus.FAILED,
-                        indeterminate = false,
-                    )
-                    eventPort.emit(
-                        InstallationSessionEvent.ArtifactUnavailable(
-                            componentId = manifest.componentId,
-                            reasonCode = failure.reasonCode,
-                            sourceKind = ArtifactSourceKind.LOCAL_DOWNLOAD,
-                            retryable = failure.retryable,
-                        ),
-                    )
+                        .thenByDescending { it.metadata.version.code }
+                        .thenByDescending { it.file.lastModified() }
+                        .thenBy { it.file.name },
+                )
+                .firstOrNull()
+            if (candidate == null) {
+                unresolved += component
+                return@forEach
+            }
+            when (val result = prepareFromLocalCandidate(plan.config, component, candidate)) {
+                is PlanAttemptResult.Success -> prepared += result.value
+                is PlanAttemptResult.Failed -> {
+                    // A candidate can become unreadable between the inventory
+                    // scan and the identity read. Treat that as a remote miss
+                    // so the signed source can be resolved again.
+                    unresolved += component
                 }
             }
-        } catch (cancelled: CancellationException) {
-            eventPort.emit(
-                InstallationSessionEvent.RecoverableError(
-                    category = FailureCategory.DOWNLOAD,
-                    reasonCode = "artifact_preparation_cancelled",
-                ),
-            )
-            throw cancelled
         }
 
-        emitBatchEvidence(prepared)
+        val folderArtifacts: Map<String, com.ninepointnine.helper.data.web.LanzouFolderArtifact>
+        val folderFailures: Map<String, ArtifactFailure>
+        if (unresolved.isEmpty()) {
+            folderArtifacts = emptyMap()
+            folderFailures = emptyMap()
+        } else {
+            when (val resolved = folderSourceAdapter.resolve(
+                plan.config,
+                unresolved.mapTo(linkedSetOf()) { it.componentId },
+            )) {
+                is LanzouFolderResolutionResult.Success -> {
+                    folderArtifacts = resolved.artifacts.associateBy { it.component.componentId }
+                    folderFailures = resolved.appFailures.associate {
+                        it.componentId to ArtifactFailure(
+                            phase = ArtifactFailurePhase.SOURCE_RESOLUTION,
+                            componentId = it.componentId,
+                            sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                            reasonCode = it.reasonCode,
+                            retryable = it.retryable,
+                        )
+                    }
+                }
+
+                is LanzouFolderResolutionResult.Failure -> {
+                    folderArtifacts = emptyMap()
+                    folderFailures = unresolved.associate { component ->
+                        component.componentId to resolved.failure.copy(componentId = component.componentId)
+                    }
+                }
+
+            }
+        }
+
+        unresolved.forEach { component ->
+            if (!eventPort.isArtifactPreparationActive(plan.batch.batchId)) return@forEach
+            val artifact = folderArtifacts[component.componentId]
+            val attempt = if (artifact == null) {
+                PlanAttemptResult.Failed(
+                    folderFailures[component.componentId] ?: ArtifactFailure(
+                        phase = ArtifactFailurePhase.SOURCE_RESOLUTION,
+                        componentId = component.componentId,
+                        sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                        reasonCode = "lanzou_folder_missing_${component.componentId}",
+                        retryable = false,
+                    ),
+                )
+            } else {
+                prepareFromDynamicFolderArtifact(plan.config, artifact)
+            }
+            when (attempt) {
+                is PlanAttemptResult.Success -> prepared += attempt.value
+                is PlanAttemptResult.Failed -> failures += attempt.failure
+            }
+        }
+
+        val sourceSelections = prepared.map { item ->
+            SourceSelectionEvidence(item.manifest.componentId, item.sourceKind)
+        }
+        val archives = prepared.mapNotNull { item ->
+            item.verifiedArchive?.let { archive ->
+                ArchiveDownloadEvidence(
+                    componentId = item.manifest.componentId,
+                    sizeBytes = archive.sizeBytes,
+                    sha256 = archive.sha256,
+                    resumed = item.downloaded?.resumed ?: false,
+                )
+            }
+        }
+        val archiveVerifications = prepared.mapNotNull { item ->
+            item.verifiedArchive?.let { archive ->
+                ArchiveVerificationEvidence(
+                    componentId = item.manifest.componentId,
+                    sizeBytes = archive.sizeBytes,
+                    sha256 = archive.sha256,
+                )
+            }
+        }
+        val extractions = prepared.mapNotNull { item ->
+            item.extractedApk?.let { apk ->
+                ApkExtractionEvidence(
+                    componentId = item.manifest.componentId,
+                    entryName = apk.entryName,
+                    sizeBytes = apk.sizeBytes,
+                    sha256 = apk.sha256,
+                )
+            }
+        }
+        val verifications = prepared.map { it.verifiedApk.verification }
+        if (eventPort.isArtifactPreparationActive(plan.batch.batchId)) {
+            eventPort.emit(
+                InstallationSessionEvent.ArtifactBatchPrepared(
+                    batchId = plan.batch.batchId,
+                    manifests = prepared.map { it.manifest },
+                    sourceSelections = sourceSelections,
+                    archives = archives,
+                    archiveVerifications = archiveVerifications,
+                    extractions = extractions,
+                    verifications = verifications,
+                    failures = failures,
+                ),
+            )
+        }
         return ArtifactPreparationResult.Prepared(
-            prepared.map { success ->
+            artifacts = prepared.map { item ->
                 PreparedArtifact(
-                    manifest = success.manifest,
-                    sourceKind = success.sourceKind,
-                    finalApk = success.verifiedApk.file,
-                    declarations = success.verifiedApk.metadata?.declarations,
+                    manifest = item.manifest,
+                    sourceKind = item.sourceKind,
+                    finalApk = item.verifiedApk.file,
+                    declarations = item.verifiedApk.metadata?.declarations,
                 )
             },
             failures = failures,
         )
     }
 
-    private suspend fun prepareFromSource(
-        manifest: ArtifactManifest,
-        source: ArtifactSource,
-    ): AttemptResult {
-        emitProgress(manifest.componentId, InstallPhase.FETCH, ComponentProgressStatus.RUNNING)
-        val paths = cache.paths(manifest)
-        var cachedArchive: VerifiedArchive? = null
-        var download: ArtifactDownloadResult.Completed? = null
+    private fun reusableLocalCandidate(
+        config: com.ninepointnine.helper.data.catalog.InstallerDistributionConfig,
+        component: InstallerComponentSource,
+        file: File,
+        reader: ApkMetadataReader,
+    ): LocalCandidate? {
+        val metadata = runCatching { reader.read(file) }.getOrNull() ?: return null
+        if (component.packageName.isNotBlank() && metadata.packageName != component.packageName) return null
+        if (InstallerSelfIdentity.isSelfComponentId(component.componentId) &&
+            metadata.packageName != InstallerSelfIdentity.PACKAGE_NAME
+        ) return null
+        if (InstallerComponentTrustRegistry.get(component.componentId) != null &&
+            !InstallerComponentTrustRegistry.isAllowedPackageName(component.componentId, metadata.packageName)
+        ) return null
+        if (!InstallerPublisherTrustRegistry.isKnownProfile(component.trustProfileId)) return null
+        if (component.certificateSha256.isNotBlank() && metadata.certificateSha256s.none {
+                it.equals(component.certificateSha256, ignoreCase = true)
+            }
+        ) return null
+        val identity = InstallerPublisherTrustRegistry.matchComponentIdentity(
+            componentId = component.componentId,
+            profileId = component.trustProfileId,
+            environment = config.environment,
+            channel = config.channel,
+            packageName = metadata.packageName,
+            certificateDigests = metadata.certificateSha256s,
+        ) ?: return null
+        return LocalCandidate(file, metadata, identity)
+    }
 
-        // The selected-catalog pass may already have downloaded this exact ZIP
-        // to the same cache key. Verify that complete part before resolving a
-        // second short-lived URL; this keeps one user action to one download
-        // while retaining the normal archive and APK identity gates below.
-        val hasCompleteCachedArchive = runCatching {
-            cache.resumeMetadataMatches(manifest, source.kind.wireName) &&
-                paths.archivePart.length() == manifest.archiveSizeBytes
-        }.getOrDefault(false)
-        if (hasCompleteCachedArchive) {
-            cachedArchive = when (val result = archiveVerifier.verify(manifest, paths.archivePart)) {
-                is ArchiveIdentityResult.Verified -> result.archive
-                is ArchiveIdentityResult.Failed -> {
-                    cache.clearArtifact(manifest)
-                    null
-                }
-            }
-            if (cachedArchive != null) {
-                download = ArtifactDownloadResult.Completed(
-                    archivePart = paths.archivePart,
-                    sizeBytes = manifest.archiveSizeBytes,
-                    resumed = true,
+    private fun prepareFromLocalCandidate(
+        config: com.ninepointnine.helper.data.catalog.InstallerDistributionConfig,
+        component: InstallerComponentSource,
+        candidate: LocalCandidate,
+    ): PlanAttemptResult {
+        val manifest = ArtifactManifest(
+            schemaVersion = ArtifactManifestValidator.SUPPORTED_SCHEMA_VERSION,
+            componentId = component.componentId,
+            displayName = component.displayName,
+            description = component.description,
+            required = component.required,
+            version = candidate.metadata.version,
+            compatibility = CompatibilityRange(
+                minAndroidSdk = candidate.metadata.minAndroidSdk ?: component.minAndroidSdk,
+            ),
+            archiveFileName = component.archiveFileName,
+            archiveSizeBytes = 0L,
+            archiveSha256 = "",
+            apkEntryName = "local.apk",
+            apkSizeBytes = candidate.file.length(),
+            apkSha256 = runCatching { sha256(candidate.file) }.getOrElse {
+                return PlanAttemptResult.Failed(
+                    ArtifactFailure(
+                        phase = ArtifactFailurePhase.CACHE,
+                        componentId = component.componentId,
+                        sourceKind = ArtifactSourceKind.LOCAL_DOWNLOAD,
+                        reasonCode = "local_download_hash_failed",
+                        retryable = false,
+                    ),
                 )
-                emitProgress(
-                    componentId = manifest.componentId,
-                    phase = InstallPhase.FETCH,
-                    status = ComponentProgressStatus.RUNNING,
-                    bytesWritten = manifest.archiveSizeBytes,
-                    totalBytes = manifest.archiveSizeBytes,
-                    indeterminate = false,
-                )
-            }
+            },
+            packageName = candidate.metadata.packageName,
+            apkVersion = candidate.metadata.version,
+            certificateSha256 = candidate.identity.certificateSha256.lowercase(),
+            sources = listOf(
+                ArtifactSource(
+                    kind = ArtifactSourceKind.LOCAL_DOWNLOAD,
+                    url = ArtifactManifestValidator.LOCAL_DOWNLOAD_URL,
+                ),
+            ),
+            rollbackId = "${config.effectiveCatalogVersion()}-${component.componentId}",
+            deviceSetup = component.deviceSetup,
+            sortOrder = component.sortOrder,
+            localOnly = true,
+        )
+        when (val validation = ArtifactManifestValidator.validate(manifest)) {
+            is ManifestValidation.Invalid -> return PlanAttemptResult.Failed(
+                ArtifactFailure(
+                    phase = ArtifactFailurePhase.CATALOG,
+                    componentId = component.componentId,
+                    sourceKind = ArtifactSourceKind.LOCAL_DOWNLOAD,
+                    reasonCode = validation.reasonCode,
+                    retryable = false,
+                ),
+            )
+
+            ManifestValidation.Valid -> Unit
         }
+        return when (val result = identityVerifier.verifyExisting(
+            manifest,
+            ArtifactSourceKind.LOCAL_DOWNLOAD,
+            candidate.file,
+        )) {
+            is ArtifactIdentityResult.Verified -> PlanAttemptResult.Success(
+                PlanAttemptSuccess(
+                    manifest = manifest,
+                    sourceKind = ArtifactSourceKind.LOCAL_DOWNLOAD,
+                    downloaded = null,
+                    verifiedArchive = null,
+                    extractedApk = null,
+                    verifiedApk = result.apk,
+                ),
+            )
 
-        if (download == null) {
-            val request = when (source.kind) {
-                ArtifactSourceKind.LANZOU_SHARE -> when (val resolution = lanzouSourceAdapter.resolve(source)) {
-                    is LanzouResolutionResult.Success -> resolution.request
-                    is LanzouResolutionResult.Failure -> return AttemptResult.Failed(
-                        resolution.failure.copy(componentId = manifest.componentId),
-                    )
-                }
+            is ArtifactIdentityResult.Failed -> PlanAttemptResult.Failed(
+                result.failure.copy(sourceKind = ArtifactSourceKind.LOCAL_DOWNLOAD),
+            )
+        }
+    }
 
-                ArtifactSourceKind.R2,
-                ArtifactSourceKind.GITHUB_RELEASES,
-                -> ResolvedDownloadRequest(
-                    sourceKind = source.kind,
-                    url = source.url,
-                )
-
-                ArtifactSourceKind.LOCAL_DOWNLOAD ->
-                    return AttemptResult.Failed(
-                        ArtifactFailure(
-                            phase = ArtifactFailurePhase.CACHE,
-                            componentId = manifest.componentId,
-                            sourceKind = source.kind,
-                            reasonCode = "local_download_candidate_missing",
-                            retryable = false,
-                        ),
-                    )
-            }
-
-            download = when (val result = downloader.download(
-                manifest,
-                request,
+    private suspend fun prepareFromDynamicFolderArtifact(
+        config: com.ninepointnine.helper.data.catalog.InstallerDistributionConfig,
+        artifact: com.ninepointnine.helper.data.web.LanzouFolderArtifact,
+    ): PlanAttemptResult {
+        val component = artifact.component
+        val request = when (val result = lanzouSourceAdapter.resolve(artifact.source)) {
+            is LanzouResolutionResult.Success -> result.request
+            is LanzouResolutionResult.Failure -> return PlanAttemptResult.Failed(
+                result.failure.copy(componentId = component.componentId),
+            )
+        }
+        val working = cache.privateWorkingDirectory()
+        val archiveFile = working.resolve("prepare-${component.componentId}.zip")
+        val apkFile = working.resolve("prepare-${component.componentId}.apk")
+        var generatedManifest: ArtifactManifest? = null
+        var preparedApkRetained = false
+        archiveFile.delete()
+        apkFile.delete()
+        try {
+            emitProgress(component.componentId, InstallPhase.FETCH, ComponentProgressStatus.RUNNING)
+            val archive = when (val result = downloader.downloadDynamic(
+                request = request,
+                destination = archiveFile,
                 progressListener = { progress ->
                     emitProgress(
-                        componentId = manifest.componentId,
-                        phase = InstallPhase.FETCH,
-                        status = ComponentProgressStatus.RUNNING,
+                        component.componentId,
+                        InstallPhase.FETCH,
+                        ComponentProgressStatus.RUNNING,
                         bytesWritten = progress.bytesWritten,
-                        totalBytes = progress.expectedBytes,
-                        indeterminate = false,
+                        totalBytes = progress.expectedBytes ?: 0L,
+                        indeterminate = progress.expectedBytes == null,
                     )
                 },
             )) {
-                is ArtifactDownloadResult.Completed -> result
-                is ArtifactDownloadResult.Failed -> return AttemptResult.Failed(
-                    result.failure.copy(
-                        componentId = manifest.componentId,
-                        sourceKind = source.kind,
+                is DynamicArchiveDownloadResult.Completed -> result.archive
+                is DynamicArchiveDownloadResult.Failed -> return PlanAttemptResult.Failed(
+                    ArtifactFailure(
+                        phase = ArtifactFailurePhase.DOWNLOAD,
+                        componentId = component.componentId,
+                        sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                        reasonCode = result.reasonCode,
+                        retryable = result.retryable,
                     ),
                 )
             }
-        }
-        val completedDownload = checkNotNull(download)
-        emitProgress(
-            manifest.componentId,
-            InstallPhase.FETCH,
-            ComponentProgressStatus.COMPLETED,
-            bytesWritten = completedDownload.sizeBytes,
-            totalBytes = manifest.archiveSizeBytes,
-            indeterminate = false,
-        )
-        emitProgress(manifest.componentId, InstallPhase.CHECK, ComponentProgressStatus.RUNNING)
-        val verifiedArchive = cachedArchive ?: when (val result = archiveVerifier.verify(manifest, completedDownload.archivePart)) {
-            is ArchiveIdentityResult.Verified -> result.archive
-            is ArchiveIdentityResult.Failed -> {
-                cache.clearArtifact(manifest)
-                return AttemptResult.Failed(result.failure.copy(sourceKind = source.kind))
+            val inspection = inspectDynamicArchive(
+                archive.file,
+                apkFile,
+                component.apkEntryName.takeIf { it.isNotBlank() },
+            ) ?: return PlanAttemptResult.Failed(
+                ArtifactFailure(
+                    phase = ArtifactFailurePhase.EXTRACTION,
+                    componentId = component.componentId,
+                    sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                    reasonCode = "distribution_archive_invalid",
+                    retryable = false,
+                ),
+            )
+            val metadata = runCatching { metadataReader.read(inspection.apkFile) }.getOrNull()
+                ?: return PlanAttemptResult.Failed(
+                    ArtifactFailure(
+                        phase = ArtifactFailurePhase.APK_VERIFICATION,
+                        componentId = component.componentId,
+                        sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                        reasonCode = "distribution_apk_metadata_unreadable",
+                        retryable = false,
+                    ),
+                )
+            val identity = validateDynamicIdentity(config, component, metadata)
+                ?: return PlanAttemptResult.Failed(
+                    ArtifactFailure(
+                        phase = ArtifactFailurePhase.APK_VERIFICATION,
+                        componentId = component.componentId,
+                        sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                        reasonCode = dynamicIdentityFailureReason(config, component, metadata),
+                        retryable = false,
+                    ),
+                )
+            val manifest = ArtifactManifest(
+                schemaVersion = ArtifactManifestValidator.SUPPORTED_SCHEMA_VERSION,
+                componentId = component.componentId,
+                displayName = component.displayName,
+                description = component.description,
+                required = component.required,
+                version = metadata.version,
+                compatibility = CompatibilityRange(
+                    minAndroidSdk = metadata.minAndroidSdk ?: component.minAndroidSdk,
+                ),
+                archiveFileName = component.archiveFileName,
+                archiveSizeBytes = archive.sizeBytes,
+                archiveSha256 = archive.sha256,
+                apkEntryName = inspection.entryName,
+                apkSizeBytes = inspection.apkSizeBytes,
+                apkSha256 = inspection.apkSha256,
+                packageName = metadata.packageName,
+                apkVersion = metadata.version,
+                certificateSha256 = identity.certificateSha256.lowercase(),
+                sources = listOf(artifact.source),
+                rollbackId = "${config.effectiveCatalogVersion()}-${component.componentId}",
+                deviceSetup = component.deviceSetup,
+                sortOrder = component.sortOrder,
+            )
+            generatedManifest = manifest
+            when (val validation = ArtifactManifestValidator.validate(manifest)) {
+                is ManifestValidation.Invalid -> return PlanAttemptResult.Failed(
+                    ArtifactFailure(
+                        phase = ArtifactFailurePhase.CATALOG,
+                        componentId = component.componentId,
+                        sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                        reasonCode = validation.reasonCode,
+                        retryable = false,
+                    ),
+                )
+
+                ManifestValidation.Valid -> Unit
             }
-        }
-        val extractedApk = when (val result = archiveExtractor.extract(manifest, verifiedArchive, paths.apkPart)) {
-            is ArchiveExtractionResult.Extracted -> result.apk
-            is ArchiveExtractionResult.Failed -> {
-                cache.clearArtifact(manifest)
-                return AttemptResult.Failed(result.failure.copy(sourceKind = source.kind))
+            if (sourcePolicy.plan(manifest) is SourcePlan.Rejected) {
+                return PlanAttemptResult.Failed(
+                    ArtifactFailure(
+                        phase = ArtifactFailurePhase.SOURCE_RESOLUTION,
+                        componentId = component.componentId,
+                        sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                        reasonCode = "distribution_source_policy_rejected",
+                        retryable = false,
+                    ),
+                )
             }
-        }
-        val verifiedApk = when (
-            val result = identityVerifier.verify(
+            val paths = cache.paths(manifest)
+            paths.archivePart.parentFile?.mkdirs()
+            Files.move(
+                archive.file.toPath(),
+                paths.archivePart.toPath(),
+                StandardCopyOption.REPLACE_EXISTING,
+            )
+            val verifiedArchive = when (val result = archiveVerifier.verify(manifest, paths.archivePart)) {
+                is ArchiveIdentityResult.Verified -> result.archive
+                is ArchiveIdentityResult.Failed -> return PlanAttemptResult.Failed(
+                    result.failure.copy(sourceKind = ArtifactSourceKind.LANZOU_SHARE),
+                )
+            }
+            val extractedApk = when (val result = archiveExtractor.extract(manifest, verifiedArchive, paths.apkPart)) {
+                is ArchiveExtractionResult.Extracted -> result.apk
+                is ArchiveExtractionResult.Failed -> return PlanAttemptResult.Failed(
+                    result.failure.copy(sourceKind = ArtifactSourceKind.LANZOU_SHARE),
+                )
+            }
+            val verifiedApk = when (val result = identityVerifier.verify(
                 manifest = manifest,
-                sourceKind = source.kind,
+                sourceKind = ArtifactSourceKind.LANZOU_SHARE,
                 verifiedArchive = verifiedArchive,
                 extractedApk = extractedApk,
                 finalApk = paths.apk,
-            )
-        ) {
-            is ArtifactIdentityResult.Verified -> result.apk
-            is ArtifactIdentityResult.Failed -> {
-                cache.clearArtifact(manifest)
-                return AttemptResult.Failed(result.failure.copy(sourceKind = source.kind))
+            )) {
+                is ArtifactIdentityResult.Verified -> result.apk
+                is ArtifactIdentityResult.Failed -> return PlanAttemptResult.Failed(
+                    result.failure.copy(sourceKind = ArtifactSourceKind.LANZOU_SHARE),
+                )
             }
-        }
-        if (!manifest.localOnly && !cache.publishApk(manifest, verifiedApk.file)) {
-            cache.clearArtifact(manifest)
-            return AttemptResult.Failed(
+            if (!cache.publishApk(manifest, verifiedApk.file)) {
+                return PlanAttemptResult.Failed(
+                    ArtifactFailure(
+                        phase = ArtifactFailurePhase.CACHE,
+                        componentId = component.componentId,
+                        sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                        reasonCode = "public_download_publish_failed",
+                        retryable = true,
+                    ),
+                )
+            }
+            cache.clearArchive(manifest)
+            emitProgress(
+                component.componentId,
+                InstallPhase.CHECK,
+                ComponentProgressStatus.COMPLETED,
+                bytesWritten = manifest.apkSizeBytes,
+                totalBytes = manifest.apkSizeBytes,
+                indeterminate = false,
+            )
+            // On MediaStore-backed devices [paths.apk] is the private file
+            // that the ADB executor consumes. Keep it until the device batch
+            // finishes; the production executor owns the final cleanup.
+            preparedApkRetained = true
+            return PlanAttemptResult.Success(
+                PlanAttemptSuccess(
+                    manifest = manifest,
+                    sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                    downloaded = ArtifactDownloadResult.Completed(
+                        archivePart = paths.archivePart,
+                        sizeBytes = verifiedArchive.sizeBytes,
+                        resumed = false,
+                    ),
+                    verifiedArchive = verifiedArchive,
+                    extractedApk = extractedApk,
+                    verifiedApk = verifiedApk,
+                ),
+            )
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Exception) {
+            return PlanAttemptResult.Failed(
                 ArtifactFailure(
                     phase = ArtifactFailurePhase.CACHE,
-                    componentId = manifest.componentId,
-                    sourceKind = source.kind,
-                    reasonCode = "public_download_publish_failed",
+                    componentId = component.componentId,
+                    sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                    reasonCode = "artifact_app_processing_failed",
                     retryable = true,
                 ),
             )
+        } finally {
+            archiveFile.delete()
+            apkFile.delete()
+            generatedManifest?.let { manifest ->
+                // Dynamic downloads are never resumable. Their manifest-keyed
+                // private files must not survive a failed or cancelled try.
+                cache.clearArchive(manifest)
+                if (!preparedApkRetained) cache.clearApk(manifest)
+            }
         }
-        cache.retainVerifiedApk(manifest, verifiedApk.file)
-        cache.clearArchive(manifest)
-        emitProgress(
-            manifest.componentId,
-            InstallPhase.CHECK,
-            ComponentProgressStatus.COMPLETED,
-            bytesWritten = manifest.archiveSizeBytes,
-            totalBytes = manifest.archiveSizeBytes,
-            indeterminate = false,
-        )
-        return AttemptResult.Success(
-            AttemptSuccess(
-                manifest = manifest,
-                sourceKind = source.kind,
-                downloaded = download,
-                verifiedArchive = verifiedArchive,
-                extractedApk = extractedApk,
-                verifiedApk = verifiedApk,
-            ),
+    }
+
+    private fun validateDynamicIdentity(
+        config: com.ninepointnine.helper.data.catalog.InstallerDistributionConfig,
+        component: InstallerComponentSource,
+        metadata: ApkMetadata,
+    ): com.ninepointnine.helper.domain.artifact.TrustedArtifactIdentity? {
+        if (InstallerSelfIdentity.isSelfComponentId(component.componentId) &&
+            metadata.packageName != InstallerSelfIdentity.PACKAGE_NAME
+        ) return null
+        if (!InstallerPublisherTrustRegistry.isKnownProfile(component.trustProfileId)) return null
+        if (InstallerComponentTrustRegistry.get(component.componentId) != null &&
+            !InstallerComponentTrustRegistry.isAllowedPackageName(component.componentId, metadata.packageName)
+        ) return null
+        if (!AuthorizationPlanFactory.validateComponent(
+                ManagedComponent(
+                    componentId = component.componentId,
+                    packageName = metadata.packageName,
+                    setup = component.deviceSetup,
+                    order = component.sortOrder,
+                ),
+            )
+        ) return null
+        return InstallerPublisherTrustRegistry.matchComponentIdentity(
+            componentId = component.componentId,
+            profileId = component.trustProfileId,
+            environment = config.environment,
+            channel = config.channel,
+            packageName = metadata.packageName,
+            certificateDigests = metadata.certificateSha256s,
         )
     }
 
-    private fun prepareFromExistingApk(manifest: ArtifactManifest): AttemptResult {
-        val sourceKind = if (manifest.localOnly) {
-            ArtifactSourceKind.LOCAL_DOWNLOAD
-        } else {
-            manifest.sources.firstOrNull()?.kind ?: ArtifactSourceKind.LOCAL_DOWNLOAD
-        }
-        val candidates = buildList {
-            cache.verifiedApkFor(manifest)?.let(::add)
-            if (cache.publicDirectoryAvailable) {
-                cache.withPublicApkCandidates { addAll(it) }
-            }
-        }.distinctBy { runCatching { it.canonicalPath }.getOrDefault(it.absolutePath) }
-        candidates.forEach { candidate ->
-            when (val result = identityVerifier.verifyExisting(manifest, sourceKind, candidate)) {
-                is ArtifactIdentityResult.Verified -> {
-                    // A previously staged ZIP is no longer needed once the
-                    // exact APK identity has passed verification.
-                    cache.retainVerifiedApk(manifest, result.apk.file)
-                    cache.clearArchive(manifest)
-                    emitProgress(manifest.componentId, InstallPhase.FETCH, ComponentProgressStatus.COMPLETED, 1L, 1L, false)
-                    emitProgress(manifest.componentId, InstallPhase.CHECK, ComponentProgressStatus.COMPLETED, 1L, 1L, false)
-                    return AttemptResult.Success(
-                        AttemptSuccess(
-                            manifest = manifest,
-                            sourceKind = sourceKind,
-                            downloaded = null,
-                            verifiedArchive = null,
-                            extractedApk = null,
-                            verifiedApk = result.apk,
-                        ),
-                    )
+    private fun dynamicIdentityFailureReason(
+        config: com.ninepointnine.helper.data.catalog.InstallerDistributionConfig,
+        component: InstallerComponentSource,
+        metadata: ApkMetadata,
+    ): String = when {
+        InstallerSelfIdentity.isSelfComponentId(component.componentId) &&
+            metadata.packageName != InstallerSelfIdentity.PACKAGE_NAME -> "distribution_self_apk_package_mismatch"
+        !InstallerPublisherTrustRegistry.isKnownProfile(component.trustProfileId) -> "distribution_trust_profile_invalid"
+        InstallerComponentTrustRegistry.get(component.componentId) != null &&
+            !InstallerComponentTrustRegistry.isAllowedPackageName(component.componentId, metadata.packageName) ->
+            "distribution_apk_package_mismatch"
+        !AuthorizationPlanFactory.validateComponent(
+            ManagedComponent(
+                componentId = component.componentId,
+                packageName = metadata.packageName,
+                setup = component.deviceSetup,
+                order = component.sortOrder,
+            ),
+        ) -> "distribution_device_setup_invalid"
+        else -> "distribution_apk_certificate_mismatch"
+    }
+
+    private fun inspectDynamicArchive(
+        archive: File,
+        apkFile: File,
+        expectedEntryName: String?,
+    ): DynamicArchiveInspection? {
+        if (!archive.isFile || archive.length() <= 0L) return null
+        apkFile.delete()
+        var entryName: String? = null
+        var entryCount = 0
+        var written = 0L
+        val digest = MessageDigest.getInstance("SHA-256")
+        return try {
+            ZipInputStream(FileInputStream(archive)).use { zip ->
+                while (true) {
+                    val entry = zip.nextEntry ?: break
+                    entryCount += 1
+                    if (
+                        entryCount > 1 || entry.isDirectory || !isSafeApkEntry(entry.name) ||
+                        (expectedEntryName != null && entry.name != expectedEntryName)
+                    ) return null
+                    entryName = entry.name
+                    FileOutputStream(apkFile).use { output ->
+                        val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                        while (true) {
+                            val count = zip.read(buffer)
+                            if (count < 0) break
+                            if (count == 0) return null
+                            written += count
+                            if (written > ArtifactManifestValidator.MAX_APK_SIZE_BYTES) return null
+                            digest.update(buffer, 0, count)
+                            output.write(buffer, 0, count)
+                        }
+                    }
+                    zip.closeEntry()
                 }
-
-                is ArtifactIdentityResult.Failed -> Unit
             }
+            val name = entryName ?: return null
+            if (entryCount != 1 || written <= 0L || !apkFile.isFile || apkFile.length() != written) return null
+            DynamicArchiveInspection(
+                entryName = name,
+                apkFile = apkFile,
+                apkSizeBytes = written,
+                apkSha256 = digest.digest().joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) },
+            )
+        } catch (_: Exception) {
+            null
         }
-        return AttemptResult.Failed(
-            ArtifactFailure(
-                phase = ArtifactFailurePhase.CACHE,
-                componentId = manifest.componentId,
-                sourceKind = sourceKind,
-                reasonCode = if (cache.publicDirectoryAvailable) {
-                    "local_download_candidate_missing"
-                } else {
-                    "verified_apk_cache_missing"
-                },
-                retryable = !cache.publicDirectoryAvailable,
-            ),
-        )
     }
+
+    private fun isSafeApkEntry(value: String): Boolean =
+        value.isNotBlank() &&
+            value.endsWith(".apk", ignoreCase = true) &&
+            !value.startsWith('/') && !value.startsWith('\\') &&
+            !value.contains('/') && !value.contains('\\') &&
+            !value.contains('\u0000') && !value.contains(':')
+
+    private data class LocalCandidate(
+        val file: File,
+        val metadata: ApkMetadata,
+        val identity: com.ninepointnine.helper.domain.artifact.TrustedArtifactIdentity,
+    )
+
+    private data class DynamicArchiveInspection(
+        val entryName: String,
+        val apkFile: File,
+        val apkSizeBytes: Long,
+        val apkSha256: String,
+    )
+
+    private data class PlanAttemptSuccess(
+        val manifest: ArtifactManifest,
+        val sourceKind: ArtifactSourceKind,
+        val downloaded: ArtifactDownloadResult.Completed?,
+        val verifiedArchive: VerifiedArchive?,
+        val extractedApk: ExtractedApk?,
+        val verifiedApk: VerifiedApk,
+    )
+
+    private sealed interface PlanAttemptResult {
+        data class Success(val value: PlanAttemptSuccess) : PlanAttemptResult
+        data class Failed(val failure: ArtifactFailure) : PlanAttemptResult
+    }
+
 
     private fun emitProgress(
         componentId: String,
@@ -477,149 +755,6 @@ class ArtifactPreparationCoordinator(
                 indeterminate = indeterminate,
             ),
         )
-    }
-
-    private fun emitBatchEvidence(prepared: List<AttemptSuccess>) {
-        val selections = prepared.map { SourceSelectionEvidence(it.manifest.componentId, it.sourceKind) }
-        val downloads = prepared.mapNotNull { item ->
-            when {
-                item.verifiedArchive != null -> ArchiveDownloadEvidence(
-                    componentId = item.manifest.componentId,
-                    sizeBytes = item.verifiedArchive.sizeBytes,
-                    sha256 = item.verifiedArchive.sha256,
-                    resumed = item.downloaded?.resumed ?: true,
-                )
-
-                // A previously published APK can satisfy a remote manifest
-                // without a second ZIP download. Preserve the manifest's
-                // archive identity in the session proof so strict replay
-                // validation distinguishes reuse from missing evidence.
-                !item.manifest.localOnly -> ArchiveDownloadEvidence(
-                    componentId = item.manifest.componentId,
-                    sizeBytes = item.manifest.archiveSizeBytes,
-                    sha256 = item.manifest.archiveSha256,
-                    resumed = true,
-                )
-
-                else -> null
-            }
-        }
-        val archiveVerifications = prepared.mapNotNull { item ->
-            when {
-                item.verifiedArchive != null -> ArchiveVerificationEvidence(
-                    componentId = item.manifest.componentId,
-                    sizeBytes = item.verifiedArchive.sizeBytes,
-                    sha256 = item.verifiedArchive.sha256,
-                )
-
-                !item.manifest.localOnly -> ArchiveVerificationEvidence(
-                    componentId = item.manifest.componentId,
-                    sizeBytes = item.manifest.archiveSizeBytes,
-                    sha256 = item.manifest.archiveSha256,
-                )
-
-                else -> null
-            }
-        }
-        val extractions = prepared.mapNotNull { item ->
-            when {
-                item.extractedApk != null -> ApkExtractionEvidence(
-                    componentId = item.manifest.componentId,
-                    entryName = item.extractedApk.entryName,
-                    sizeBytes = item.extractedApk.sizeBytes,
-                    sha256 = item.extractedApk.sha256,
-                )
-
-                !item.manifest.localOnly -> ApkExtractionEvidence(
-                    componentId = item.manifest.componentId,
-                    entryName = item.manifest.apkEntryName,
-                    sizeBytes = item.manifest.apkSizeBytes,
-                    sha256 = item.manifest.apkSha256,
-                )
-
-                else -> null
-            }
-        }
-        eventPort.emit(
-            InstallationSessionEvent.SourceResolved(
-                sourceId = "fixed-release-source-policy",
-                selections = selections,
-            ),
-        )
-        eventPort.emit(
-            InstallationSessionEvent.ArchiveDownloaded(
-                sizeBytes = downloads.sumOf { it.sizeBytes },
-                sha256 = if (downloads.isEmpty()) "local" else "batch",
-                archives = downloads,
-            ),
-        )
-        eventPort.emit(
-            InstallationSessionEvent.ArchiveVerified(
-                verified = true,
-                verifications = archiveVerifications,
-            ),
-        )
-        eventPort.emit(
-            InstallationSessionEvent.ApkExtracted(
-                entryName = "batch.apk",
-                sizeBytes = extractions.sumOf { it.sizeBytes },
-                sha256 = "batch",
-                extractions = extractions,
-            ),
-        )
-        eventPort.emit(
-            InstallationSessionEvent.ArtifactsVerified(
-                checks = prepared.map { ComponentCheck(it.manifest.componentId, passed = true) },
-                verifications = prepared.map { it.verifiedApk.verification },
-                archiveDeleted = true,
-            ),
-        )
-    }
-
-    private fun emitEmptyPreparationEvidence() {
-        eventPort.emit(
-            InstallationSessionEvent.SourceResolved(
-                sourceId = "fixed-release-source-policy",
-                selections = emptyList(),
-            ),
-        )
-        eventPort.emit(
-            InstallationSessionEvent.ArchiveDownloaded(
-                sizeBytes = 1L,
-                sha256 = "empty",
-                archives = emptyList(),
-            ),
-        )
-        eventPort.emit(InstallationSessionEvent.ArchiveVerified(verified = true, verifications = emptyList()))
-        eventPort.emit(
-            InstallationSessionEvent.ApkExtracted(
-                entryName = "batch.apk",
-                sizeBytes = 1L,
-                sha256 = "empty",
-                extractions = emptyList(),
-            ),
-        )
-        eventPort.emit(
-            InstallationSessionEvent.ArtifactsVerified(
-                checks = emptyList(),
-                verifications = emptyList(),
-                archiveDeleted = true,
-            ),
-        )
-    }
-
-    private data class AttemptSuccess(
-        val manifest: ArtifactManifest,
-        val sourceKind: ArtifactSourceKind,
-        val downloaded: ArtifactDownloadResult.Completed?,
-        val verifiedArchive: VerifiedArchive?,
-        val extractedApk: ExtractedApk?,
-        val verifiedApk: VerifiedApk,
-    )
-
-    private sealed interface AttemptResult {
-        data class Success(val value: AttemptSuccess) : AttemptResult
-        data class Failed(val failure: ArtifactFailure) : AttemptResult
     }
 
 }

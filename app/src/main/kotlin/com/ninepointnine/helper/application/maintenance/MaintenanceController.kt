@@ -36,7 +36,6 @@ import kotlinx.coroutines.CancellationException
 class MaintenanceController(
     private val artifactCache: ArtifactCache,
     private val diagnosticStore: MaintenanceDiagnosticStore,
-    private val loadCatalog: (suspend () -> CatalogLoadResult)? = null,
     private val loadDistributionConfig: (suspend () -> DistributionConfigLoadResult)? = null,
     private val selfVersion: ArtifactVersion = ArtifactVersion("0.1.0", 1L),
     /** Lightweight signed config + folder listing used by the maintenance install page. */
@@ -223,21 +222,15 @@ class MaintenanceController(
         connection: com.ninepointnine.helper.domain.device.DeviceConnectionLease?,
         eventPort: InstallationSessionEventPort,
     ) {
-        val loader: (suspend () -> CatalogLoadResult)? = loadDistributionConfig?.let { configLoader ->
-            suspend {
-                when (val result = configLoader()) {
-                    is DistributionConfigLoadResult.Failure ->
-                        CatalogLoadResult.Failure(result.reasonCode, result.retryable)
-
-                    is DistributionConfigLoadResult.Success -> result.config.toControlPlaneCatalog()
-                }
-            }
-        } ?: loadCatalog
-        val effectiveLoader = loader ?: run {
+        val configLoader = loadDistributionConfig ?: run {
             fail(actionId, "catalog_android_profile_missing", retryable = false, eventPort)
             return
         }
-        when (val result = effectiveLoader()) {
+        val result = when (val config = configLoader()) {
+            is DistributionConfigLoadResult.Failure -> CatalogLoadResult.Failure(config.reasonCode, config.retryable)
+            is DistributionConfigLoadResult.Success -> config.config.toControlPlaneCatalog()
+        }
+        when (result) {
             is CatalogLoadResult.Failure -> fail(actionId, result.reasonCode, result.retryable, eventPort)
             is CatalogLoadResult.Success -> {
                 val updateStatuses = buildUpdateStatuses(
@@ -258,7 +251,7 @@ class MaintenanceController(
                         appFailures = result.catalog.appFailures.associate { it.componentId to it.reasonCode },
                         appFailureRetryable = result.catalog.appFailures.associate { it.componentId to it.retryable },
                         updateStatuses = updateStatuses,
-                        controlPlaneOnly = loadDistributionConfig != null,
+                        controlPlaneOnly = true,
                     ),
                 )
                 val currentById = snapshot.artifactManifests.associateBy { it.componentId }
@@ -294,21 +287,9 @@ class MaintenanceController(
                         current.errorReason != next.errorReason ||
                         current.iconAsset != next.iconAsset
                 }
-                val manifestChanged = loadDistributionConfig == null &&
-                    (currentById.keys != nextById.keys || nextById.any { (componentId, manifest) ->
-                    currentById[componentId]?.let { current ->
-                        current.version != manifest.version ||
-                        current.archiveSizeBytes != manifest.archiveSizeBytes ||
-                            !current.archiveSha256.equals(manifest.archiveSha256, ignoreCase = true) ||
-                            current.apkSizeBytes != manifest.apkSizeBytes ||
-                            !current.apkSha256.equals(manifest.apkSha256, ignoreCase = true) ||
-                            !current.certificateSha256.equals(manifest.certificateSha256, ignoreCase = true) ||
-                            current.packageName != manifest.packageName
-                    } ?: true
-                })
                 complete(
                     actionId,
-                    if (catalogChanged || descriptorChanged || manifestChanged ||
+                    if (catalogChanged || descriptorChanged ||
                         updateStatuses.any { it.state == MaintenanceUpdateState.UPDATE_AVAILABLE }
                     ) {
                         "updates_available"
