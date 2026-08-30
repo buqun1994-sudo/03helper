@@ -9,6 +9,7 @@
 2. 当前 `03车机助手-v1.0.1.apk` 的包名为 `com.ninepointnine.helper`，版本 `1.0.1 (2)`，大小 `14,243,679` 字节，SHA-256 为 `352dc2c1d49d776f70fa813aa4deee73bcd9486dc4baf7d0159b559afa3939de`；production 证书 SHA-256 为 `31ca80dd21a5208eaabd5f3e1440a3db2f7dc79122e03eaa6ba01730fb31f18b`，单 signer、APK Signature Scheme v2 有效。
 3. 由当前 APK 重新生成单文件 ZIP（无 Manifest，内部只有同名 APK）：`03车机助手-v1.0.1.zip` 大小 `13,438,964` 字节，SHA-256 为 `dafb021a32321123a2641a7f7f5a0f6a41e8be1bf23da7edf2a5acbce2ad7144`；Java `ZipFile` 已确认条目名为 UTF-8 `03车机助手-v1.0.1.apk`。
 4. Cloud 已按中文 ZIP 文件名生成 production `catalogRevision=6`、`catalogVersion=android-release-2026-08-30-006` 的本地候选，payload SHA-256 为 `551941554fa8e5c7d15e2d5ea42f3ab38320196a58ce2465aab0a61ce1a38311`；候选仍为 `local-only` / `publishable=false`。生产接口当前返回 HTTP 404，未上传、未 PUT、未部署、未上线。
+5. 提交后复核：JDK 17 下 `:app:testDebugUnitTest --no-daemon --rerun-tasks` 为 `300/300`，带显式 production signing properties 的 `:app:testReleaseUnitTest --no-daemon --rerun-tasks` 为 `303/303`，均无失败。
 
 # 03helper 进度
 
