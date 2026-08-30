@@ -11,6 +11,12 @@
 4. Cloud 已按中文 ZIP 文件名生成 production `catalogRevision=6`、`catalogVersion=android-release-2026-08-30-006` 的本地候选，payload SHA-256 为 `551941554fa8e5c7d15e2d5ea42f3ab38320196a58ce2465aab0a61ce1a38311`；候选仍为 `local-only` / `publishable=false`。生产接口当前返回 HTTP 404，未上传、未 PUT、未部署、未上线。
 5. 提交后复核：JDK 17 下 `:app:testDebugUnitTest --no-daemon --rerun-tasks` 为 `300/300`，带显式 production signing properties 的 `:app:testReleaseUnitTest --no-daemon --rerun-tasks` 为 `303/303`，均无失败。
 
+## 2026-08-30 新测试手机 Debug 覆盖安装与启动验证
+
+1. 新测试手机已通过用户提供的无线调试配对流程上线；使用显式 mDNS ADB 序列号完成 `app-debug.apk` 保留数据覆盖安装，系统返回 `Success`。设备为 Android 11 / RMX1901，助手包身份为 `com.ninepointnine.helper`、版本 `0.1.0 (1)`。
+2. 启动 `com.ninepointnine.helper/.MainActivity` 返回 `Status: ok`，`dumpsys activity` 回读为 resumed，进程保持运行；截图核对确认蓝底白字维护首页、中文标题和操作按钮均正常显示。
+3. 本次未清除数据、未卸载、未降级、未重启，也未对车机执行写入；因保留数据启动后显示既有维护会话状态，未将其误判为新安装流程结果。
+
 # 03helper 进度
 
 ## 2026-08-30 production distribution-config 信任根与 Release 产物（完成，未上线；助手包已由上方重建记录替换）
