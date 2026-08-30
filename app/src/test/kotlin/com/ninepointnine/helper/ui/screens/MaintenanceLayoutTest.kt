@@ -13,11 +13,15 @@ import org.junit.Test
 
 class MaintenanceLayoutTest {
     @Test
-    fun `maintenance grid changes exactly at 360 dp`() {
+    fun `maintenance grid keeps compact phones single column`() {
         assertEquals(1, maintenanceColumnCount(320f))
-        assertEquals(1, maintenanceColumnCount(359.99f))
-        assertEquals(2, maintenanceColumnCount(360f))
-        assertEquals(2, maintenanceColumnCount(430f))
+        assertEquals(1, maintenanceColumnCount(360f))
+        assertEquals(1, maintenanceColumnCount(390f))
+        assertEquals(1, maintenanceColumnCount(412f))
+        assertEquals(1, maintenanceColumnCount(430f))
+        assertEquals(1, maintenanceColumnCount(599.99f))
+        assertEquals(2, maintenanceColumnCount(600f))
+        assertEquals(2, maintenanceColumnCount(840f))
     }
 
     @Test

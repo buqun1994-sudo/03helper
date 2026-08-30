@@ -2119,6 +2119,21 @@ class InstallationSession(
         }
         val selectableIds = components.filterNot(::isMandatory).map { it.id }.toSet()
         val recommendedIds = components.filter { it.required && !isMandatory(it) }.map { it.id }.toSet()
+        // The first control-plane snapshot is the user's initial install
+        // choice: every non-desktop component starts checked. Once a catalog
+        // identity exists, retain explicit opt-outs across a refresh and only
+        // re-apply the protocol's required-as-recommendation entries.
+        // Metadata can survive a failed catalog attempt for rollback checks;
+        // CONTROL_PLANE_READY is the explicit boundary that a prior catalog
+        // was accepted for the current selection page. This keeps a retry's
+        // first successful load at the documented all-optional-default state.
+        val hasResolvedCatalog = current.components.isNotEmpty() &&
+            current.artifactCatalogStage == ArtifactCatalogStage.CONTROL_PLANE_READY
+        val selectedOptionalIds = if (hasResolvedCatalog) {
+            (current.selectedOptionalComponentIds intersect selectableIds) + recommendedIds
+        } else {
+            selectableIds
+        }
         publish(
             current.copy(
                 components = components,
@@ -2129,8 +2144,7 @@ class InstallationSession(
                 catalogRevision = event.catalogRevision.coerceAtLeast(current.catalogRevision),
                 catalogKeyId = event.keyId,
                 catalogSignatureAlgorithm = event.signatureAlgorithm,
-                selectedOptionalComponentIds =
-                    (current.selectedOptionalComponentIds intersect selectableIds) + recommendedIds,
+                selectedOptionalComponentIds = selectedOptionalIds,
                 currentComponentName = null,
                 progress = null,
                 failedComponentIds = emptySet(),

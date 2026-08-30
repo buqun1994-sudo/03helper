@@ -72,7 +72,7 @@ envelope 与解码后的 payload 都携带同一 `catalogVersion`、`catalogRevi
 }
 ```
 
-`appId` 是 Cloud 目录标识，不是 Android 包名。`archiveFileName` 必须是单一 ZIP 文件名，禁止目录、查询参数、片段和路径穿越。`displayName`、`description`、`versionCode`、`versionName`、`apkSizeBytes` 都是受签名保护的配置字段；客户端在连接后的轻量选择阶段不下载 ZIP，直接把 `versionName` 规范化为 `v1.2.3` 形式，并把 `apkSizeBytes` 规范化为紧凑单位（例如 `2.6M`）。`versionCode` 是正整数，`versionName` 为非空 Android 版本名，`apkSizeBytes` 为正的 APK 本体字节数。用户确认后，实际 APK 只需通过包名和受信发布者证书身份门禁，大小与 SHA-256 用于传输证据，不再与 Cloud 字段重复比较。`enabled=false` 的条目不显示、不下载、不安装。启用条目按 `sortOrder` 排序，平局按 `appId`。除 `desktop` 外，`installPolicy=required` 只表示首次安装建议，不代表整个目录必须包含该 APP；`desktop` 必须同时 `enabled=true` 且 `installPolicy=required`，它是首次安装唯一核心必装项。
+`appId` 是 Cloud 目录标识，不是 Android 包名。`archiveFileName` 必须是单一 ZIP 文件名，禁止目录、查询参数、片段和路径穿越。`displayName`、`description`、`versionCode`、`versionName`、`apkSizeBytes` 都是受签名保护的配置字段；客户端在连接后的轻量选择阶段不下载 ZIP，直接把 `versionName` 规范化为 `v1.2.3` 形式，并把 `apkSizeBytes` 规范化为紧凑单位（例如 `2.6M`）。`versionCode` 是正整数，`versionName` 为非空 Android 版本名，`apkSizeBytes` 为正的 APK 本体字节数。用户确认后，实际 APK 只需通过包名和受信发布者证书身份门禁，大小与 SHA-256 用于传输证据，不再与 Cloud 字段重复比较。`enabled=false` 的条目不显示、不下载、不安装。启用条目按 `sortOrder` 排序，平局按 `appId`；首次安装选择页默认选中所有非 `desktop` 的启用条目，用户可显式取消。除 `desktop` 外，`installPolicy=required` 只表示目录建议，不改变该 APP 的可选性；`desktop` 必须同时 `enabled=true` 且 `installPolicy=required`，它是首次安装唯一核心必装项。
 
 v4 的 `icon` 仍是受签名保护的兼容字段，不是包名、证书或许可证身份。启用 APP 必须携带 `assetId`、`assetVersion`、不可变摘要 URL、MIME、正方形尺寸、大小和 SHA-256；URL 摘要段必须与 `sha256` 完全一致，并且只允许受控 `download.9.9studio.fun` 的 PNG / WebP 对象。Logo 元数据与 `catalogRevision` 一起签名，图片二进制不放进 payload 或 Base64。当前 Android 客户端不请求该远程对象：初始化和无本地 APK 时使用应用内置的最新 Logo；发现并验签 APK 后，以 APK 内图标覆盖并按组件、版本和 APK 摘要持久化缓存。该字段保留用于配置兼容和发布校验，不得重新接回运行时远程 Logo 主链。
 

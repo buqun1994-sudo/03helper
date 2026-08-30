@@ -113,6 +113,23 @@ class InstallUiStateMapperTest {
     }
 
     @Test
+    fun `selection treats a non-desktop required recommendation as optional`() {
+        val state = InstallUiStateMapper.map(
+            selectionSnapshot(
+                listOf(
+                    component("desktop", required = true, size = "12 MB"),
+                    component("lyrics", required = true, size = "18 MB"),
+                ),
+            ),
+        ) as InstallUiState.Selection
+
+        assertTrue(state.components[0].selected)
+        assertTrue(state.components[0].isMandatory())
+        assertFalse(state.components[1].selected)
+        assertFalse(state.components[1].isMandatory())
+    }
+
+    @Test
     fun `installation state maps phase completion and bounded progress`() {
         val state = InstallUiStateMapper.map(
             InstallationSessionSnapshot(

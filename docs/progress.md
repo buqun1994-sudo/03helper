@@ -1,5 +1,22 @@
 # 03helper 进度
 
+## 2026-08-30 维护首页普通手机单列阈值收口（已安装，待主测）
+
+1. 维护首页列数阈值从 `360dp` 调整为 `600dp`：窗口可用宽度低于 `600dp` 时保持单列，达到 `600dp` 后使用两列；判断不绑定设备型号、屏幕比例或折叠状态，当前每组最多两个动作，因此不扩展三列。
+2. `MaintenanceLayoutTest` 的边界期望已同步覆盖 `360 / 390 / 412 / 430dp` 普通手机单列、`599.99dp` 边界单列及 `600 / 840dp` 宽屏两列；UI 施工文案和验证矩阵已同步新口径。按用户本轮要求未运行 JVM、instrumentation 或 UI 自动化测试。
+3. JDK 17 下执行 `:app:assembleDebug --no-daemon` 通过；最新 Debug APK 核对为 `com.ninepointnine.helper` / `0.1.0 (1)` / 单 signer / APK Signature Scheme v2 有效，SHA-256 为 `1f79f6ba69ad062cdb60590c25c330547a0c618db7534ea1dbbaee9f77428e7e`。
+4. 最新 Debug APK 已在显式新测试手机 `RMX1901`（Android 11、`360dp` 宽）保留数据覆盖安装成功；`.MainActivity` 冷启动返回 `Status: ok` 并保持前台。单列视觉结果留给用户本轮快速主测，未执行车机写入、清数据、卸载、降级或重启。
+5. 项目文档检查、Skills 检查和 `git diff --check` 通过；共享 03 APP 登记检查仍只因 Cloud 登记的 `03helper` 提交快照落后于当前仓库而失败，未修改共享登记库。本轮未提交、推送或发布。
+
+## 2026-08-30 初始化安装选择默认值收口（完成）
+
+1. `InstallationSession` 在当前会话首次接受 `DistributionConfigResolved` 时，将所有启用且非 `desktop` 的组件加入默认选择；后续接受同一选择页的清单刷新时保留用户已取消的组件，并继续把非 `desktop` 的 `required` 仅作为推荐，不把它升级为不可取消的必装项。只有 `CONTROL_PLANE_READY` 才被视为已有可复用清单，目录失败后的重试会回到“其它组件全部默认选中”的初始口径。
+2. 首次安装选择页现在只按 canonical `desktop` 组件 ID 锁定“03桌面”为必装；其它启用组件统一显示为可选并默认勾选，用户可取消。选择说明同步为“03桌面”为必装项，其他应用默认选中，可按需取消；安装结果和成功证据的无批次兜底也只把 `desktop` 作为 mandatory。
+3. Debug `selection` 场景接入真实 `DistributionConfigResolved` 事件；新增领域会话、选择页 UI mapper 和目录失败重试回归测试，覆盖首次全选、刷新保留显式取消、非桌面 `required` 可取消、桌面不可取消及当前批次集合。
+4. 使用 JDK 17 执行 `:app:testDebugUnitTest --no-daemon --rerun-tasks`，实际 `297` 项测试全部通过（0 failures / 0 errors / 0 skipped）；`:app:compileDebugAndroidTestKotlin`、`:app:lintDebug`、`:app:assembleDebug` 和 `:app:assembleDebugAndroidTest` 均通过。
+5. 最新 Debug 主包核对为 `com.ninepointnine.helper` / `0.1.0 (1)` / `.MainActivity`，主包 SHA-256 为 `342a30a3209930a39572c1ce8775bd8fb41b17a5ae613d9b6ac5e5d4205ac730`，APK Signature Scheme v2 校验通过。登记测试手机上的 `InstallAppActivitySmokeTest` 为 `2/2` 通过；运行级选择页核对显示桌面锁定且已勾选，其它组件默认已勾选，取消 03 歌词后摘要从 3 个应用更新为 2 个应用。
+6. 本轮未执行真实 Cloud 发布、ZIP 下载 / 解压或车机业务写入；这些链路仍保留为用户人工主测范围。未执行清数据、卸载、降级、重启、提交、推送或发布。
+
 ## 2026-08-29 APK 来源与 WebView 下载链路收口（完成）
 
 1. 已按本轮目标移除 `verified-apks` 长期私有 APK 缓存：手机公共 `Download` / Android Q+ `MediaStore.Downloads` 是唯一跨会话 APK 来源；公共候选未命中后才解析声明 ZIP、下载、校验、解压并发布到公共目录。车机已有同版本时跳过设备写入仍是独立的 `INSTALL_MISSING_ONLY` 策略，不改变手机来源主链。

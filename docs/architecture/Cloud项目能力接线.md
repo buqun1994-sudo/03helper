@@ -60,7 +60,7 @@ releaseVersion = 1.0.0 (versionCode 1)
 
 客户端从实际归档构造的 `ArtifactManifest` 仍包含 `archiveFormat`、`archiveSizeBytes`、`archiveSha256`、`apkEntryName`、`apkSizeBytes`、`apkSha256`、`packageName`、`apkVersion` 和 `certificateSha256`；这些字段不是 Cloud v3 payload 字段，而是本地校验结果。
 
-`apps[]` 的数量和条目由 Cloud 动态维护；`desktop` 必须启用，其余 APP 可选。配置不得携带任意 shell、脚本、第三方直链转换服务或任意包体 URL；`deviceSetup` 只能使用客户端预定义强类型动作。Cloud 只提供签名配置和受控文件夹发布能力；发现设备、ADB、安装、授权、解压和运行验证仍由 03helper 自己负责。
+`apps[]` 的数量和条目由 Cloud 动态维护；`desktop` 必须启用，其余 APP 可选，首次进入 03helper 选择页时默认全部选中，用户可取消。配置不得携带任意 shell、脚本、第三方直链转换服务或任意包体 URL；`deviceSetup` 只能使用客户端预定义强类型动作。Cloud 只提供签名配置和受控文件夹发布能力；发现设备、ADB、安装、授权、解压和运行验证仍由 03helper 自己负责。
 
 ### 3.3 Android ZIP 发布流程
 

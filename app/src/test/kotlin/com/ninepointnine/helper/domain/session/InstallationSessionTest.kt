@@ -362,6 +362,91 @@ class InstallationSessionTest {
     }
 
     @Test
+    fun `initial catalog selects every optional component and keeps explicit opt outs on refresh`() {
+        val cast = ComponentDescriptor(
+            id = "cast",
+            displayName = "Cast",
+            // A non-desktop `required` value is only a catalog recommendation;
+            // it must not make the row mandatory in the initial flow.
+            required = true,
+            versionLabel = "1.0",
+            sizeLabel = "7 MB",
+            compatibilityLabel = "optional",
+        )
+        val catalog = components + cast
+        val session = connectedSession(includeOptional = false, catalog = catalog)
+
+        fun resolvedCatalog(revision: Long) = InstallationSessionEvent.DistributionConfigResolved(
+            configVersion = "catalog-$revision",
+            keyId = "fixture-key",
+            signatureAlgorithm = "Ed25519",
+            components = catalog,
+            catalogRevision = revision,
+        )
+
+        session.dispatchEvent(resolvedCatalog(revision = 1L))
+        assertEquals(
+            setOf("lyrics", "file-manager", "cast"),
+            session.currentSnapshot().selectedOptionalComponentIds,
+        )
+
+        session.dispatch(
+            InstallationSessionCommand.ToggleOptionalComponent("lyrics", selected = false),
+        )
+        session.dispatchEvent(resolvedCatalog(revision = 2L))
+        assertEquals(
+            setOf("file-manager", "cast"),
+            session.currentSnapshot().selectedOptionalComponentIds,
+        )
+
+        session.dispatch(
+            InstallationSessionCommand.ToggleOptionalComponent("cast", selected = false),
+        )
+
+        // The desktop remains part of the frozen batch even though it is not
+        // represented in selectedOptionalComponentIds.
+        session.dispatch(
+            InstallationSessionCommand.ToggleOptionalComponent("desktop", selected = false),
+        )
+        session.dispatch(InstallationSessionCommand.StartInstallation)
+        assertEquals(
+            setOf("desktop", "file-manager"),
+            session.currentSnapshot().installationBatch?.selectedComponentIds,
+        )
+    }
+
+    @Test
+    fun `catalog retry returns to all optional defaults after a failed load`() {
+        val session = connectedSession(includeOptional = false)
+        val catalog = session.currentSnapshot().components
+
+        fun resolvedCatalog(revision: Long) = InstallationSessionEvent.DistributionConfigResolved(
+            configVersion = "catalog-$revision",
+            keyId = "fixture-key",
+            signatureAlgorithm = "Ed25519",
+            components = catalog,
+            catalogRevision = revision,
+        )
+
+        session.dispatchEvent(resolvedCatalog(revision = 1L))
+        session.dispatchEvent(
+            InstallationSessionEvent.CatalogFailed(
+                reasonCode = "catalog_load_failed",
+                retryable = true,
+            ),
+        )
+        session.dispatch(InstallationSessionCommand.RetryInstallation)
+        assertTrue(session.currentSnapshot().selectedOptionalComponentIds.isEmpty())
+        assertTrue(session.currentSnapshot().components.isEmpty())
+
+        session.dispatchEvent(resolvedCatalog(revision = 2L))
+        assertEquals(
+            setOf("lyrics", "file-manager"),
+            session.currentSnapshot().selectedOptionalComponentIds,
+        )
+    }
+
+    @Test
     fun `selection cannot start without both locked core components`() {
         val session = connectedSession(
             includeOptional = false,

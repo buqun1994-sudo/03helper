@@ -342,7 +342,12 @@ internal object DebugScenarioFixtures {
             FLOW -> install(driver, includeOptional = true, animated = true)
             "searching" -> driver.command(InstallationSessionCommand.StartDiscovery)
             "found" -> driver.discover()
-            "selection" -> driver.connect(selectOptional = false)
+            "selection" -> {
+                driver.connect(selectOptional = false)
+                // Exercise the same catalog boundary as production so this
+                // scenario visibly demonstrates the default optional set.
+                driver.resolveCatalog()
+            }
             "progress" -> {
                 driver.connect(selectOptional = false)
                 driver.beginInstallation()
@@ -434,6 +439,19 @@ private class FakeSessionDriver(
                 animated,
             )
         }
+    }
+
+    suspend fun resolveCatalog(animated: Boolean = false) {
+        event(
+            InstallationSessionEvent.DistributionConfigResolved(
+                configVersion = "debug-catalog-v1",
+                keyId = "debug-fixture-key",
+                signatureAlgorithm = "Ed25519",
+                components = DebugScenarioFixtures.components,
+                catalogRevision = 1L,
+            ),
+            animated,
+        )
     }
 
     suspend fun beginInstallation(animated: Boolean = false) {

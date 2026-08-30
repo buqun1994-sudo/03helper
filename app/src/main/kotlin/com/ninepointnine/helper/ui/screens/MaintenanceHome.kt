@@ -1766,7 +1766,10 @@ private fun MaintenanceGroup(
     }
 }
 
-internal fun maintenanceColumnCount(screenWidthDp: Float): Int = if (screenWidthDp >= 360f) 2 else 1
+private const val MAINTENANCE_TWO_COLUMN_MIN_WIDTH_DP = 600f
+
+internal fun maintenanceColumnCount(availableWidthDp: Float): Int =
+    if (availableWidthDp >= MAINTENANCE_TWO_COLUMN_MIN_WIDTH_DP) 2 else 1
 
 internal fun maintenanceActionEnabled(
     action: MaintenanceActionId,

@@ -255,7 +255,7 @@ data class InstallationResultSummary(
  */
 internal fun InstallationSessionSnapshot.confirmationPendingComponentIds(): Set<String> {
     val selectedIds = installationBatch?.selectedComponentIds ?: components
-        .filter { it.required || it.id in selectedOptionalComponentIds }
+        .filter { it.isMandatoryForInitialInstall() || it.id in selectedOptionalComponentIds }
         .mapTo(linkedSetOf()) { it.id }
     return (
         (evidence.confirmationPending + (evidence.writeConfirmed - evidence.installed)) intersect selectedIds
@@ -283,7 +283,7 @@ fun InstallationSessionSnapshot.resolveInstallationResult(): InstallationResultS
             rowIds
         } else {
             components
-                .filter { it.required || it.id in selectedOptionalComponentIds }
+                .filter { it.isMandatoryForInitialInstall() || it.id in selectedOptionalComponentIds }
                 .mapTo(linkedSetOf()) { it.id }
         }
     }
@@ -390,7 +390,7 @@ private fun hasConsistentSuccessEvidence(
     val batch = snapshot.installationBatch
     val expectedIds = batch?.selectedComponentIds ?: visibleIds.ifEmpty {
         snapshot.components
-            .filter { it.required || it.id in snapshot.selectedOptionalComponentIds }
+            .filter { it.isMandatoryForInitialInstall() || it.id in snapshot.selectedOptionalComponentIds }
             .mapTo(linkedSetOf()) { it.id }
     }
     if (expectedIds.isEmpty()) return false
@@ -437,6 +437,10 @@ private fun hasConsistentSuccessEvidence(
     }
     return true
 }
+
+/** Cloud's non-desktop `required` flag is a recommendation, not a lock. */
+private fun ComponentDescriptor.isMandatoryForInitialInstall(): Boolean =
+    id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
 
 /** Structured proof collected by the session before it can report success. */
 data class SessionEvidence(

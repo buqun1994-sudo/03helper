@@ -342,8 +342,6 @@ object InstallUiStateMapper {
         errorReason = errorReason?.toUserMessage(),
     )
 
-    private fun ComponentRow.isMandatory(): Boolean = id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
-
 internal fun failureReasonToUserMessage(reasonCode: String?): String? = reasonCode?.toUserMessage()
 
 private fun String.toUserMessage(): String = when (this) {

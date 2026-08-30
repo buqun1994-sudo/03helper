@@ -12,6 +12,7 @@ import com.ninepointnine.helper.domain.session.MaintenanceUpdateState
 import com.ninepointnine.helper.domain.session.MaintenanceAuthorizationFlowState
 import com.ninepointnine.helper.domain.session.MaintenanceInventoryState
 import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationState
+import com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
 import com.ninepointnine.helper.domain.session.InstallationFlow
 import com.ninepointnine.helper.domain.session.InstallationResultFailureStage
 
@@ -138,6 +139,10 @@ data class ComponentRow(
         com.ninepointnine.helper.domain.session.ComponentStatus.READING,
     val errorReason: String? = null,
 )
+
+/** Only 03 desktop is locked on the first-install selection surface. */
+internal fun ComponentRow.isMandatory(): Boolean =
+    id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
 
 data class UiProgress(
     val completedCount: Int,

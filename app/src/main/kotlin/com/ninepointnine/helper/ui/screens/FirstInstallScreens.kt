@@ -60,6 +60,7 @@ import com.ninepointnine.helper.ui.state.ConnectionVariant
 import com.ninepointnine.helper.ui.state.DeviceRow
 import com.ninepointnine.helper.ui.state.InstallUiIntent
 import com.ninepointnine.helper.ui.state.InstallUiState
+import com.ninepointnine.helper.ui.state.isMandatory
 import com.ninepointnine.helper.ui.theme.InstallerColors
 import com.ninepointnine.helper.ui.theme.InstallerDimensions
 import com.ninepointnine.helper.ui.theme.InstallerMotion
@@ -442,7 +443,9 @@ private fun SelectionFailure(
 
 @Composable
 private fun ComponentChoiceRow(component: ComponentRow, onToggle: (Boolean) -> Unit) {
-    val mandatory = component.required
+    // Cloud's `required` field is an install recommendation for non-desktop
+    // entries. Only the desktop component is locked in first-install UI.
+    val mandatory = component.isMandatory()
     val selected = mandatory || component.selected
     val supported = component.compatibilityState != com.ninepointnine.helper.domain.session.ComponentCompatibility.UNSUPPORTED &&
         component.status in setOf(
