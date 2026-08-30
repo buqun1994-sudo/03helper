@@ -363,6 +363,8 @@ class CloudInstallerDistributionConfigAdapter(
     private val transport: ReleaseCatalogTransport,
     private val signatureVerifier: CatalogSignatureVerifier,
     private val expectedChannel: String,
+    private val acceptedSchemaVersions: Set<Int> = SUPPORTED_SCHEMA_VERSIONS,
+    private val acceptedSignatureAlgorithms: Set<String> = SUPPORTED_SIGNATURE_ALGORITHMS,
     private val now: () -> Instant = Instant::now,
     private val json: Json = CloudReleaseCatalogAdapter.STRICT_JSON,
     private val sourcePolicy: ReleaseSourcePolicy = ReleaseSourcePolicy(),
@@ -374,6 +376,8 @@ class CloudInstallerDistributionConfigAdapter(
             transport = transport,
             signatureVerifier = signatureVerifier,
             expectedChannel = expectedChannel,
+            acceptedSchemaVersions = acceptedSchemaVersions,
+            acceptedSignatureAlgorithms = acceptedSignatureAlgorithms,
             now = now,
             json = json,
             sourcePolicy = sourcePolicy,
@@ -409,10 +413,10 @@ class CloudInstallerDistributionConfigAdapter(
         } catch (_: Exception) {
             return DistributionConfigLoadResult.Failure("distribution_config_envelope_invalid", retryable = false)
         }
-        if (envelope.schemaVersion !in SUPPORTED_SCHEMA_VERSIONS) {
+        if (envelope.schemaVersion !in acceptedSchemaVersions) {
             return DistributionConfigLoadResult.Failure("distribution_config_schema_unsupported", retryable = false)
         }
-        if (envelope.keyId.isBlank() || envelope.signatureAlgorithm !in SUPPORTED_SIGNATURE_ALGORITHMS) {
+        if (envelope.keyId.isBlank() || envelope.signatureAlgorithm !in acceptedSignatureAlgorithms) {
             return DistributionConfigLoadResult.Failure("distribution_config_envelope_fields_missing", retryable = false)
         }
         if (envelope.catalogRevision <= 0L) {
@@ -440,7 +444,7 @@ class CloudInstallerDistributionConfigAdapter(
         } catch (_: Exception) {
             return DistributionConfigLoadResult.Failure("distribution_config_payload_invalid", retryable = false)
         }
-        if (document.schemaVersion !in SUPPORTED_SCHEMA_VERSIONS) {
+        if (document.schemaVersion !in acceptedSchemaVersions) {
             return DistributionConfigLoadResult.Failure("distribution_config_payload_schema_unsupported", retryable = false)
         }
         if (document.channel != expectedChannel || !CHANNEL_PATTERN.matches(document.channel)) {
@@ -731,13 +735,13 @@ class CloudInstallerDistributionConfigAdapter(
         val ACTION_ID_PATTERN = Regex("^[a-z0-9][a-z0-9._-]{0,63}$")
         val ICON_ASSET_ID_PATTERN = Regex("^[a-z0-9][a-z0-9._-]{0,127}$")
         val ICON_SHA256_PATTERN = Regex("^[a-f0-9]{64}$")
-        val ICON_URL_PATTERN = Regex("^https://download\\.9\\.9studio\\.fun/03-apps/logos/(03[a-z]+)/sha256-([a-f0-9]{64})\\.(png|webp)$")
+        val ICON_URL_PATTERN = Regex("^https://download\\.9\\.9studio\\.fun/03-apps/logos/(03[a-z]+|fossify-file-manager)/sha256-([a-f0-9]{64})\\.(png|webp)$")
         val ICON_MIME_TYPES = setOf("image/png", "image/webp")
         val ICON_PRODUCT_ID_BY_APP_ID = mapOf(
             "desktop" to "03desktop",
             "lyrics" to "03lyrics",
             "cast" to "03cast",
-            "file-manager" to "03filemanager",
+            "file-manager" to "fossify-file-manager",
         )
     }
 

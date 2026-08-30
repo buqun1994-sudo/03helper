@@ -221,9 +221,15 @@ object InstallerPublisherTrustRegistry {
             packagePrefixes = setOf("com.ninepointnine.desktopcast"),
         ),
     )
-    private val fossifyCertificate = TrustedPublisherCertificate(
-        certificateSha256 = DEBUG_CERTIFICATE_SHA256,
-        packagePrefixes = setOf("org.fossify."),
+    private val fossifyCertificates = listOf(
+        TrustedPublisherCertificate(
+            certificateSha256 = DEBUG_CERTIFICATE_SHA256,
+            packagePrefixes = setOf("org.fossify."),
+        ),
+        TrustedPublisherCertificate(
+            certificateSha256 = "be75daa9799eaa4bbe0592a59ce66d3aaef9931d7f7f76ef732907665408a10f",
+            packagePrefixes = setOf(InstallerComponentTrustRegistry.FILE_MANAGER_PACKAGE_NAME),
+        ),
     )
     private val helperCertificates = listOf(
         // Debug certificate used by local component fixtures.
@@ -317,18 +323,23 @@ object InstallerPublisherTrustRegistry {
             "14e4a7cdf1481afdb871487aa830bb0dc28910c0ba681693f11f9f1dd2fd4423",
             ArtifactReleaseTrack.RELEASE,
         ),
-        // The Fossify build is currently only audited as a Debug artifact.
         TrustedArtifactIdentity(
             InstallerComponentTrustRegistry.FILE_MANAGER_COMPONENT_ID,
             InstallerComponentTrustRegistry.FILE_MANAGER_PACKAGE_NAME,
             DEBUG_CERTIFICATE_SHA256,
             ArtifactReleaseTrack.DEBUG,
         ),
+        TrustedArtifactIdentity(
+            InstallerComponentTrustRegistry.FILE_MANAGER_COMPONENT_ID,
+            InstallerComponentTrustRegistry.FILE_MANAGER_PACKAGE_NAME,
+            "be75daa9799eaa4bbe0592a59ce66d3aaef9931d7f7f76ef732907665408a10f",
+            ArtifactReleaseTrack.RELEASE,
+        ),
     )
 
     val profiles: List<TrustedPublisherProfile> = listOf(
         TrustedPublisherProfile("nine-studio", listOf(nineStudioCertificate) + nineStudioStagingCertificates + nineStudioProductionCertificates),
-        TrustedPublisherProfile("fossify-approved", listOf(fossifyCertificate)),
+        TrustedPublisherProfile("fossify-approved", fossifyCertificates),
         TrustedPublisherProfile(InstallerSelfIdentity.TRUST_PROFILE_ID, helperCertificates),
     )
 
@@ -336,10 +347,7 @@ object InstallerPublisherTrustRegistry {
         nineStudioCertificate,
         *nineStudioStagingCertificates.toTypedArray(),
         *nineStudioProductionCertificates.toTypedArray(),
-        TrustedPublisherCertificate(
-            certificateSha256 = DEBUG_CERTIFICATE_SHA256,
-            packagePrefixes = setOf("org.fossify."),
-        ),
+        *fossifyCertificates.toTypedArray(),
         *helperCertificates.toTypedArray(),
     )
 
@@ -411,15 +419,14 @@ object InstallerPublisherTrustRegistry {
                 ?.firstOrNull()
         }
         val expectedTrack = trackFor(environment, channel)
-        val acceptedTracks = buildList {
-            add(expectedTrack)
-            // This is an explicit, temporary product fact: Fossify has no
-            // audited staging/release certificate yet, so its Debug APK is the
-            // only accepted identity while the config remains staging.
-            if (componentId == InstallerComponentTrustRegistry.FILE_MANAGER_COMPONENT_ID) {
-                add(ArtifactReleaseTrack.DEBUG)
-            }
-        }.distinct()
+        val acceptedTracks = if (
+            expectedTrack == ArtifactReleaseTrack.STAGING &&
+            componentId == InstallerComponentTrustRegistry.FILE_MANAGER_COMPONENT_ID
+        ) {
+            setOf(ArtifactReleaseTrack.STAGING, ArtifactReleaseTrack.DEBUG)
+        } else {
+            setOf(expectedTrack)
+        }
         return componentIdentities.firstOrNull { identity ->
             identity.componentId == componentId &&
                 identity.track in acceptedTracks &&

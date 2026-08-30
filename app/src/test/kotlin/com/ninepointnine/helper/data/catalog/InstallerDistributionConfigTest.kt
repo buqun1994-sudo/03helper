@@ -237,6 +237,44 @@ class InstallerDistributionConfigTest {
     }
 
     @Test
+    fun `v4 accepts the approved Fossify file manager icon namespace`() = runBlocking {
+        val keys = KeyPairGenerator.getInstance("EC").apply { initialize(256) }.generateKeyPair()
+        val digest = "36552cb434f400ee43406203011ac6364a7ff0fc9308e6e653d6f3518ed0f2db"
+        val fileManager = InstallerAppSourceDocument(
+            appId = "file-manager",
+            archiveFileName = "fossify-file-manager-car-release-1.6.1-car175.1.zip",
+            displayName = "文件管理器",
+            description = "Fossify 文件管理器车机适配版",
+            versionCode = 14L,
+            versionName = "1.6.1-car175.1",
+            apkSizeBytes = 9_982_465L,
+            enabled = true,
+            installPolicy = "optional",
+            sortOrder = 40,
+            minClientSchemaVersion = 4,
+            trustProfileId = "fossify-approved",
+            deviceSetup = InstallerDeviceSetupDocument(),
+            icon = InstallerAppIconDocument(
+                assetId = "fossify-file-manager-production-logo-app-icon",
+                url = "https://download.9.9studio.fun/03-apps/logos/fossify-file-manager/sha256-$digest.webp",
+                mimeType = "image/webp",
+                width = 192,
+                height = 192,
+                sizeBytes = 7_310L,
+                sha256 = digest,
+            ),
+        )
+        val document = payloadDocument(
+            schemaVersion = 4,
+            apps = defaultApps().mapIndexed { index, app -> app.copy(icon = icon(index)) } + fileManager,
+        )
+
+        val config = (loadDocument(keys, document) as DistributionConfigLoadResult.Success).config
+
+        assertEquals("fossify-file-manager-production-logo-app-icon", config.apps.last().iconAsset?.assetId)
+    }
+
+    @Test
     fun `same revision with a different catalog version is rejected`() = runBlocking {
         val keys = KeyPairGenerator.getInstance("EC").apply { initialize(256) }.generateKeyPair()
         val store = InMemoryCatalogRevisionStore()

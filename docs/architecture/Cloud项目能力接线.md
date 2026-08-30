@@ -31,9 +31,9 @@
 
 V4 已冻结独立的 Android distribution-config 控制面；客户端仍兼容读取没有 Logo 的 v3 历史快照。领域对象和签名 envelope 的本地实现位于 `com.ninepointnine.helper.domain.artifact` 与 `data/catalog`；这只代表客户端协议已实现，不代表 Cloud 生产配置已经发布。
 
-公共生产入口为 `GET https://api.9.9studio.fun/api/03helper/android-config`，Debug staging 入口为 `GET https://api-staging.9.9studio.fun/api/03helper/android-config`。新 envelope 使用 `schemaVersion=4`，客户端同时兼容 `schemaVersion=3` 的无 Logo 历史快照；payload 包含 `environment`、`channel`、`issuedAtUtc`、`expiresAt`、`catalogVersion`、`catalogRevision`、文件夹字段、动态 `apps[]` 和 v4 `icon` 元数据。客户端先对 Base64 解码后的原始 UTF-8 字节验签，再严格解析 payload；payload 最大 512 KiB，未知字段、危险文件名、过期快照和修订回滚均拒绝。
+公共生产入口为 `GET https://api.9.9studio.fun/api/03helper/android-config`，Debug staging 入口为 `GET https://api-staging.9.9studio.fun/api/03helper/android-config`。新 envelope 使用 `schemaVersion=4`；只有 Debug / staging 兼容 `schemaVersion=3` 的无 Logo 历史快照，Release production 只接受 v4。payload 包含 `environment`、`channel`、`issuedAtUtc`、`expiresAt`、`catalogVersion`、`catalogRevision`、文件夹字段、动态 `apps[]` 和 v4 `icon` 元数据。客户端先对 Base64 解码后的原始 UTF-8 字节验签，再严格解析 payload；payload 最大 512 KiB，未知字段、危险文件名、过期快照和修订回滚均拒绝。
 
-当前 staging 信任根已轮换为 `keyId=03helper-staging-config-2026-08-22-v1`，算法为 `SHA256withECDSA`、P-256 (`prime256v1`)，客户端内置公钥 SPKI DER SHA-256 为 `8c2573689e87e6c426add9f2249186ec7b6c0e8f44b196ea669c820adb1283d3`。Cloud 只能注入与该指纹匹配的 PKCS#8 私钥；旧 `03helper-real-debug-2026-08-20-v4` 已废弃且不做兼容。配置加密密钥 `ANDROID_CONFIG_ENCRYPTION_KEY_BASE64` 与签名私钥是两套独立材料。
+当前 staging 信任根已轮换为 `keyId=03helper-staging-config-2026-08-22-v1`，算法为 `SHA256withECDSA`、P-256 (`prime256v1`)，客户端内置公钥 SPKI DER SHA-256 为 `8c2573689e87e6c426add9f2249186ec7b6c0e8f44b196ea669c820adb1283d3`。production Release 固定信任 `03helper-production-config-2026-08-30-v1`，算法同为 `SHA256withECDSA` / P-256，SPKI DER SHA-256 为 `a971be7085a2a4a3ef8df8dd2b9df5a94b46e05b3ce85b934ffc84e42ce70051`；Release 只接受 schema v4、production/release 和该 keyId，不回退到 staging / Debug。Cloud 只能注入与对应公钥匹配的 PKCS#8 私钥；旧 `03helper-real-debug-2026-08-20-v4` 已废弃且不做兼容。配置加密密钥 `ANDROID_CONFIG_ENCRYPTION_KEY_BASE64`、配置签名私钥和 APK production JKS 是相互独立的材料。
 
 历史版本字段不属于当前 v4 主链；回滚通过新 `catalogRevision` 指向旧的不可变目录完成。客户端按 `environment + channel` 持久化最高修订号，旧签名快照不能覆盖新状态。
 
@@ -46,7 +46,7 @@ productId = 03helper
 displayName = 03车机助手
 androidPackage = com.ninepointnine.helper
 runtimeIdentifier = icar03
-releaseVersion = 1.0.0 (versionCode 1)
+releaseVersion = 1.0.1 (versionCode 2)
 ```
 
 | 环境 | 证书 SHA-256 | 构建方式 |
@@ -54,7 +54,7 @@ releaseVersion = 1.0.0 (versionCode 1)
 | staging | `aca4f178fea11ccc97a1373c8aa5345b274a3a783398929a9340a79ee83663af` | `assembleDebug` + `helperSigningEnvironment=staging` |
 | production | `31ca80dd21a5208eaabd5f3e1440a3db2f7dc79122e03eaa6ba01730fb31f18b` | `assembleRelease` + `helperProductionSigningPropertiesFile` |
 
-交接请求是：Cloud 先登记 `productId`、包名、环境和公开证书摘要，再评估并按现有受控流程建立 / 下发对应许可证或 profile；这项外部发布尚未在本仓库宣称完成。Cloud 不接收 JKS、口令、私钥或本机路径。若许可证要被客户端强制校验，必须另行冻结 Android 许可证协议和客户端门禁；当前 03helper V1 只消费签名 Android distribution-config，不把账号权益或许可证结果写入安装状态机。
+Cloud 已登记 `productId`、包名、环境、APK 公开证书摘要和免费 profile；03helper 不进入许可证或 Device Commerce 主链。`1.0.1 (2)` production APK 已固定接入独立配置公钥并完成本地构建、包名、版本、单 signer、v2 和证书摘要核验。Cloud 不接收 JKS、口令、私钥或本机路径。真实不可变下载目录、Logo 公网对象和 production 配置仍未上线，不得把本地产物就绪写成线上发布完成。
 
 包名、证书 SHA-256 和最低 SDK 不由网络 payload 覆盖：包名、版本和最低 SDK 从 APK 读取，证书必须属于客户端内置官方发布者证书集合及其包名命名空间。未知算法、未知 key、字段缺失、过期或桌面条目缺失均 fail closed。
 
@@ -64,11 +64,11 @@ releaseVersion = 1.0.0 (versionCode 1)
 
 ### 3.3 Android ZIP 发布流程
 
-1. 各产品仓库先生成已签名 APK，分别由 03 歌词、03桌面和文件管理器仓库负责包身份、版本和证书；03helper 不复制产品源码，也不重新签名。
+1. 各产品仓库先生成已签名 APK，分别由 03 歌词、03桌面、03投屏和 Fossify 车机适配资产 owner 负责包身份、版本和证书；03helper 不复制产品源码，也不重新签名。Fossify 保持 `org.fossify.filemanager.debug` 和独立第三方 Release 证书，不成为 9.9 Studio 产品或 Fossify 官方发布。
 2. Cloud release 流程为每个 APP 生成一个 ZIP，归档根目录只放一个 APK；服务端只保存 `apps[]` 中的文件名和展示 / 安装策略。
 3. 全部 ZIP 上传到同一个受密码保护的不可变蓝奏目录。目录可包含人工维护的其它文件；客户端只处理签名 `apps[]` 声明的 ZIP，任一声明 ZIP 都允许在目录阶段暂时缺失，因为公共 `Download` 可能已有可复用 APK。
 4. 客户端连接后先重新打开根文件夹并按动态文件映射发布轻量应用列表；用户确认后先检查公共 `Download`，再对未命中的已选 APP（最多 2 个并发）下载、解压、读取 APK 元数据并生成本次 `ArtifactManifest`；任一 APP 失败只记录原因并继续其它 APP，`desktop` 失败也必须落到统一结果页。
-5. 只有正式 staging 下载、解压、APK 包身份 / 证书校验和 ADB 安装验证全部通过，才允许把签名配置切到公开状态。当前真实组件 Debug 包只进入 03helper Debug 变体的本地签名验证 profile；它们可以证明客户端完整工程链，但不代表 Cloud production 配置或公开候选通过。
+5. 只有目标环境的下载、解压、APK 包身份 / 证书校验和 ADB 安装验证全部通过，才允许把签名配置切到公开状态。当前 production revision 5 四组件候选已完成本地原始字节验签和客户端 Release 单测，但使用占位目录且 Fossify Logo 公网对象尚未上传，因此保持 `local-only` / `publishable=false`，不代表 Cloud production 配置已发布。
 6. 密码只作为签名 payload 的运行时字段下发给客户端；Cloud 不向客户端下发网盘账号、R2 密钥、GitHub PAT 或任意命令，客户端不记录密码和短时下载上下文。
 
 ### 3.4 当前 F3 真实 Debug 验证资料
@@ -100,9 +100,9 @@ Cloud 最新 iCAR 03 官网已确认的可复用语言：
 
 ## 6. 后续施工顺序
 
-1. M0：Cloud 侧完成 Android distribution-config API、公钥轮换、三个产品仓库的包名 / 签名身份确认、根文件夹文件名和发布责任；03helper 本地 schema 已完成。
+1. M0：Cloud Android distribution-config API、production 签名根、四个 03 APP 身份台账、Fossify 第三方适配身份和 03helper Release 公钥接入已完成本地闭环；production 线上配置仍未发布。
 2. M1：03helper 本地密码根文件夹 WebView、动态 ZIP 下载器、完整性校验、设备动作和 `InstallationSession` 事件接线已完成；当前 Debug 根文件夹只用于 F3 完整工程验证，不升级为 Cloud production 候选。
-3. M2：待 Cloud 提供 staging 配置和根文件夹替换流程后，执行密码验证、目录集合、动态版本识别、ZIP / APK 双重摘要、缓存清理和回滚指针人工验证；若未来增加 R2 / GitHub 备用，再另行验证切源。
+3. M2：由 Cloud 发布方上传不可变 ZIP 和 Logo 对象、换入真实蓝奏目录并再次生成更高 revision 候选；完成 production 小范围下载、解压、APK 身份、ADB 安装和反回滚验证后，才可按“上线”门禁发布公开配置。若未来增加 R2 / GitHub 备用，再另行验证切源。
 4. M3：如需由 Cloud 官网提供“下载安装助手”入口，再在 `cloud/apps/website-next/` 增加安装助手产品入口；官网入口只指向助手 APK，不在官网复制车机安装流程。
 5. 每次 Cloud 侧涉及 release index、R2、官网入口、API 或生产部署时，先读取 Cloud 仓库对应专项文档；部署和上线仍按 Cloud 的固定候选与人工授权规则执行。
 

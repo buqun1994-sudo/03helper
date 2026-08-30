@@ -1,5 +1,14 @@
 # 03helper 进度
 
+## 2026-08-30 production distribution-config 信任根与 Release 产物（完成，未上线）
+
+1. Release 组合已固定接入 `03helper-production-config-2026-08-30-v1` 的 P-256 公钥，SPKI DER SHA-256 为 `a971be7085a2a4a3ef8df8dd2b9df5a94b46e05b3ce85b934ffc84e42ce70051`；只接受 schema v4、`SHA256withECDSA`、`environment=production` 和 `channel=release`。未知 keyId、其它算法、staging / Debug 资料和 v3 均 fail closed；验签直接使用 `payloadBase64` 解码后的原始 UTF-8 字节，既有 `catalogRevision` 反回滚主链保持不变。
+2. production 发布者信任档案新增 Fossify 车机适配版独立证书 `be75daa9799eaa4bbe0592a59ce66d3aaef9931d7f7f76ef732907665408a10f`；正式环境只接受该 Release 证书，staging 继续保留既有 Debug 适配证书。组件保持 `org.fossify.filemanager.debug` 和 `fossify-approved`，不创建 `03filemanager`，不进入 commerce、license 或 `com.ninepointnine`，也不声称 Fossify 官方发布身份。
+3. 新增 Release 专属签名 fixture 与回归测试，覆盖固定 keyId / 公钥摘要、未知 key、schema / 算法 / 环境 / 频道拒绝、revision 5 四组件目录和原始 payload 字节验签；在已签 payload 末尾追加换行后验签按预期失败。`:app:testDebugUnitTest` 为 `298/298`，`:app:testReleaseUnitTest` 为 `301/301`，Debug / Release Lint 均通过。
+4. production APK 为 `03helper-release-1.0.1.apk`，包名 `com.ninepointnine.helper`，版本 `1.0.1 (2)`，大小 `14,243,679` 字节，SHA-256 为 `4253ebb3022cf5feb2474190d8ef8cf40814451c7a0d856d0d8551f693392c27`；production APK 证书 SHA-256 为 `31ca80dd21a5208eaabd5f3e1440a3db2f7dc79122e03eaa6ba01730fb31f18b`，单 signer、APK Signature Scheme v2 有效。单 APK ZIP 大小 `13,439,387` 字节，SHA-256 为 `8ea1dbcd90446b7cee1f667d8a395dd8bfda5b8306b1209b60aaee26908e7f77`。
+5. Cloud revision 5 四组件候选已用同一 production 公钥完成原始字节验签，payload SHA-256 为 `8b7e0a6141595a3798310f95715e1417b20eb414d3f2a6b9be0a705e0ec19b99`；候选仍使用占位蓝奏目录，Fossify Logo 公网对象尚未上传，因此保持 `local-only` / `publishable=false`，未调用后台 PUT、未写线上数据库。
+6. 五组 production APK / ZIP 已放入桌面 `03系列Release-20260830` 目录并逐项核对大小、摘要、包名、版本、证书、v2 和单 APK ZIP 内容。项目文档、Skills、本机环境、Release 版本和 `git diff --check` 均通过；本轮没有安装 Release、推送、部署或上线，真实 production 目录下载与车机安装 smoke 仍需在发布候选就绪后按人工门禁执行。
+
 ## 2026-08-30 维护首页普通手机单列阈值收口（已安装，待主测）
 
 1. 维护首页列数阈值从 `360dp` 调整为 `600dp`：窗口可用宽度低于 `600dp` 时保持单列，达到 `600dp` 后使用两列；判断不绑定设备型号、屏幕比例或折叠状态，当前每组最多两个动作，因此不扩展三列。
