@@ -562,6 +562,30 @@ class ArtifactSecurityTest {
     }
 
     @Test
+    fun `extractor preserves UTF-8 apk entry names`() {
+        val directory = Files.createTempDirectory("artifact-extract-utf8").toFile()
+        val apk = byteArrayOf(7, 8, 9)
+        val entryName = "文件管理器-v1.6.1-icar03.apk"
+        val archiveBytes = zipBytes(listOf(entryName to apk))
+        val archive = directory.resolve("文件管理器-v1.6.1-icar03.zip").apply {
+            writeBytes(archiveBytes)
+        }
+        val manifest = manifestFor(archiveBytes, apk).copy(
+            archiveFileName = archive.name,
+            apkEntryName = entryName,
+        )
+
+        val result = ArtifactArchiveExtractor { Long.MAX_VALUE }.extract(
+            manifest,
+            VerifiedArchive(manifest.componentId, archive, archive.length(), sha256(archiveBytes)),
+            directory.resolve("extracted.apk.part"),
+        ) as ArchiveExtractionResult.Extracted
+
+        assertEquals(entryName, result.apk.entryName)
+        assertEquals(apk.toList(), result.apk.file.readBytes().toList())
+    }
+
+    @Test
     fun `identity verifier checks package version certificate and deletes archive after success`() {
         val directory = Files.createTempDirectory("artifact-identity").toFile()
         val apk = byteArrayOf(3, 4, 5, 6)

@@ -152,6 +152,30 @@ class InstallerDistributionConfigTest {
     }
 
     @Test
+    fun `v4 preserves UTF-8 user-facing archive names`() = runBlocking {
+        val keys = KeyPairGenerator.getInstance("EC").apply { initialize(256) }.generateKeyPair()
+        val names = listOf(
+            "03桌面-v1.0.1-icar03.zip",
+            "03歌词-v1.0.1-icar03.zip",
+            "03工具-v1.0.1.zip",
+        )
+        val apps = defaultApps().mapIndexed { index, app ->
+            app.copy(
+                archiveFileName = names[index],
+                icon = icon(index),
+            )
+        }
+
+        val result = loadDocument(
+            keys,
+            payloadDocument(apps = apps, schemaVersion = 4),
+        )
+        val config = (result as DistributionConfigLoadResult.Success).config
+
+        assertEquals(names, config.apps.map { it.archiveFileName })
+    }
+
+    @Test
     fun `debug profile rejects a production environment`() = runBlocking {
         val keys = KeyPairGenerator.getInstance("EC").apply { initialize(256) }.generateKeyPair()
 
