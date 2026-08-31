@@ -482,40 +482,7 @@ class AndroidLanzouWebViewHost(
         }
         val passwordLiteral = JSONObject.quote(folderPassword.orEmpty())
         view.evaluateJavascript(
-            """
-            (function(){
-              var links=[].slice.call(document.querySelectorAll('#infos .mbx a.mlink, #infos #ready a')).map(function(a){
-                var href=a.getAttribute('href') || '';
-                var row=a.closest('#ready') || a.closest('.mbx') || a.parentElement;
-                var nameNode=a.cloneNode(true);
-                var meta=nameNode.querySelector('.mmr');
-                if(meta){ meta.remove(); }
-                var sizeNode=row ? row.querySelector('#size, .size, .sizeh') : null;
-                var timeNode=row ? row.querySelector('#time, .time, .timeh') : null;
-                return {
-                  href:href,
-                  name:(nameNode.textContent || '').trim(),
-                  size:sizeNode ? (sizeNode.textContent || '').trim() : '',
-                  modified:timeNode ? (timeNode.textContent || '').trim() : '',
-                  rowText:row ? (row.innerText || row.textContent || '').trim() : ''
-                };
-              }).filter(function(item){ return item.href && item.name; });
-              if(links.length){ return JSON.stringify({kind:'entries',entries:links}); }
-              var info=(document.getElementById('infos') || {}).innerText || '';
-              if(info.indexOf('没有文件') >= 0 || info.indexOf('获取失败') >= 0){
-                return JSON.stringify({kind:'failure'});
-              }
-              var pwd=document.getElementById('pwd');
-              var submit=document.getElementById('sub');
-              if(pwd && submit && !window.__03helperFolderSubmitted){
-                pwd.value=$passwordLiteral;
-                window.__03helperFolderSubmitted=true;
-                submit.click();
-                return 'submitted';
-              }
-              return 'wait';
-            })()
-            """.trimIndent(),
+            buildLanzouFolderPageScript(passwordLiteral),
         ) { rawResult ->
             if (terminal.get()) return@evaluateJavascript
             when (val parsed = parseFolderResult(rawResult)) {
@@ -771,3 +738,47 @@ class AndroidLanzouWebViewHost(
         data object Wait : PageActionResult
     }
 }
+
+/**
+ * Builds the folder-page probe separately so its DOM contract can be tested
+ * without constructing an Android WebView in JVM tests.
+ */
+internal fun buildLanzouFolderPageScript(passwordLiteral: String): String =
+    """
+            (function(){
+              var links=[].slice.call(document.querySelectorAll('#infos .mbx a.mlink, #infos #ready a')).map(function(a){
+                var href=a.getAttribute('href') || '';
+                var row=a.closest('#ready') || a.closest('.mbx') || a.parentElement;
+                var nameNode=a.querySelector('.filename');
+                if(nameNode){ nameNode=nameNode.cloneNode(true); }
+                else { nameNode=a.cloneNode(true); }
+                var metadataNodes=nameNode.querySelectorAll('.filesize,.mmr,.filedown,.filetime,.file-time,.file-date,.size,.sizeh,#size,#time');
+                for(var metadataIndex=0;metadataIndex<metadataNodes.length;metadataIndex++){
+                  metadataNodes[metadataIndex].remove();
+                }
+                var sizeNode=row ? row.querySelector('#size, .size, .sizeh, .filesize') : null;
+                var timeNode=row ? row.querySelector('#time, .time, .timeh') : null;
+                return {
+                  href:href,
+                  name:(nameNode.textContent || '').trim(),
+                  size:sizeNode ? (sizeNode.textContent || '').trim() : '',
+                  modified:timeNode ? (timeNode.textContent || '').trim() : '',
+                  rowText:row ? (row.innerText || row.textContent || '').trim() : ''
+                };
+              }).filter(function(item){ return item.href && item.name; });
+              if(links.length){ return JSON.stringify({kind:'entries',entries:links}); }
+              var info=(document.getElementById('infos') || {}).innerText || '';
+              if(info.indexOf('没有文件') >= 0 || info.indexOf('获取失败') >= 0){
+                return JSON.stringify({kind:'failure'});
+              }
+              var pwd=document.getElementById('pwd');
+              var submit=document.getElementById('sub');
+              if(pwd && submit && !window.__03helperFolderSubmitted){
+                pwd.value=$passwordLiteral;
+                window.__03helperFolderSubmitted=true;
+                submit.click();
+                return 'submitted';
+              }
+              return 'wait';
+            })()
+            """.trimIndent()
