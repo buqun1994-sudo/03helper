@@ -1,3 +1,19 @@
+# 2026-08-31 蓝奏目录解析修复与助手双环境重建（完成，未发布）
+
+1. 修复 `AndroidLanzouWebViewHost` 对当前蓝奏文件夹 DOM 的取名逻辑：文件名只读取 `.filename` 节点，嵌套的 `.filesize`、下载和时间元数据不会再拼入 ZIP 名称；保留渐进目录快照、超时和单项失败隔离边界。
+2. 新增 JVM 契约测试，锁定 `.filename` 取值和元数据节点清理；真实 staging 文件夹 AJAX 响应已核对为五个声明文件名，修复后的选择器与当前页面结构一致。
+3. 从提交 `0206f1ac33fce2aa4877b1758af539482e03171f` 重新构建并覆盖 `03车机助手` 的 staging / production APK 与对应单 APK ZIP；其它 03桌面、03歌词、03投屏和文件管理器的桌面文件未改动。staging APK SHA-256 为 `02a8c10a6b2577865a7f15486a4152bc377500f0b7ad7d6ae9816a78fee3b8e4`，production APK SHA-256 为 `acc12813f6669cf710d2e69743354f11c1daae2f4e4932269277e907820fc8a4`。
+4. 两个 helper ZIP 均为 UTF-8 文件名、根目录单一同名 APK；staging 大小 `20,103,003` 字节、SHA-256 为 `53dffe96bb08c44c73b02728fad62e4ec82ec525e76fa667b40cf1b034c34674`，production 大小 `13,437,964` 字节、SHA-256 为 `577a83f09092bd517551fc3c1da636bf5548df6d05860796d0beb44ad1889f38`；APK 包名、版本、单 signer、v2 与既有 staging / production 证书摘要一致。
+5. 已对在线 Realme 测试机执行保留数据 `adb install -r` 尝试，ColorOS 返回 `Failure [-99]`，包未替换；未卸载、未清数据、未修改设备安全设置。其它产品产物未改动，未上传蓝奏、未调用 Cloud 后台 PUT、未发布配置；Cloud 产物台账仍需由发布方在确认新 helper 后单独更新。
+
+# 2026-08-31 staging 五包导出与 Cloud 发布口径同步（完成，未上传）
+
+1. 已从当前四个 03 产品工程和 03桌面内的 Fossify 车机适配脚本导出五个测试环境 APK：03车机助手、03桌面、03歌词、03投屏和文件管理器；每个 APK 均使用中文文件名，并与对应版本、versionCode 和包名核对一致。
+2. 五个 APK 分别打成独立 ZIP，归档根目录各只有一个同名 APK；归档文件名使用 UTF-8 标志，ZIP 完整性、条目数量和条目映射均已验证。桌面测试目录另附 `校验信息.txt`，记录大小、SHA-256、签名摘要和 Fossify 身份边界。
+3. 四个 03 APK 使用各自 staging 证书并通过单 signer / APK Signature Scheme v2 校验；文件管理器保持 `org.fossify.filemanager.debug`，使用 Android Debug 测试证书，不创建 `03filemanager`，不进入 03 / 9.9 Studio commerce 或 license 身份。
+4. 已将 Cloud 最新“同一蓝奏入口长期维护、先上传并核验 ZIP 再发布完整签名配置、后台 PUT 自动生成新 revision”的口径同步到 Cloud 接线、Android 配置契约、项目长期总纲、首版计划、安全边界、本地运维、产品基线、验证矩阵和运维规则文档；客户端 v4 签名、动态 `apps[]` 和 revision 反回滚约束未改变。
+5. 本轮未上传蓝奏云、未调用 Cloud 后台 PUT、未发布配置，未提交或推送任何仓库，也未自动安装五个测试包。
+
 # 2026-08-30 production APK / ZIP 中文文件名（初版记录；助手已由后续重建替换）
 1. 按用户指定生成五组用户可读文件名：`03车机助手-v1.0.1`、`03桌面-v1.0.1-icar03`、`03歌词-v1.0.1-icar03`、`03投屏-v1.0.1-icar03`、`文件管理器-v1.6.1-icar03`，每组同时提供 APK 和单 APK ZIP。
 2. ZIP 使用标准 UTF-8 文件名标记，ZIP 内 APK 与外部 APK 使用同名中文文件名；APK 字节、包名、版本、证书和 v2 签名均保持不变。原英文产物目录保留作审计备份。
