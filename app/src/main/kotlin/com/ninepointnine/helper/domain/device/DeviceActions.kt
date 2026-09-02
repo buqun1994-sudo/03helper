@@ -47,6 +47,17 @@ interface MaintenanceCommandGateway {
         components: List<ManagedComponent>,
     ): ManagedApplicationsResult
 
+    /**
+     * Reads every user-installed package from the vehicle's third-party
+     * application area. The result is kept separate from the controlled
+     * component inventory; it can be addressed only by the fixed maintenance
+     * actions (start, force-stop, uninstall, details), never by arbitrary shell.
+     */
+    suspend fun inspectThirdPartyApplications(): ThirdPartyApplicationsResult =
+        ThirdPartyApplicationsResult.Failed(
+            DeviceActionFailure("third_party_inventory_unsupported", retryable = false),
+        )
+
     /** Reads the device package inventory once for the supplied components. */
     suspend fun inspectInstalledApplicationInventory(
         components: List<ManagedComponent>,
@@ -61,7 +72,7 @@ interface MaintenanceCommandGateway {
         installedApplications: List<ManagedApplicationProbe>,
     ): MaintenanceAuthorizationResult
 
-    /** Fixed application operation selected by the maintenance UI. */
+    /** Typed application operation selected by the maintenance UI. */
     suspend fun performApplicationAction(
         component: ManagedComponent,
         actionId: MaintenanceApplicationActionId,
@@ -90,6 +101,23 @@ data class ManagedApplicationProbe(
     val filePath: String? = null,
     val uid: Int? = null,
 )
+
+/** Metadata for a package discovered outside the installer's controlled catalog. */
+data class ThirdPartyApplicationProbe(
+    val packageName: String,
+    val versionLabel: String? = null,
+    val versionCode: Long? = null,
+    val installTimeEpochMillis: Long? = null,
+    val updateTimeEpochMillis: Long? = null,
+    val filePath: String? = null,
+    val uid: Int? = null,
+)
+
+sealed interface ThirdPartyApplicationsResult {
+    data class Completed(val applications: List<ThirdPartyApplicationProbe>) : ThirdPartyApplicationsResult
+
+    data class Failed(val failure: DeviceActionFailure) : ThirdPartyApplicationsResult
+}
 
 data class ManagedApplicationDetailsProbe(
     val componentId: String,
@@ -353,6 +381,8 @@ data class ManagedComponent(
     val packageName: String,
     val setup: AuthorizationSetupDeclaration? = null,
     val order: Int = Int.MAX_VALUE,
+    /** True for a package discovered in the car's user-installed app area. */
+    val isThirdParty: Boolean = false,
 )
 
 sealed interface AuthorizationAction {
@@ -760,6 +790,7 @@ object AuthorizationPlanFactory {
     }
 
     private fun isAllowedDynamicComponent(component: ManagedComponent): Boolean {
+        if (component.isThirdParty) return false
         if (component.componentId.isBlank() || !APP_ID_PATTERN.matches(component.componentId)) return false
         if (!PACKAGE_NAME_PATTERN.matches(component.packageName)) return false
         if (component.componentId in BUILT_IN_COMPONENT_IDS && managedComponent(component) == null) return false

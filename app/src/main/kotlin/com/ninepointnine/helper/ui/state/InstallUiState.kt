@@ -187,6 +187,8 @@ data class MaintenanceApplicationRow(
     val filePath: String? = null,
     val uid: Int? = null,
     val iconKey: String = componentId,
+    /** True only for packages covered by the installer's signed catalog. */
+    val isControlled: Boolean = true,
 )
 
 data class MaintenanceUpdateRow(

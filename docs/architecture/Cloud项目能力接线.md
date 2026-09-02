@@ -46,7 +46,7 @@ productId = 03helper
 displayName = 03车机助手
 androidPackage = com.ninepointnine.helper
 runtimeIdentifier = icar03
-releaseVersion = 1.0.1 (versionCode 2)
+releaseVersion = 1.0.2 (versionCode 3)
 ```
 
 | 环境 | 证书 SHA-256 | 构建方式 |
@@ -54,7 +54,7 @@ releaseVersion = 1.0.1 (versionCode 2)
 | staging | `aca4f178fea11ccc97a1373c8aa5345b274a3a783398929a9340a79ee83663af` | `assembleDebug` + `helperSigningEnvironment=staging` |
 | production | `31ca80dd21a5208eaabd5f3e1440a3db2f7dc79122e03eaa6ba01730fb31f18b` | `assembleRelease` + `helperProductionSigningPropertiesFile` |
 
-Cloud 已登记 `productId`、包名、环境、APK 公开证书摘要和免费 profile；03helper 不进入许可证或 Device Commerce 主链。`1.0.1 (2)` production APK 已固定接入独立配置公钥并完成本地构建、包名、版本、单 signer、v2 和证书摘要核验。Cloud 不接收 JKS、口令、私钥或本机路径。真实蓝奏入口、文件完整性、Logo 公网对象和 production 配置仍未上线，不得把本地产物就绪写成线上发布完成。
+Cloud 已登记 `productId`、包名、环境、APK 公开证书摘要和免费 profile；03helper 不进入许可证或 Device Commerce 主链。`1.0.2 (3)` production APK 已固定接入独立配置公钥并完成本地构建、包名、版本、单 signer、v2 和证书摘要核验。Cloud 不接收 JKS、口令、私钥或本机路径。真实蓝奏入口、文件完整性、Logo 公网对象和 production 配置仍未上线，不得把本地产物就绪写成线上发布完成。
 
 包名、证书 SHA-256 和最低 SDK 不由网络 payload 覆盖：包名、版本和最低 SDK 从 APK 读取，证书必须属于客户端内置官方发布者证书集合及其包名命名空间。未知算法、未知 key、字段缺失、过期或桌面条目缺失均 fail closed。
 

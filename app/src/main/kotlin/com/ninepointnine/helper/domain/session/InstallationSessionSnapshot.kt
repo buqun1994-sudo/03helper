@@ -488,6 +488,8 @@ data class MaintenanceSnapshot(
     val diagnostic: MaintenanceDiagnosticSnapshot? = null,
     val authorization: MaintenanceAuthorizationSnapshot = MaintenanceAuthorizationSnapshot(),
     val installationSelection: MaintenanceInstallationSelection? = null,
+    /** Live inventory discovered under the vehicle's `/data/app` third-party area. */
+    val thirdPartyApplications: List<ThirdPartyApplicationStatus> = emptyList(),
 )
 
 enum class MaintenanceInventoryState {
@@ -517,6 +519,39 @@ data class ManagedApplicationStatus(
     val filePath: String? = null,
     val uid: Int? = null,
     val authorizationState: MaintenanceAuthorizationState? = null,
+)
+
+/** A third-party package observed on the vehicle and eligible for typed maintenance actions. */
+data class ThirdPartyApplicationStatus(
+    val packageName: String,
+    val versionLabel: String? = null,
+    val versionCode: Long? = null,
+    val installTimeEpochMillis: Long? = null,
+    val updateTimeEpochMillis: Long? = null,
+    val filePath: String? = null,
+    val uid: Int? = null,
+)
+
+/** Shared ordering rule for every maintenance application projection. */
+internal fun compareInstallTimesDescending(left: Long?, right: Long?): Int = when {
+    left == null && right == null -> 0
+    left == null -> 1
+    right == null -> -1
+    else -> right.compareTo(left)
+}
+
+/** Stable row identity used to route actions back to a verified third-party package. */
+internal const val THIRD_PARTY_ROW_PREFIX = "third-party:"
+
+internal fun thirdPartyRowId(packageName: String): String = "$THIRD_PARTY_ROW_PREFIX$packageName"
+
+internal fun thirdPartyPackageFromRowId(rowId: String): String? = rowId
+    .takeIf { it.startsWith(THIRD_PARTY_ROW_PREFIX) }
+    ?.removePrefix(THIRD_PARTY_ROW_PREFIX)
+    ?.takeIf { THIRD_PARTY_PACKAGE_NAME_PATTERN.matches(it) }
+
+private val THIRD_PARTY_PACKAGE_NAME_PATTERN = Regex(
+    "^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$",
 )
 
 /** Atomically replaces verified identities without disturbing other installed baselines. */
@@ -584,6 +619,9 @@ internal fun MaintenanceSnapshot.toDurableMaintenanceBaseline(): MaintenanceSnap
     val verifiedApplications = normalized.managedApplications.filter { application ->
         application.installed && application.componentId in verifiedIds
     }
+    // Third-party rows are a live observation of the current car and are
+    // intentionally re-read when the user opens application management;
+    // persisting them would turn stale package data into a false baseline.
     return MaintenanceSnapshot(
         managedApplicationsState = if (verifiedIds.isEmpty()) {
             MaintenanceInventoryState.NOT_STARTED

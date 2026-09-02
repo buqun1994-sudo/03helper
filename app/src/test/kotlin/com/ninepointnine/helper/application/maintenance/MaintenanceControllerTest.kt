@@ -23,6 +23,8 @@ import com.ninepointnine.helper.domain.device.DeviceShortcutResult
 import com.ninepointnine.helper.domain.device.AuthorizationPlan
 import com.ninepointnine.helper.domain.device.ManagedApplicationProbe
 import com.ninepointnine.helper.domain.device.ManagedApplicationsResult
+import com.ninepointnine.helper.domain.device.ThirdPartyApplicationProbe
+import com.ninepointnine.helper.domain.device.ThirdPartyApplicationsResult
 import com.ninepointnine.helper.domain.device.MaintenanceCommandGateway
 import com.ninepointnine.helper.domain.device.MaintenanceDeviceResult
 import com.ninepointnine.helper.domain.device.InstallableArtifact
@@ -192,6 +194,46 @@ class MaintenanceControllerTest {
         assertEquals(listOf("desktop", "file-manager"), resolved.applications.map { it.componentId })
         assertEquals(listOf(true, true), resolved.applications.map { it.installed })
         assertEquals("applications_checked", (events[1] as InstallationSessionEvent.MaintenanceActionCompleted).resultCode)
+    }
+
+    @Test
+    fun `manage applications also emits the complete third party inventory`() = runBlocking {
+        val events = mutableListOf<InstallationSessionEvent>()
+        val gateway = FakeGateway().apply {
+            managedApplications = ManagedApplicationsResult.Completed(
+                listOf(ManagedApplicationProbe("desktop", "com.tcrrry.desktop", true)),
+            )
+            thirdPartyApplications = ThirdPartyApplicationsResult.Completed(
+                listOf(
+                    ThirdPartyApplicationProbe(
+                        packageName = "com.example.newest",
+                        versionLabel = "3.0",
+                        installTimeEpochMillis = 200L,
+                        filePath = "/data/app/com.example.newest-x/base.apk",
+                    ),
+                    ThirdPartyApplicationProbe(
+                        packageName = "com.example.older",
+                        versionLabel = "1.0",
+                        installTimeEpochMillis = 100L,
+                        filePath = "/data/app/com.example.older-y/base.apk",
+                    ),
+                ),
+            )
+        }
+
+        MaintenanceController(tempCache(), tempDiagnostics()).execute(
+            actionId = MaintenanceActionId.MANAGE_APPS,
+            snapshot = maintenanceSnapshot(emptyList()),
+            connection = lease(gateway),
+            eventPort = InstallationSessionEventPort { events += it },
+        )
+
+        val resolved = events.filterIsInstance<InstallationSessionEvent.MaintenanceApplicationsResolved>().single()
+        assertEquals(
+            listOf("com.example.newest", "com.example.older"),
+            resolved.thirdPartyApplications?.map { it.packageName },
+        )
+        assertTrue(events.any { it == InstallationSessionEvent.MaintenanceActionCompleted(MaintenanceActionId.MANAGE_APPS, "applications_checked") })
     }
 
     @Test
@@ -534,6 +576,7 @@ class MaintenanceControllerTest {
 
     private class FakeGateway : AdbCommandGateway, MaintenanceCommandGateway {
         var managedApplications: ManagedApplicationsResult = ManagedApplicationsResult.Completed(emptyList())
+        var thirdPartyApplications: ThirdPartyApplicationsResult = ThirdPartyApplicationsResult.Completed(emptyList())
         var authorizationStatuses: com.ninepointnine.helper.domain.device.MaintenanceAuthorizationResult =
             com.ninepointnine.helper.domain.device.MaintenanceAuthorizationResult.Completed(emptyList())
         var authorizationInventory: List<ManagedApplicationProbe> = emptyList()
@@ -567,6 +610,8 @@ class MaintenanceControllerTest {
         override suspend fun inspectManagedApplications(
             components: List<com.ninepointnine.helper.domain.device.ManagedComponent>,
         ): ManagedApplicationsResult = managedApplications
+
+        override suspend fun inspectThirdPartyApplications(): ThirdPartyApplicationsResult = thirdPartyApplications
 
         override suspend fun inspectInstalledApplicationInventory(
             components: List<com.ninepointnine.helper.domain.device.ManagedComponent>,

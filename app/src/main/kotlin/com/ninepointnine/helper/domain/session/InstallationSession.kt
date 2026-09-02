@@ -1129,6 +1129,11 @@ class InstallationSession(
                         current.maintenance.managedApplicationsFailureRetryable
                     },
                     managedApplications = if (refreshInventory) emptyList() else current.maintenance.managedApplications,
+                    thirdPartyApplications = if (refreshInventory) {
+                        emptyList()
+                    } else {
+                        current.maintenance.thirdPartyApplications
+                    },
                     // A new route owns a new page payload. Never let a prior
                     // application detail/selection leak into this action.
                     applicationAction = null,
@@ -1186,10 +1191,15 @@ class InstallationSession(
             )
             return
         }
+        val thirdPartyPackage = thirdPartyPackageFromRowId(command.componentId)
+        val knownThirdParty = thirdPartyPackage != null &&
+            current.maintenance.thirdPartyApplications.any { it.packageName == thirdPartyPackage } &&
+            current.maintenance.managedApplications.none { it.packageName == thirdPartyPackage }
         val known = current.components.any { it.id == command.componentId } ||
             current.artifactManifests.any { it.componentId == command.componentId } ||
             current.maintenance.availableManifests.any { it.componentId == command.componentId } ||
-            current.maintenance.managedApplications.any { it.componentId == command.componentId }
+            current.maintenance.managedApplications.any { it.componentId == command.componentId } ||
+            knownThirdParty
         if (!known) {
             startNewGeneration(
                 current.copy(
@@ -2544,6 +2554,30 @@ class InstallationSession(
         ) {
             return
         }
+        val refreshedThirdParty = event.refreshedThirdPartyApplications
+        if (refreshedThirdParty != null && (
+                refreshedThirdParty.size != refreshedThirdParty.distinctBy { it.packageName }.size ||
+                    refreshedThirdParty.any(::isInvalidThirdPartyApplication)
+                )
+        ) {
+            publish(
+                current.copy(
+                    maintenance = current.maintenance.copy(
+                        applicationAction = active.copy(
+                            status = MaintenanceActionStatus.FAILED,
+                            resultCode = null,
+                            reasonCode = "maintenance_third_party_inventory_invalid",
+                            retryable = false,
+                        ),
+                        managedApplicationsState = MaintenanceInventoryState.FAILED,
+                        managedApplicationsFailureReason = "maintenance_third_party_inventory_invalid",
+                        managedApplicationsFailureRetryable = false,
+                    ),
+                ),
+                acceptedEventSequence,
+            )
+            return
+        }
         publish(
             current.copy(
                 maintenance = current.maintenance.copy(
@@ -2559,6 +2593,8 @@ class InstallationSession(
                         } else {
                             current.maintenance.managedApplications
                         },
+                    thirdPartyApplications = event.refreshedThirdPartyApplications
+                        ?: current.maintenance.thirdPartyApplications,
                     installedManifests = if (event.actionId == MaintenanceApplicationActionId.UNINSTALL) {
                         current.maintenance.installedManifests.filterNot { it.componentId == event.componentId }
                     } else {
@@ -2746,6 +2782,18 @@ class InstallationSession(
         val normalizedApplications = event.applications
             .filter { it.installed }
             .distinctBy { it.componentId }
+        val normalizedThirdPartyApplications = event.thirdPartyApplications
+            ?.distinctBy { it.packageName }
+            ?.sortedWith { left, right ->
+                val installTime = compareInstallTimesDescending(
+                    left.installTimeEpochMillis,
+                    right.installTimeEpochMillis,
+                )
+                if (installTime != 0) installTime else left.packageName.compareTo(right.packageName)
+            }
+        val thirdPartyInvalid = normalizedThirdPartyApplications?.let { applications ->
+            applications.size != event.thirdPartyApplications?.size || applications.any(::isInvalidThirdPartyApplication)
+        } ?: false
         val invalid = normalizedApplications.any { application ->
             application.componentId !in knownIds ||
                 !packagePattern.matches(application.packageName) ||
@@ -2754,7 +2802,9 @@ class InstallationSession(
         if (current.state != InstallationSessionState.MAINTENANCE ||
             (activeAction !in acceptedActions && !applicationRefreshInFlight) ||
             event.applications.size != normalizedApplications.size ||
-            invalid
+            invalid ||
+            thirdPartyInvalid ||
+            (event.thirdPartyApplications != null && activeAction != MaintenanceActionId.MANAGE_APPS)
         ) {
             if (
                 current.state == InstallationSessionState.MAINTENANCE &&
@@ -2768,6 +2818,8 @@ class InstallationSession(
             current.copy(
                 maintenance = current.maintenance.copy(
                     managedApplications = normalizedApplications,
+                    thirdPartyApplications = normalizedThirdPartyApplications
+                        ?: current.maintenance.thirdPartyApplications,
                     installedManifests = current.maintenance.installedManifests.filter { baseline ->
                         normalizedApplications.any { it.componentId == baseline.componentId }
                     },
@@ -2811,6 +2863,23 @@ class InstallationSession(
         ) return true
         return com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
             .isAllowedPackageName(componentId, packageName)
+    }
+
+    private fun isInvalidThirdPartyApplication(application: ThirdPartyApplicationStatus): Boolean {
+        if (!Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$").matches(application.packageName)) {
+            return true
+        }
+        val path = application.filePath ?: return true
+        if (!path.startsWith("/data/app/") || !path.endsWith("/base.apk")) return true
+        if (path.split('/').any { it == "." || it == ".." }) return true
+        if (application.versionCode?.let { it < 0L } == true ||
+            application.installTimeEpochMillis?.let { it < 0L } == true ||
+            application.updateTimeEpochMillis?.let { it < 0L } == true ||
+            application.uid?.let { it < 0 } == true
+        ) {
+            return true
+        }
+        return false
     }
 
     private fun handleMaintenanceCatalogRefreshed(event: InstallationSessionEvent.MaintenanceCatalogRefreshed) {

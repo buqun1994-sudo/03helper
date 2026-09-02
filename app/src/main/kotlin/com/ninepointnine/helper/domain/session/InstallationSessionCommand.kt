@@ -151,6 +151,8 @@ sealed interface InstallationSessionEvent {
 
     data class MaintenanceApplicationsResolved(
         val applications: List<ManagedApplicationStatus>,
+        /** Null means this action did not request a third-party inventory read. */
+        val thirdPartyApplications: List<ThirdPartyApplicationStatus>? = null,
     ) : InstallationSessionEvent
 
     data class MaintenanceApplicationActionCompleted(
@@ -159,6 +161,8 @@ sealed interface InstallationSessionEvent {
         val resultCode: String = "completed",
         /** Fresh car inventory read after a destructive application action. */
         val refreshedApplications: List<ManagedApplicationStatus>? = null,
+        /** Fresh third-party inventory read after the action. */
+        val refreshedThirdPartyApplications: List<ThirdPartyApplicationStatus>? = null,
         /** Set when the action succeeded but the follow-up inventory read did not. */
         val inventoryRefreshFailureReason: String? = null,
         val inventoryRefreshRetryable: Boolean = true,

@@ -10,6 +10,8 @@ import com.ninepointnine.helper.data.download.ArtifactCache
 import com.ninepointnine.helper.domain.device.DeviceActionConnectionLease
 import com.ninepointnine.helper.domain.device.ManagedApplicationProbe
 import com.ninepointnine.helper.domain.device.ManagedApplicationsResult
+import com.ninepointnine.helper.domain.device.ThirdPartyApplicationProbe
+import com.ninepointnine.helper.domain.device.ThirdPartyApplicationsResult
 import com.ninepointnine.helper.domain.device.ManagedApplicationAuthorizationStatus
 import com.ninepointnine.helper.domain.device.ManagedApplicationDetailsProbeResult
 import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationResult
@@ -24,6 +26,8 @@ import com.ninepointnine.helper.domain.session.ArtifactCatalogStage
 import com.ninepointnine.helper.domain.session.MaintenanceActionId
 import com.ninepointnine.helper.domain.session.MaintenanceApplicationActionId
 import com.ninepointnine.helper.domain.session.ManagedApplicationStatus
+import com.ninepointnine.helper.domain.session.ThirdPartyApplicationStatus
+import com.ninepointnine.helper.domain.session.thirdPartyPackageFromRowId
 import com.ninepointnine.helper.domain.session.requiresConnectedDevice
 import com.ninepointnine.helper.domain.session.MaintenanceUpdateState
 import com.ninepointnine.helper.domain.session.MaintenanceUpdateStatus
@@ -108,7 +112,7 @@ class MaintenanceController(
             )
             return
         }
-        val component = managedComponents(snapshot).firstOrNull { it.componentId == componentId }
+        val component = applicationTarget(snapshot, componentId)
         if (component == null) {
             eventPort.emit(
                 InstallationSessionEvent.MaintenanceApplicationActionFailed(
@@ -139,7 +143,7 @@ class MaintenanceController(
                             com.ninepointnine.helper.domain.session.ManagedApplicationDetails(
                                 componentId = details.componentId,
                                 displayName = snapshot.components.firstOrNull { it.id == componentId }
-                                    ?.displayName ?: componentId,
+                                    ?.displayName ?: details.packageName,
                                 packageName = details.packageName,
                                 versionLabel = details.versionLabel,
                                 versionCode = details.versionCode,
@@ -161,6 +165,7 @@ class MaintenanceController(
                     // destructive operation. Inventory refresh is a separate,
                     // best-effort read and can never rewrite success as failure.
                     var refreshedApplications: List<ManagedApplicationStatus>? = null
+                    var refreshedThirdPartyApplications: List<ThirdPartyApplicationStatus>? = null
                     var refreshFailureReason: String? = null
                     var refreshFailureRetryable = true
                     if (actionId == MaintenanceApplicationActionId.UNINSTALL) {
@@ -177,6 +182,19 @@ class MaintenanceController(
                                     refreshFailureRetryable = refreshed.failure.retryable
                                 }
                             }
+                            if (refreshFailureReason == null) {
+                                when (val refreshedThirdParty = gateway.inspectThirdPartyApplications()) {
+                                    is ThirdPartyApplicationsResult.Completed -> {
+                                        refreshedThirdPartyApplications = refreshedThirdParty.applications
+                                            .map { it.toSnapshotStatus() }
+                                    }
+
+                                    is ThirdPartyApplicationsResult.Failed -> {
+                                        refreshFailureReason = refreshedThirdParty.failure.reasonCode
+                                        refreshFailureRetryable = refreshedThirdParty.failure.retryable
+                                    }
+                                }
+                            }
                         } catch (_: Exception) {
                             refreshFailureReason = "maintenance_inventory_refresh_failed"
                         }
@@ -187,6 +205,7 @@ class MaintenanceController(
                             actionId = actionId,
                             resultCode = result.resultCode,
                             refreshedApplications = refreshedApplications,
+                            refreshedThirdPartyApplications = refreshedThirdPartyApplications,
                             inventoryRefreshFailureReason = refreshFailureReason,
                             inventoryRefreshRetryable = refreshFailureRetryable,
                         ),
@@ -428,9 +447,21 @@ class MaintenanceController(
                 return false
             }
             is ManagedApplicationsResult.Completed -> {
+                val thirdPartyApplications = if (actionId == MaintenanceActionId.MANAGE_APPS) {
+                    when (val thirdParty = gateway.inspectThirdPartyApplications()) {
+                        is ThirdPartyApplicationsResult.Completed -> thirdParty.applications.map { it.toSnapshotStatus() }
+                        is ThirdPartyApplicationsResult.Failed -> {
+                            fail(actionId, thirdParty.failure.reasonCode, thirdParty.failure.retryable, eventPort)
+                            return false
+                        }
+                    }
+                } else {
+                    null
+                }
                 eventPort.emit(
                     InstallationSessionEvent.MaintenanceApplicationsResolved(
                         applications = result.applications.filter { it.installed }.map { it.toSnapshotStatus() },
+                        thirdPartyApplications = thirdPartyApplications,
                     ),
                 )
                 if (completeAction) complete(actionId, "applications_checked", eventPort)
@@ -521,6 +552,27 @@ class MaintenanceController(
         connection: com.ninepointnine.helper.domain.device.DeviceConnectionLease?,
     ) = (connection as? DeviceActionConnectionLease)?.maintenanceGateway
 
+    /** Resolves a row against the current snapshot before any device action. */
+    private fun applicationTarget(
+        snapshot: InstallationSessionSnapshot,
+        componentId: String,
+    ): ManagedComponent? {
+        managedComponents(snapshot).firstOrNull { it.componentId == componentId }?.let { return it }
+        val packageName = thirdPartyPackageFromRowId(componentId) ?: return null
+        val observed = snapshot.maintenance.thirdPartyApplications
+            .firstOrNull { it.packageName == packageName }
+            ?: return null
+        // A package that is also in the controlled catalog is represented by
+        // the controlled row; never route a hidden duplicate through the
+        // generic third-party action path.
+        if (managedComponents(snapshot).any { it.packageName == observed.packageName }) return null
+        return ManagedComponent(
+            componentId = componentId,
+            packageName = observed.packageName,
+            isThirdParty = true,
+        )
+    }
+
     private fun complete(
         actionId: MaintenanceActionId,
         resultCode: String,
@@ -550,6 +602,17 @@ class MaintenanceController(
         filePath = filePath,
         uid = uid,
     )
+
+    private fun ThirdPartyApplicationProbe.toSnapshotStatus(): ThirdPartyApplicationStatus =
+        ThirdPartyApplicationStatus(
+            packageName = packageName,
+            versionLabel = versionLabel,
+            versionCode = versionCode,
+            installTimeEpochMillis = installTimeEpochMillis,
+            updateTimeEpochMillis = updateTimeEpochMillis,
+            filePath = filePath,
+            uid = uid,
+        )
 
     private fun managedComponents(snapshot: InstallationSessionSnapshot): List<ManagedComponent> {
         val byId = linkedMapOf<String, ManagedComponent>()

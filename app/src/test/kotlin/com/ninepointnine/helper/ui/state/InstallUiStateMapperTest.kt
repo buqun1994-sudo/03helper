@@ -33,6 +33,7 @@ import com.ninepointnine.helper.domain.session.MaintenanceInstallationSelection
 import com.ninepointnine.helper.domain.session.MaintenanceInstallationOption
 import com.ninepointnine.helper.domain.session.ArtifactCatalogStage
 import com.ninepointnine.helper.domain.session.ManagedApplicationStatus
+import com.ninepointnine.helper.domain.session.ThirdPartyApplicationStatus
 import com.ninepointnine.helper.domain.session.ResultKind
 import com.ninepointnine.helper.domain.session.SessionFailure
 import com.ninepointnine.helper.domain.session.SessionProgress
@@ -870,6 +871,55 @@ class InstallUiStateMapperTest {
         assertEquals(listOf("desktop", "lyrics"), state.applications.map { it.displayName })
         assertEquals(listOf(true, false), state.applications.map { it.installed })
         assertFalse(state.connected)
+    }
+
+    @Test
+    fun `maintenance applications are flat, newest first, and third party rows are actionable`() {
+        val state = InstallUiStateMapper.map(
+            InstallationSessionSnapshot(
+                state = InstallationSessionState.MAINTENANCE,
+                device = device,
+                components = listOf(component("desktop", required = true, size = "12 MB")),
+                maintenance = MaintenanceSnapshot(
+                    managedApplications = listOf(
+                        ManagedApplicationStatus(
+                            componentId = "desktop",
+                            packageName = "com.tcrrry.desktop",
+                            installed = true,
+                            installTimeEpochMillis = 100L,
+                        ),
+                    ),
+                    thirdPartyApplications = listOf(
+                        ThirdPartyApplicationStatus(
+                            packageName = "com.example.newest",
+                            versionLabel = "3.0",
+                            installTimeEpochMillis = 300L,
+                            filePath = "/data/app/com.example.newest-x/base.apk",
+                        ),
+                        // The controlled row wins when the same package appears
+                        // in both inventories, even if the observed copy is newer.
+                        ThirdPartyApplicationStatus(
+                            packageName = "com.tcrrry.desktop",
+                            versionLabel = "untrusted",
+                            installTimeEpochMillis = 999L,
+                            filePath = "/data/app/com.tcrrry.desktop-y/base.apk",
+                        ),
+                        ThirdPartyApplicationStatus(
+                            packageName = "com.example.unknown",
+                            filePath = "/data/app/com.example.unknown-z/base.apk",
+                        ),
+                    ),
+                ),
+            ),
+        ) as InstallUiState.Maintenance
+
+        assertEquals(
+            listOf("com.example.newest", "com.tcrrry.desktop", "com.example.unknown"),
+            state.applications.map { it.packageName },
+        )
+        assertEquals(listOf(false, true, false), state.applications.map { it.isControlled })
+        assertEquals("3.0", state.applications.first().versionLabel)
+        assertTrue(state.applications.last().componentId.startsWith("third-party:"))
     }
 
     @Test

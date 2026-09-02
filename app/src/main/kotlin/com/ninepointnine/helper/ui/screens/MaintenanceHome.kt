@@ -49,6 +49,9 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 import com.ninepointnine.helper.R
 import com.ninepointnine.helper.domain.session.MaintenanceActionId
 import com.ninepointnine.helper.domain.session.MaintenanceGroupId
@@ -405,8 +408,9 @@ private fun MaintenanceAuthorizationPage(
     val checking = state.authorization.state == MaintenanceAuthorizationFlowState.CHECKING
     val actionRunning = state.feedback?.actionId == MaintenanceActionId.REPAIR_CONFIGURATION &&
         state.feedback?.status == MaintenanceActionStatus.RUNNING
+    val controlledApplications = state.applications.filter { it.isControlled }
     val authorizationRows = state.authorization.applications.ifEmpty {
-        state.applications.map { app ->
+        controlledApplications.map { app ->
             MaintenanceAuthorizationRow(
                 componentId = app.componentId,
                 packageName = app.packageName,
@@ -420,7 +424,7 @@ private fun MaintenanceAuthorizationPage(
     val completedRepair = state.authorization.state == MaintenanceAuthorizationFlowState.COMPLETED
     val inventoryLoading = state.applicationsState == MaintenanceInventoryState.LOADING
     val inventoryFailed = state.applicationsState == MaintenanceInventoryState.FAILED
-    val hasApplications = authorizationRows.isNotEmpty() || state.applications.isNotEmpty()
+    val hasApplications = authorizationRows.isNotEmpty() || controlledApplications.isNotEmpty()
     val retryableFailure = state.feedback?.actionId == MaintenanceActionId.REPAIR_CONFIGURATION &&
         state.feedback?.status == MaintenanceActionStatus.FAILED &&
         state.feedback?.retryable == true
@@ -598,7 +602,16 @@ private fun MaintenanceManageAppsPage(
                         } else if (state.applications.isEmpty()) {
                             item { MaintenanceEmptyState(stringResource(R.string.maintenance_no_installed_apps)) }
                         } else {
-                            items(state.applications, key = { it.componentId }) { app ->
+                            items(
+                                state.applications,
+                                key = {
+                                    if (it.isControlled) {
+                                        "controlled:${it.componentId}"
+                                    } else {
+                                        "third-party:${it.packageName}"
+                                    }
+                                },
+                            ) { app ->
                                 ManagedApplicationCard(
                                     app = app,
                                     action = state.applicationAction,
@@ -706,7 +719,7 @@ private fun ManagedApplicationCard(
                             app.versionLabel ?: app.versionCode?.let {
                                 stringResource(R.string.maintenance_version_code_short, it)
                             },
-                            app.packageName.ifBlank { null },
+                            app.packageName.ifBlank { null }.takeIf { app.isControlled },
                         ).joinToString(" · ")
                             .ifBlank { stringResource(R.string.maintenance_version_unknown) },
                         color = InstallerColors.AuxiliaryWhite,
@@ -714,6 +727,23 @@ private fun ManagedApplicationCard(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
+                    if (!app.isControlled) {
+                        Text(
+                            text = stringResource(R.string.maintenance_third_party_label),
+                            color = InstallerColors.AuxiliaryWhite,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                    app.installTimeEpochMillis?.let { timestamp ->
+                        Text(
+                            text = stringResource(
+                                R.string.maintenance_installed_at,
+                                formatApplicationTimestamp(timestamp),
+                            ),
+                            color = InstallerColors.AuxiliaryWhite,
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
                 }
                 Text(
                     text = stringResource(if (app.installed) R.string.maintenance_app_installed else R.string.maintenance_app_not_installed),
@@ -727,11 +757,14 @@ private fun ManagedApplicationCard(
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 IconTextActionButton(stringResource(R.string.maintenance_uninstall), "trash_2", onUninstall, Modifier.weight(1f), app.installed && actionEnabled)
-                IconTextActionButton(stringResource(R.string.maintenance_details), "info", onDetails, Modifier.weight(1f), actionEnabled)
+                IconTextActionButton(stringResource(R.string.maintenance_details), "info", onDetails, Modifier.weight(1f), app.installed && actionEnabled)
             }
         }
     }
 }
+
+private fun formatApplicationTimestamp(epochMillis: Long): String =
+    SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(epochMillis))
 
 @Composable
 private fun ApplicationActionToast(

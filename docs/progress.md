@@ -1,3 +1,12 @@
+# 2026-09-02 第三方应用管理动作扩展与 03helper 1.0.2 产物（完成，未发布）
+
+1. “管理已安装应用”已接入独立的第三方库存端口：车机执行 `pm list packages --user 0 -3 -f`，只接受 `/data/app/.../base.apk`，明确排除系统目录、split APK 和路径穿越；再从结构化包详情读取版本、UID、安装时间和更新时间。Android 9 的 `yyyy-MM-dd HH:mm:ss` 时间已纳入解析，按 `firstInstallTime` 倒序、包名稳定排序。
+2. 受控应用库存与第三方观测在会话中分开保存，UI 投影为一张不分组的平铺清单；同包名由受控行胜出，第三方行同样提供启动、强停、详情和卸载确认。第三方动作使用 `third-party:<package>` 行身份，每次设备动作前重新复核 `-3` 库存，不进入授权、安装或任意 shell 主链；第三方实时观测不写入维护基线。
+3. 设备适配器、会话、维护控制器和 UI 已接入第三方四类动作；新增第三方启动解析、启动 / 强停 / 卸载 / 详情、库存复核、伪造行拒绝和 UI 投影 JVM 回归覆盖均通过，授权 fallback 仍只消费受控应用。
+4. 按用户最新要求保留 Release `1.0.2 (3)`，Debug / staging 保留 `0.1.0 (1)`；不升版本、不卸载、不清数据、不降级、不执行设备覆盖安装。正式与测试 APK / ZIP 已覆盖桌面同名交付目录：正式 APK `1a8fc77e8d696dc864cdd38cd9882d55f1538882147d8c1d629f3fe737782adc`、ZIP `4cf399d1e4feb6bc769cea095e38462867ea693aae518ab0eeb7b5267bcc2d67`；测试 APK `0a31670d238df9ea01a06472a8bd27e24305e145490db3ba4a51bd23b801215a`、ZIP `50142040f9b4347f3e619b9c4bff0cc2b8c34cd34831402c76ee54d800baaf52`。
+5. 本机验证：Debug / Release 单测、Kotlin 编译、Debug Lint、项目文档检查、Skills 检查和 `git diff --check` 均通过；两 APK 包名均为 `com.ninepointnine.helper`，正式 `1.0.2 (3)` / staging `0.1.0 (1)`，均 v2、单 signer，ZIP 各含一个 APK 且归档字节一致。按用户要求未执行设备覆盖安装或运行级 smoke。
+6. 本轮未提交、未推送、未上传、未发布；共享 03 APP 登记库如仍与本地 `1.0.2 (3)` 不一致，只记录为外部台账阻断，不修改 Cloud。
+
 # 2026-08-31 蓝奏目录解析修复与助手双环境重建（完成，未发布）
 
 1. 修复 `AndroidLanzouWebViewHost` 对当前蓝奏文件夹 DOM 的取名逻辑：文件名只读取 `.filename` 节点，嵌套的 `.filesize`、下载和时间元数据不会再拼入 ZIP 名称；保留渐进目录快照、超时和单项失败隔离边界。
