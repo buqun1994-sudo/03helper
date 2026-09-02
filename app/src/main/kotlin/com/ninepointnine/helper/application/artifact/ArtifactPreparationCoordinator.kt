@@ -95,7 +95,11 @@ class ArtifactPreparationCoordinator(
      * [InstallationSessionEvent.ArtifactBatchPrepared] event.
      */
     suspend fun prepare(plan: ArtifactPreparationPlan): ArtifactPreparationResult =
-        prepareInternal(plan)
+        prepareInternal(
+            plan.copy(
+                components = plan.components.map(::normalizeComponentSource),
+            ),
+        )
 
     private suspend fun prepareInternal(plan: ArtifactPreparationPlan): ArtifactPreparationResult {
         val expectedIds = plan.batch.preparationComponentIds
@@ -166,11 +170,13 @@ class ArtifactPreparationCoordinator(
                 unresolved.mapTo(linkedSetOf()) { it.componentId },
             )) {
                 is LanzouFolderResolutionResult.Success -> {
-                    folderArtifacts = resolved.artifacts.associateBy { it.component.componentId }
+                    folderArtifacts = resolved.artifacts.associateBy {
+                        canonicalComponentId(it.component.componentId)
+                    }
                     folderFailures = resolved.appFailures.associate {
-                        it.componentId to ArtifactFailure(
+                        canonicalComponentId(it.componentId) to ArtifactFailure(
                             phase = ArtifactFailurePhase.SOURCE_RESOLUTION,
-                            componentId = it.componentId,
+                            componentId = canonicalComponentId(it.componentId),
                             sourceKind = ArtifactSourceKind.LANZOU_SHARE,
                             reasonCode = it.reasonCode,
                             retryable = it.retryable,
@@ -202,7 +208,10 @@ class ArtifactPreparationCoordinator(
                     ),
                 )
             } else {
-                prepareFromDynamicFolderArtifact(plan.config, artifact)
+                prepareFromDynamicFolderArtifact(
+                    plan.config,
+                    artifact.copy(component = normalizeComponentSource(artifact.component)),
+                )
             }
             when (attempt) {
                 is PlanAttemptResult.Success -> prepared += attempt.value
@@ -299,6 +308,24 @@ class ArtifactPreparationCoordinator(
         ) ?: return null
         return LocalCandidate(file, metadata, identity)
     }
+
+    private fun canonicalComponentId(componentId: String): String =
+        if (InstallerSelfIdentity.isSelfComponentId(componentId)) {
+            InstallerSelfIdentity.COMPONENT_ID
+        } else {
+            componentId
+        }
+
+    private fun normalizeComponentSource(component: InstallerComponentSource): InstallerComponentSource =
+        if (InstallerSelfIdentity.isSelfComponentId(component.componentId)) {
+            component.copy(
+                componentId = InstallerSelfIdentity.COMPONENT_ID,
+                packageName = InstallerSelfIdentity.PACKAGE_NAME,
+                trustProfileId = InstallerSelfIdentity.TRUST_PROFILE_ID,
+            )
+        } else {
+            component
+        }
 
     private fun prepareFromLocalCandidate(
         config: com.ninepointnine.helper.data.catalog.InstallerDistributionConfig,

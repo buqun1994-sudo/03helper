@@ -11,6 +11,9 @@ import com.ninepointnine.helper.application.maintenance.MaintenanceBaselineProje
 import com.ninepointnine.helper.data.artifact.ApkIconRepository
 import com.ninepointnine.helper.domain.artifact.ArtifactFailure
 import com.ninepointnine.helper.domain.artifact.ArtifactFailurePhase
+import com.ninepointnine.helper.domain.artifact.ArtifactManifest
+import com.ninepointnine.helper.domain.artifact.ArtifactVersion
+import com.ninepointnine.helper.domain.artifact.InstallerSelfIdentity
 import com.ninepointnine.helper.application.artifact.ArtifactPreparationResult
 import com.ninepointnine.helper.application.artifact.PreparedArtifact
 import com.ninepointnine.helper.domain.device.ConnectedDevice
@@ -26,7 +29,17 @@ import com.ninepointnine.helper.domain.session.InstallationSessionState
 import com.ninepointnine.helper.domain.session.InstallationBatchPlan
 import com.ninepointnine.helper.domain.session.ArtifactCatalogStage
 import com.ninepointnine.helper.domain.session.MaintenanceActionStatus
+import com.ninepointnine.helper.domain.device.InstalledArtifactEvidence
+import com.ninepointnine.helper.domain.session.InstallationBatchReceipt
+import com.ninepointnine.helper.domain.session.InstallationComponentReceipt
+import com.ninepointnine.helper.domain.session.InstallationStageReceipt
+import com.ninepointnine.helper.domain.session.InstallationStageReceiptStatus
+import com.ninepointnine.helper.domain.session.AuthorizationStageReceipt
+import com.ninepointnine.helper.domain.session.AuthorizationStageReceiptStatus
+import com.ninepointnine.helper.domain.session.AvailabilityStageReceipt
+import com.ninepointnine.helper.domain.session.AvailabilityStageReceiptStatus
 import com.ninepointnine.helper.domain.session.failureCategoryForReasonCode
+import java.io.File
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -55,6 +68,39 @@ private sealed interface MaintenancePersistenceOperation {
 enum class ArtifactWorkspaceCleanupMode {
     COMPLETE,
     PRESERVE_RESUMABLE_DOWNLOADS,
+}
+
+/**
+ * Platform boundary for the helper APK update. Artifact preparation remains
+ * shared with vehicle installs; only the final write endpoint is different.
+ */
+data class StagedSelfUpdate(
+    val manifest: ArtifactManifest,
+    val apkFile: File,
+)
+
+sealed interface SelfUpdateStageResult {
+    data class Ready(val staged: StagedSelfUpdate) : SelfUpdateStageResult
+    data class Failed(val reasonCode: String, val retryable: Boolean = true) : SelfUpdateStageResult
+}
+
+sealed interface SelfUpdateLaunchResult {
+    data object Started : SelfUpdateLaunchResult
+    data class Failed(val reasonCode: String, val retryable: Boolean = true) : SelfUpdateLaunchResult
+}
+
+sealed interface SelfUpdateVerificationResult {
+    data class Confirmed(val evidence: InstalledArtifactEvidence) : SelfUpdateVerificationResult
+    data object Pending : SelfUpdateVerificationResult
+    data class Failed(val reasonCode: String, val retryable: Boolean = true) : SelfUpdateVerificationResult
+}
+
+/** Android-specific installer adapter; no UI or session state lives here. */
+interface SelfUpdateInstaller {
+    fun stage(artifact: PreparedArtifact): SelfUpdateStageResult
+    fun launch(staged: StagedSelfUpdate): SelfUpdateLaunchResult
+    fun verifyInstalled(manifest: ArtifactManifest): SelfUpdateVerificationResult
+    fun clear(staged: StagedSelfUpdate)
 }
 
 /** Sole device-batch execution boundary for one immutable installation batch. */
@@ -89,6 +135,8 @@ class InstallerRuntime(
     val apkIconRepository: ApkIconRepository? = null,
     /** Sole device-installation hook; the immutable domain batch is the complete request. */
     private val executeDeviceInstallationWithBatch: InstallationBatchExecutor? = null,
+    /** Optional Android package-installer endpoint for [InstallationFlow.SELF_UPDATE]. */
+    private val selfUpdateInstaller: SelfUpdateInstaller? = null,
 ) : AutoCloseable {
     private val runtimeJob = SupervisorJob(coroutineContext[Job])
     private val scope = CoroutineScope(coroutineContext + runtimeJob)
@@ -118,6 +166,14 @@ class InstallerRuntime(
     private var manualMaintenanceDisconnect = false
     private var lastMaintenancePersistenceOperation: MaintenancePersistenceOperation? = null
     private var closed = false
+    private var pendingSelfUpdate: PendingSelfUpdate? = null
+
+    private data class PendingSelfUpdate(
+        val sessionId: Long,
+        val batchId: Long,
+        val staged: StagedSelfUpdate,
+        var launchIssued: Boolean = false,
+    )
 
     init {
         scope.launch {
@@ -255,6 +311,25 @@ class InstallerRuntime(
                 beginArtifactPreparation(after)
             }
 
+            is InstallationSessionCommand.StartMaintenanceComponentUpdate -> {
+                if (before.state == InstallationSessionState.MAINTENANCE &&
+                    after.state == InstallationSessionState.SELECTION_CONFIRMED
+                ) {
+                    if (after.sessionId != before.sessionId) cancelTransferWork()
+                    beginArtifactPreparation(after)
+                }
+            }
+
+            InstallationSessionCommand.InstallPreparedSelfUpdate -> {
+                if (
+                    before.state == InstallationSessionState.ARTIFACTS_READY &&
+                    after.state == InstallationSessionState.INSTALLING &&
+                    after.installationFlow == com.ninepointnine.helper.domain.session.InstallationFlow.SELF_UPDATE
+                ) {
+                    launchPreparedSelfUpdate(after)
+                }
+            }
+
             InstallationSessionCommand.CancelInstallation -> {
                 if (after.sessionId != before.sessionId) cancelTransferWork()
             }
@@ -363,6 +438,7 @@ class InstallerRuntime(
     @Synchronized
     fun onForeground(): InstallationSessionSnapshot {
         foregroundGeneration += 1L
+        pollSelfUpdate()
         val current = session.currentSnapshot()
         return when {
             current.state == InstallationSessionState.IDLE -> dispatch(InstallationSessionCommand.StartDiscovery)
@@ -402,6 +478,136 @@ class InstallerRuntime(
         session.close()
     }
 
+    private fun launchPreparedSelfUpdate(snapshot: InstallationSessionSnapshot) {
+        val pending = pendingSelfUpdate
+        val installer = selfUpdateInstaller
+        if (pending == null || installer == null ||
+            pending.sessionId != snapshot.sessionId ||
+            pending.batchId != snapshot.installationBatch?.batchId
+        ) {
+            eventPortFor(snapshot).emit(
+                InstallationSessionEvent.FatalError(
+                    category = FailureCategory.INSTALLATION,
+                    reasonCode = "self_update_package_missing",
+                ),
+            )
+            return
+        }
+        when (val result = runCatching { installer.launch(pending.staged) }.getOrElse {
+            SelfUpdateLaunchResult.Failed("self_update_installer_failed", retryable = true)
+        }) {
+            SelfUpdateLaunchResult.Started -> {
+                pending.launchIssued = true
+            }
+
+            is SelfUpdateLaunchResult.Failed -> {
+                pendingSelfUpdate = null
+                runCatching { installer.clear(pending.staged) }
+                eventPortFor(snapshot).emit(
+                    InstallationSessionEvent.FatalError(
+                        category = FailureCategory.INSTALLATION,
+                        reasonCode = result.reasonCode,
+                    ),
+                )
+            }
+        }
+    }
+
+    /** Reads the package manager only after the system installer has returned. */
+    private fun pollSelfUpdate() {
+        val pending = pendingSelfUpdate ?: return
+        if (!pending.launchIssued) return
+        val snapshot = session.currentSnapshot()
+        if (
+            snapshot.sessionId != pending.sessionId ||
+            snapshot.installationBatch?.batchId != pending.batchId ||
+            snapshot.state != InstallationSessionState.INSTALLING
+        ) {
+            return
+        }
+        val installer = selfUpdateInstaller ?: return
+        when (val result = runCatching {
+            installer.verifyInstalled(pending.staged.manifest)
+        }.getOrElse {
+            SelfUpdateVerificationResult.Failed("self_update_readback_failed", retryable = true)
+        }) {
+            SelfUpdateVerificationResult.Pending -> Unit
+            is SelfUpdateVerificationResult.Failed -> {
+                pendingSelfUpdate = null
+                runCatching { installer.clear(pending.staged) }
+                eventPortFor(snapshot).emit(
+                    InstallationSessionEvent.FatalError(
+                        category = FailureCategory.INSTALLATION,
+                        reasonCode = result.reasonCode,
+                    ),
+                )
+            }
+
+            is SelfUpdateVerificationResult.Confirmed -> {
+                val evidence = result.evidence
+                val manifest = pending.staged.manifest
+                val mismatch = when {
+                    evidence.componentId != InstallerSelfIdentity.COMPONENT_ID -> "self_update_readback_component_mismatch"
+                    evidence.packageName != InstallerSelfIdentity.PACKAGE_NAME -> "self_update_readback_package_mismatch"
+                    evidence.version != manifest.apkVersion -> "self_update_readback_version_mismatch"
+                    evidence.apkSizeBytes != manifest.apkSizeBytes -> "self_update_readback_size_mismatch"
+                    !evidence.apkSha256.equals(manifest.apkSha256, ignoreCase = true) -> "self_update_readback_hash_mismatch"
+                    !evidence.certificateSha256.equals(manifest.certificateSha256, ignoreCase = true) ->
+                        "self_update_readback_certificate_mismatch"
+                    else -> null
+                }
+                if (mismatch != null) {
+                    pendingSelfUpdate = null
+                    runCatching { installer.clear(pending.staged) }
+                    eventPortFor(snapshot).emit(
+                        InstallationSessionEvent.FatalError(
+                            category = FailureCategory.VERIFICATION,
+                            reasonCode = mismatch,
+                        ),
+                    )
+                    return
+                }
+                pendingSelfUpdate = null
+                runCatching { installer.clear(pending.staged) }
+                eventPortFor(snapshot).emit(
+                    InstallationSessionEvent.InstallationBatchCompleted(
+                        selfUpdateReceipt(pending.batchId, evidence),
+                    ),
+                )
+            }
+        }
+    }
+
+    private fun selfUpdateReceipt(
+        batchId: Long,
+        evidence: InstalledArtifactEvidence,
+    ): InstallationBatchReceipt = InstallationBatchReceipt(
+        batchId = batchId,
+        components = listOf(
+            InstallationComponentReceipt(
+                componentId = InstallerSelfIdentity.COMPONENT_ID,
+                installation = InstallationStageReceipt(
+                    status = InstallationStageReceiptStatus.VERIFIED,
+                    evidence = evidence,
+                    writeConfirmed = true,
+                    operationConfirmed = true,
+                ),
+                authorization = AuthorizationStageReceipt(
+                    status = AuthorizationStageReceiptStatus.NOT_REQUIRED,
+                ),
+                availability = AvailabilityStageReceipt(
+                    status = AvailabilityStageReceiptStatus.NOT_REQUIRED,
+                ),
+            ),
+        ),
+    )
+
+    private fun clearPendingSelfUpdate() {
+        val pending = pendingSelfUpdate ?: return
+        pendingSelfUpdate = null
+        selfUpdateInstaller?.let { installer -> runCatching { installer.clear(pending.staged) } }
+    }
+
     @Synchronized
     private fun reconcile(snapshot: InstallationSessionSnapshot) {
         when (snapshot.state) {
@@ -432,7 +638,15 @@ class InstallerRuntime(
             InstallationSessionState.INSTALLING,
             InstallationSessionState.AUTHORIZING,
             InstallationSessionState.VERIFYING_DEVICE,
-            -> restartInstallationFromCheckpoint(snapshot)
+            -> if (snapshot.installationFlow == com.ninepointnine.helper.domain.session.InstallationFlow.SELF_UPDATE) {
+                if (snapshot.state == InstallationSessionState.INSTALLING) {
+                    pollSelfUpdate()
+                } else if (pendingSelfUpdate == null) {
+                    beginArtifactPreparation(snapshot)
+                }
+            } else {
+                restartInstallationFromCheckpoint(snapshot)
+            }
             else -> Unit
         }
     }
@@ -739,6 +953,57 @@ class InstallerRuntime(
                         )
                         return
                     }
+                    if (batchPlan.flow == com.ninepointnine.helper.domain.session.InstallationFlow.SELF_UPDATE) {
+                        if (result.failures.isNotEmpty()) {
+                            emitPreparationFailure(
+                                port = port,
+                                snapshot = latest,
+                                fallbackCategory = FailureCategory.DOWNLOAD,
+                                fallbackReason = result.failures.first().reasonCode,
+                                fallbackComponentName = result.failures.first().componentId,
+                            )
+                            return
+                        }
+                        val artifact = result.artifacts.singleOrNull {
+                            InstallerSelfIdentity.isSelfComponentId(it.manifest.componentId) &&
+                                it.manifest.packageName == InstallerSelfIdentity.PACKAGE_NAME
+                        }
+                        val installer = selfUpdateInstaller
+                        if (artifact == null || installer == null) {
+                            port.emit(
+                                InstallationSessionEvent.FatalError(
+                                    category = FailureCategory.INSTALLATION,
+                                    reasonCode = if (installer == null) {
+                                        "self_update_installer_unavailable"
+                                    } else {
+                                        "self_update_artifact_invalid"
+                                    },
+                                ),
+                            )
+                            return
+                        }
+                        when (val staged = runCatching { installer.stage(artifact) }.getOrElse {
+                            SelfUpdateStageResult.Failed("self_update_stage_failed", retryable = true)
+                        }) {
+                            is SelfUpdateStageResult.Ready -> {
+                                pendingSelfUpdate = PendingSelfUpdate(
+                                    sessionId = latest.sessionId,
+                                    batchId = batchPlan.batchId,
+                                    staged = staged.staged,
+                                )
+                            }
+
+                            is SelfUpdateStageResult.Failed -> {
+                                port.emit(
+                                    InstallationSessionEvent.FatalError(
+                                        category = FailureCategory.INSTALLATION,
+                                        reasonCode = staged.reasonCode,
+                                    ),
+                                )
+                            }
+                        }
+                        return
+                    }
                     val preparationFailures = result.failures.associate { failure ->
                         val componentId = checkNotNull(failure.componentId)
                         componentId to DeviceActionFailure(
@@ -984,6 +1249,7 @@ class InstallerRuntime(
         catalogJob = null
         artifactJob = null
         maintenanceJob = null
+        clearPendingSelfUpdate()
     }
 
     private fun cancelAllWork(closeConnection: Boolean) {

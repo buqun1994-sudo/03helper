@@ -16,7 +16,6 @@ import com.ninepointnine.helper.application.maintenance.MaintenanceDiagnosticSto
 import com.ninepointnine.helper.application.maintenance.MaintenanceSessionStore
 import com.ninepointnine.helper.data.artifact.AndroidApkMetadataReader
 import com.ninepointnine.helper.data.artifact.ApkIconRepository
-import com.ninepointnine.helper.data.artifact.ThirdPartyApplicationAssetStore
 import com.ninepointnine.helper.data.artifact.ArchiveIdentityVerifier
 import com.ninepointnine.helper.data.artifact.ArtifactArchiveExtractor
 import com.ninepointnine.helper.data.artifact.ArtifactIdentityVerifier
@@ -35,6 +34,7 @@ import com.ninepointnine.helper.data.web.LanzouFolderWebViewHostFactory
 import com.ninepointnine.helper.data.web.LanzouWebSourceAdapter
 import com.ninepointnine.helper.data.web.LanzouWebViewHostFactory
 import com.ninepointnine.helper.data.web.LanzouWebViewMountRegistry
+import com.ninepointnine.helper.data.selfupdate.AndroidSelfUpdateInstaller
 import com.ninepointnine.helper.domain.artifact.ReleaseSourcePolicy
 import com.ninepointnine.helper.domain.artifact.ArtifactVersion
 import com.ninepointnine.helper.domain.artifact.ArtifactFailure
@@ -69,13 +69,6 @@ object ProductionInstallerRuntimeFactory {
         )
         val persistedMaintenanceSnapshot = maintenanceSessionStore.load()
         val apkMetadataReader = AndroidApkMetadataReader(applicationContext)
-        // The same app-private asset store is shared by the ADB inventory
-        // adapter and the UI icon repository. It keeps labels/icons keyed to
-        // the exact car base-APK path and never retains the pulled APK itself.
-        val thirdPartyAssetStore = ThirdPartyApplicationAssetStore(
-            context = applicationContext,
-            metadataReader = apkMetadataReader,
-        )
         // Discovery probes must fail quickly, while a retained installation lease
         // needs enough read time for ADB sync and the car's package manager.
         val discoveryDeviceConnectionFactory = DadbDeviceConnectionFactory(
@@ -85,7 +78,6 @@ object ProductionInstallerRuntimeFactory {
             readTimeoutMillis = INSTALLATION_READ_TIMEOUT_MILLIS,
             installedApkCacheDirectory = File(applicationContext.cacheDir, INSTALLED_APK_VERIFICATION_DIRECTORY),
             installedApkMetadataReader = apkMetadataReader,
-            thirdPartyAssetStore = thirdPartyAssetStore,
         )
         val distributionConfigAdapter = catalogRuntime.createDistributionConfigAdapter(applicationContext).withRevisionStore(
             FileCatalogRevisionStore(File(applicationContext.filesDir, CATALOG_REVISION_FILE)),
@@ -116,7 +108,6 @@ object ProductionInstallerRuntimeFactory {
             artifactCache = artifactCache,
             metadataReader = apkMetadataReader,
             preferredTrack = catalogRuntime.artifactReleaseTrack,
-            thirdPartyAssetStore = thirdPartyAssetStore,
         )
 
         return InstallerRuntime(
@@ -227,6 +218,10 @@ object ProductionInstallerRuntimeFactory {
             },
             coroutineContext = Dispatchers.Main.immediate,
             apkIconRepository = apkIconRepository,
+            selfUpdateInstaller = AndroidSelfUpdateInstaller(
+                context = applicationContext,
+                metadataReader = apkMetadataReader,
+            ),
         )
     }
 

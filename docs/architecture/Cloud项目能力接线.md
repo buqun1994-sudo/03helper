@@ -46,7 +46,7 @@ productId = 03helper
 displayName = 03车机助手
 androidPackage = com.ninepointnine.helper
 runtimeIdentifier = icar03
-releaseVersion = 1.0.2 (versionCode 3)
+releaseVersion = 1.0.5 (versionCode 6)
 ```
 
 | 环境 | 证书 SHA-256 | 构建方式 |
@@ -54,13 +54,15 @@ releaseVersion = 1.0.2 (versionCode 3)
 | staging | `aca4f178fea11ccc97a1373c8aa5345b274a3a783398929a9340a79ee83663af` | `assembleDebug` + `helperSigningEnvironment=staging` |
 | production | `31ca80dd21a5208eaabd5f3e1440a3db2f7dc79122e03eaa6ba01730fb31f18b` | `assembleRelease` + `helperProductionSigningPropertiesFile` |
 
-Cloud 已登记 `productId`、包名、环境、APK 公开证书摘要和免费 profile；03helper 不进入许可证或 Device Commerce 主链。`1.0.2 (3)` production APK 已固定接入独立配置公钥并完成本地构建、包名、版本、单 signer、v2 和证书摘要核验。Cloud 不接收 JKS、口令、私钥或本机路径。真实蓝奏入口、文件完整性、Logo 公网对象和 production 配置仍未上线，不得把本地产物就绪写成线上发布完成。
+Cloud 已登记 `productId`、包名、环境、APK 公开证书摘要和免费 profile；03helper 不进入许可证或 Device Commerce 主链。`1.0.5 (6)` production APK 已固定接入独立配置公钥并完成本地构建、包名、版本、单 signer、v2 和证书摘要核验，但尚未上传或切换线上配置。Cloud 不接收 JKS、口令、私钥或本机路径。真实蓝奏入口、文件完整性、Logo 公网对象和 production 配置仍未上线，不得把本地产物就绪写成线上发布完成。
 
 包名、证书 SHA-256 和最低 SDK 不由网络 payload 覆盖：包名、版本和最低 SDK 从 APK 读取，证书必须属于客户端内置官方发布者证书集合及其包名命名空间。未知算法、未知 key、字段缺失、过期或桌面条目缺失均 fail closed。
 
 客户端从实际归档构造的 `ArtifactManifest` 仍包含 `archiveFormat`、`archiveSizeBytes`、`archiveSha256`、`apkEntryName`、`apkSizeBytes`、`apkSha256`、`packageName`、`apkVersion` 和 `certificateSha256`；这些字段不是 Cloud v3 payload 字段，而是本地校验结果。
 
 `apps[]` 的数量和条目由 Cloud 动态维护；`desktop` 必须启用，其余 APP 可选，首次进入 03helper 选择页时默认全部选中，用户可取消。配置不得携带任意 shell、脚本、第三方直链转换服务或任意包体 URL；`deviceSetup` 只能使用客户端预定义强类型动作。Cloud 只提供签名配置和受控文件夹发布能力；发现设备、ADB、安装、授权、解压和运行验证仍由 03helper 自己负责。
+
+维护态“管理已安装应用”只消费这份签名配置和本地已验证 manifest 中的受控组件身份；它不使用 Cloud 配置去扩展车机包范围，不执行 `pm list packages --user 0 -3`，也不枚举或展示未声明的第三方包。启动、强停、卸载和详情仍由 03helper 的受控 typed action 主链负责。
 
 ### 3.3 Android ZIP 发布流程
 

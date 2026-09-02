@@ -23,6 +23,10 @@ sealed interface InstallationSessionCommand {
     data object StartInstallation : InstallationSessionCommand
     data object ConfirmSelection : InstallationSessionCommand
     data object BeginPipeline : InstallationSessionCommand
+    /** Starts one explicitly selected maintenance update; never means "all". */
+    data class StartMaintenanceComponentUpdate(val componentId: String) : InstallationSessionCommand
+    /** Moves a prepared helper self-update from the download boundary to Android's installer. */
+    data object InstallPreparedSelfUpdate : InstallationSessionCommand
     data object CancelInstallation : InstallationSessionCommand
     data object ContinueInstallation : InstallationSessionCommand
     data object ResumeInstallation : InstallationSessionCommand
@@ -151,8 +155,6 @@ sealed interface InstallationSessionEvent {
 
     data class MaintenanceApplicationsResolved(
         val applications: List<ManagedApplicationStatus>,
-        /** Null means this action did not request a third-party inventory read. */
-        val thirdPartyApplications: List<ThirdPartyApplicationStatus>? = null,
     ) : InstallationSessionEvent
 
     data class MaintenanceApplicationActionCompleted(
@@ -161,8 +163,6 @@ sealed interface InstallationSessionEvent {
         val resultCode: String = "completed",
         /** Fresh car inventory read after a destructive application action. */
         val refreshedApplications: List<ManagedApplicationStatus>? = null,
-        /** Fresh third-party inventory read after the action. */
-        val refreshedThirdPartyApplications: List<ThirdPartyApplicationStatus>? = null,
         /** Set when the action succeeded but the follow-up inventory read did not. */
         val inventoryRefreshFailureReason: String? = null,
         val inventoryRefreshRetryable: Boolean = true,

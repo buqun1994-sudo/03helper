@@ -102,7 +102,6 @@
     <string name="maintenance_installed_apps">受控应用状态</string>
     <string name="maintenance_app_installed">已安装</string>
     <string name="maintenance_app_not_installed">未安装</string>
-    <string name="maintenance_installed_at">安装于 %1$s</string>
     <string name="maintenance_update_self_section">03车机助手</string>
     <string name="maintenance_update_apps_section">车机应用</string>
     <string name="maintenance_update_car_disconnected">车机未连接，仅显示助手自身版本</string>
@@ -110,7 +109,9 @@
     <string name="maintenance_update_failed">暂时无法检查更新，请重试</string>
     <string name="maintenance_update_checking">正在检查更新，请稍候</string>
     <string name="maintenance_update_node_checking">正在检查%1$s</string>
-    <string name="maintenance_update_all">全部更新</string>
+    <string name="maintenance_update_action">更新</string>
+    <string name="self_update_preparing">正在准备 03 车机助手更新</string>
+    <string name="self_update_install">安装更新</string>
     <string name="maintenance_update_current">当前已是最新版本</string>
     <string name="maintenance_available_version">最新 v%1$s</string>
     <string name="maintenance_installed_version">当前 %1$s</string>

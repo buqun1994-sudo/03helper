@@ -543,6 +543,11 @@ internal fun InstallationBatchReceipt.toResultSummary(
     val desktop = all.firstOrNull {
         it.componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
     }
+    val maintenanceEntryReady = if (snapshot.installationFlow == InstallationFlow.SELF_UPDATE) {
+        true
+    } else {
+        desktop?.status == ComponentResultStatus.READY
+    }
     return InstallationResultSummary(
         kind = kind,
         componentResults = visible,
@@ -555,7 +560,7 @@ internal fun InstallationBatchReceipt.toResultSummary(
             ResultKind.SUCCESS,
             ResultKind.PARTIAL_FAILURE,
             ResultKind.CONFIRMATION_PENDING,
-        ) && desktop?.status == ComponentResultStatus.READY,
+        ) && maintenanceEntryReady,
     )
 }
 

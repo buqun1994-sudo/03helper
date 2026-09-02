@@ -49,9 +49,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
-import java.text.SimpleDateFormat
-import java.util.Date
-import java.util.Locale
 import com.ninepointnine.helper.R
 import com.ninepointnine.helper.domain.session.MaintenanceActionId
 import com.ninepointnine.helper.domain.session.MaintenanceGroupId
@@ -157,8 +154,8 @@ fun MaintenanceHome(
                 when (action) {
                     MaintenanceActionId.CHECK_UPDATES -> MaintenanceUpdatesPage(
                         state = state,
-                        onBeginUpdates = {
-                            onIntent(InstallUiIntent.MaintenanceAction(MaintenanceActionId.REINSTALL))
+                        onUpdate = { componentId ->
+                            onIntent(InstallUiIntent.StartMaintenanceComponentUpdate(componentId))
                         },
                         onRetry = { onIntent(InstallUiIntent.MaintenanceAction(MaintenanceActionId.CHECK_UPDATES)) },
                         onBack = leaveAction,
@@ -211,7 +208,7 @@ private enum class ApplicationMaintenancePage {
 @Composable
 private fun MaintenanceUpdatesPage(
     state: InstallUiState.Maintenance,
-    onBeginUpdates: () -> Unit,
+    onUpdate: (String) -> Unit,
     onRetry: () -> Unit,
     onBack: () -> Unit,
 ) {
@@ -222,9 +219,6 @@ private fun MaintenanceUpdatesPage(
         state.feedback?.status == MaintenanceActionStatus.RUNNING
     val failed = state.feedback?.actionId == MaintenanceActionId.CHECK_UPDATES &&
         state.feedback?.status == MaintenanceActionStatus.FAILED
-    val hasUpdate = visibleStatuses.any {
-        it.state == com.ninepointnine.helper.domain.session.MaintenanceUpdateState.UPDATE_AVAILABLE
-    }
     // A running read-only check is still a navigable page. Consume the system
     // gesture and cancel the route through the shared maintenance owner.
     BackHandler(enabled = true, onBack = onBack)
@@ -256,7 +250,9 @@ private fun MaintenanceUpdatesPage(
             } else if (self.isEmpty()) {
                 item { MaintenanceEmptyState(stringResource(R.string.maintenance_update_unavailable)) }
             } else {
-                items(self, key = { "self:${it.componentId}" }) { row -> MaintenanceUpdateRow(row) }
+                items(self, key = { "self:${it.componentId}" }) { row ->
+                    MaintenanceUpdateRow(row) { onUpdate(row.componentId) }
+                }
             }
             item {
                 Text(
@@ -273,7 +269,9 @@ private fun MaintenanceUpdatesPage(
             } else if (apps.isEmpty()) {
                 item { MaintenanceEmptyState(stringResource(R.string.maintenance_update_unavailable)) }
             } else {
-                items(apps, key = { it.componentId }) { row -> MaintenanceUpdateRow(row) }
+                items(apps, key = { it.componentId }) { row ->
+                    MaintenanceUpdateRow(row) { onUpdate(row.componentId) }
+                }
             }
         }
         if (checking) {
@@ -287,12 +285,6 @@ private fun MaintenanceUpdatesPage(
             PrimaryActionButton(
                 text = stringResource(R.string.maintenance_retry),
                 onClick = onRetry,
-                modifier = Modifier.fillMaxWidth(),
-            )
-        } else if (hasUpdate) {
-            PrimaryActionButton(
-                text = stringResource(R.string.maintenance_update_all),
-                onClick = onBeginUpdates,
                 modifier = Modifier.fillMaxWidth(),
             )
         } else if (
@@ -314,8 +306,16 @@ private fun MaintenanceUpdatesPage(
 }
 
 @Composable
-private fun MaintenanceUpdateRow(row: MaintenanceUpdateRow) {
-    PressableSurface(onClick = {}, enabled = false, minHeight = 72.dp) {
+private fun MaintenanceUpdateRow(row: MaintenanceUpdateRow, onUpdate: () -> Unit) {
+    val actionable = row.state == com.ninepointnine.helper.domain.session.MaintenanceUpdateState.UPDATE_AVAILABLE
+    PressableSurface(
+        onClick = onUpdate,
+        enabled = actionable,
+        minHeight = 72.dp,
+        containerColor = if (actionable) InstallerColors.White else InstallerColors.PageBlue,
+        pressedColor = if (actionable) InstallerColors.AuxiliaryWhite else InstallerColors.PressedBlue,
+        borderColor = if (actionable) InstallerColors.PageBlue else InstallerColors.WhiteBorder,
+    ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -323,18 +323,36 @@ private fun MaintenanceUpdateRow(row: MaintenanceUpdateRow) {
         ) {
             ComponentLogo(row.iconKey, row.displayName, size = 40.dp)
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                Text(row.displayName, color = InstallerColors.White, style = MaterialTheme.typography.bodyLarge)
+                Text(
+                    row.displayName,
+                    color = if (actionable) InstallerColors.PageBlue else InstallerColors.White,
+                    style = MaterialTheme.typography.bodyLarge,
+                )
                 Text(
                     text = updateVersionLabel(row),
-                    color = updateVersionColor(row.state),
+                    color = if (actionable) InstallerColors.PressedBlue else updateVersionColor(row.state),
                     style = MaterialTheme.typography.bodySmall,
                 )
             }
-            Text(
-                text = updateStateLabel(row.state),
-                color = updateStateColor(row.state),
-                style = MaterialTheme.typography.bodySmall,
-            )
+            if (actionable) {
+                StatusIcon(
+                    name = "download",
+                    contentDescription = stringResource(R.string.maintenance_update_action),
+                    tint = InstallerColors.PageBlue,
+                    size = 24.dp,
+                )
+                Text(
+                    text = stringResource(R.string.maintenance_update_action),
+                    color = InstallerColors.PageBlue,
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+            } else {
+                Text(
+                    text = updateStateLabel(row.state),
+                    color = updateStateColor(row.state),
+                    style = MaterialTheme.typography.bodySmall,
+                )
+            }
         }
     }
 }
@@ -408,9 +426,8 @@ private fun MaintenanceAuthorizationPage(
     val checking = state.authorization.state == MaintenanceAuthorizationFlowState.CHECKING
     val actionRunning = state.feedback?.actionId == MaintenanceActionId.REPAIR_CONFIGURATION &&
         state.feedback?.status == MaintenanceActionStatus.RUNNING
-    val controlledApplications = state.applications.filter { it.isControlled }
     val authorizationRows = state.authorization.applications.ifEmpty {
-        controlledApplications.map { app ->
+        state.applications.map { app ->
             MaintenanceAuthorizationRow(
                 componentId = app.componentId,
                 packageName = app.packageName,
@@ -424,7 +441,7 @@ private fun MaintenanceAuthorizationPage(
     val completedRepair = state.authorization.state == MaintenanceAuthorizationFlowState.COMPLETED
     val inventoryLoading = state.applicationsState == MaintenanceInventoryState.LOADING
     val inventoryFailed = state.applicationsState == MaintenanceInventoryState.FAILED
-    val hasApplications = authorizationRows.isNotEmpty() || controlledApplications.isNotEmpty()
+    val hasApplications = authorizationRows.isNotEmpty() || state.applications.isNotEmpty()
     val retryableFailure = state.feedback?.actionId == MaintenanceActionId.REPAIR_CONFIGURATION &&
         state.feedback?.status == MaintenanceActionStatus.FAILED &&
         state.feedback?.retryable == true
@@ -602,16 +619,7 @@ private fun MaintenanceManageAppsPage(
                         } else if (state.applications.isEmpty()) {
                             item { MaintenanceEmptyState(stringResource(R.string.maintenance_no_installed_apps)) }
                         } else {
-                            items(
-                                state.applications,
-                                key = {
-                                    if (it.isControlled) {
-                                        "controlled:${it.componentId}"
-                                    } else {
-                                        "third-party:${it.packageName}"
-                                    }
-                                },
-                            ) { app ->
+                            items(state.applications, key = { it.componentId }) { app ->
                                 ManagedApplicationCard(
                                     app = app,
                                     action = state.applicationAction,
@@ -713,19 +721,13 @@ private fun ManagedApplicationCard(
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 ComponentLogo(app.iconKey, app.displayName, size = 40.dp)
                 Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Text(
-                        text = app.displayName,
-                        color = InstallerColors.White,
-                        style = MaterialTheme.typography.bodyLarge,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
+                    Text(app.displayName, color = InstallerColors.White, style = MaterialTheme.typography.bodyLarge)
                     Text(
                         text = listOfNotNull(
                             app.versionLabel ?: app.versionCode?.let {
                                 stringResource(R.string.maintenance_version_code_short, it)
                             },
-                            app.packageName.ifBlank { null }.takeIf { app.isControlled },
+                            app.packageName.ifBlank { null },
                         ).joinToString(" · ")
                             .ifBlank { stringResource(R.string.maintenance_version_unknown) },
                         color = InstallerColors.AuxiliaryWhite,
@@ -733,16 +735,6 @@ private fun ManagedApplicationCard(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    app.installTimeEpochMillis?.let { timestamp ->
-                        Text(
-                            text = stringResource(
-                                R.string.maintenance_installed_at,
-                                formatApplicationTimestamp(timestamp),
-                            ),
-                            color = InstallerColors.AuxiliaryWhite,
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
                 }
                 Text(
                     text = stringResource(if (app.installed) R.string.maintenance_app_installed else R.string.maintenance_app_not_installed),
@@ -756,14 +748,11 @@ private fun ManagedApplicationCard(
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                 IconTextActionButton(stringResource(R.string.maintenance_uninstall), "trash_2", onUninstall, Modifier.weight(1f), app.installed && actionEnabled)
-                IconTextActionButton(stringResource(R.string.maintenance_details), "info", onDetails, Modifier.weight(1f), app.installed && actionEnabled)
+                IconTextActionButton(stringResource(R.string.maintenance_details), "info", onDetails, Modifier.weight(1f), actionEnabled)
             }
         }
     }
 }
-
-private fun formatApplicationTimestamp(epochMillis: Long): String =
-    SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.getDefault()).format(Date(epochMillis))
 
 @Composable
 private fun ApplicationActionToast(
@@ -833,6 +822,29 @@ private fun MaintenanceApplicationDetailsPage(
             }
         } else {
             LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                item {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        ComponentLogo(
+                            // LocalApkIcons is keyed by the row/component id;
+                            // details.iconKey is the path-bound cache file key
+                            // used by ApkIconRepository, not the UI lookup key.
+                            details.componentId,
+                            details.displayName,
+                            size = 48.dp,
+                        )
+                        Text(
+                            text = details.displayName,
+                            color = InstallerColors.White,
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
                 item { InfoRow(stringResource(R.string.maintenance_detail_name), details.displayName) }
                 item { InfoRow(stringResource(R.string.maintenance_detail_package), details.packageName) }
                 item { InfoRow(stringResource(R.string.maintenance_detail_version), details.versionLabel ?: "-") }
@@ -1109,7 +1121,7 @@ fun MaintenanceActionFlowPage(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val canNavigateBack = state !is InstallUiState.Installing
+    val canNavigateBack = state !is InstallUiState.Installing || state.selfUpdateReady
     // Consume the gesture while an install is active. The install pipeline is
     // intentionally not cancellable from this page, but it must not minimize
     // the activity through the system back dispatcher.
@@ -1128,6 +1140,11 @@ fun MaintenanceActionFlowPage(
         when (state) {
             is InstallUiState.Installing -> MaintenanceInstallProgress(
                 state = state,
+                onInstallSelfUpdate = if (state.selfUpdateReady) {
+                    { onIntent(InstallUiIntent.InstallPreparedSelfUpdate) }
+                } else {
+                    null
+                },
             )
 
             is InstallUiState.Result -> MaintenanceInstallResult(
@@ -1145,6 +1162,7 @@ fun MaintenanceActionFlowPage(
 @Composable
 private fun MaintenanceInstallProgress(
     state: InstallUiState.Installing,
+    onInstallSelfUpdate: (() -> Unit)? = null,
 ) {
     val phases = listOf(
         InstallPhase.FETCH to R.string.phase_fetch,
@@ -1156,7 +1174,11 @@ private fun MaintenanceInstallProgress(
     Column(modifier = Modifier.fillMaxSize()) {
         Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
         Text(
-            text = stringResource(R.string.installing_device, state.deviceName),
+            text = if (state.installationFlow == com.ninepointnine.helper.domain.session.InstallationFlow.SELF_UPDATE) {
+                stringResource(R.string.self_update_preparing)
+            } else {
+                stringResource(R.string.installing_device, state.deviceName)
+            },
             style = MaterialTheme.typography.bodyLarge,
             color = InstallerColors.AuxiliaryWhite,
         )
@@ -1181,13 +1203,22 @@ private fun MaintenanceInstallProgress(
             }
         }
         Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
-        Text(
-            text = stringResource(R.string.install_keep_screen_on),
-            style = MaterialTheme.typography.bodySmall,
-            color = InstallerColors.AuxiliaryWhite,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.fillMaxWidth(),
-        )
+        if (onInstallSelfUpdate != null) {
+            PrimaryActionButton(
+                text = stringResource(R.string.self_update_install),
+                onClick = onInstallSelfUpdate,
+                modifier = Modifier.fillMaxWidth(),
+            )
+            Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
+        } else {
+            Text(
+                text = stringResource(R.string.install_keep_screen_on),
+                style = MaterialTheme.typography.bodySmall,
+                color = InstallerColors.AuxiliaryWhite,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth(),
+            )
+        }
         Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
     }
 }
@@ -1278,6 +1309,8 @@ private fun MaintenanceInstallResult(
 ) {
     val retryIntent = if (state.installationFlow == com.ninepointnine.helper.domain.session.InstallationFlow.MAINTENANCE_INSTALL) {
         InstallUiIntent.ReturnToMaintenanceInstallationSelection
+    } else if (state.installationFlow == com.ninepointnine.helper.domain.session.InstallationFlow.SELF_UPDATE) {
+        InstallUiIntent.EnterMaintenance
     } else {
         InstallUiIntent.ReturnToSelection
     }

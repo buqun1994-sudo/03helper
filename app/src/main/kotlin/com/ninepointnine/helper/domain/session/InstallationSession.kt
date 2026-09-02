@@ -116,6 +116,9 @@ class InstallationSession(
             -> confirmSelection()
 
             InstallationSessionCommand.BeginPipeline -> beginPipeline()
+            is InstallationSessionCommand.StartMaintenanceComponentUpdate ->
+                startMaintenanceComponentUpdate(command.componentId)
+            InstallationSessionCommand.InstallPreparedSelfUpdate -> startPreparedSelfUpdate()
             InstallationSessionCommand.CancelInstallation -> cancelInstallation()
             InstallationSessionCommand.ContinueInstallation,
             InstallationSessionCommand.ResumeInstallation,
@@ -584,7 +587,11 @@ class InstallationSession(
         if (current.state != InstallationSessionState.SELECTION_CONFIRMED) {
             return
         }
-        val validationFailure = validateSelection(current)
+        val validationFailure = if (current.installationFlow == InstallationFlow.SELF_UPDATE) {
+            validateSelfUpdateSelection(current)
+        } else {
+            validateSelection(current)
+        }
         if (validationFailure != null) {
             fail(
                 category = FailureCategory.VERIFICATION,
@@ -600,6 +607,23 @@ class InstallationSession(
                 ),
             ),
         )
+    }
+
+    private fun validateSelfUpdateSelection(snapshot: InstallationSessionSnapshot): String? {
+        val batch = snapshot.installationBatch ?: return "self_update_batch_missing"
+        if (batch.flow != InstallationFlow.SELF_UPDATE) return "self_update_flow_invalid"
+        if (batch.selectedComponentIds != setOf(InstallerSelfIdentity.COMPONENT_ID) ||
+            batch.preparationComponentIds != batch.selectedComponentIds ||
+            batch.resultComponentIds != batch.selectedComponentIds ||
+            batch.reusableComponentIds.isNotEmpty()
+        ) return "self_update_batch_invalid"
+        val descriptor = snapshot.components.singleOrNull {
+            InstallerSelfIdentity.isSelfComponentId(it.id)
+        } ?: return "self_update_component_missing"
+        if (descriptor.compatibilityState == ComponentCompatibility.UNSUPPORTED) {
+            return "self_update_client_incompatible"
+        }
+        return null
     }
 
     private fun cancelInstallation() {
@@ -899,8 +923,17 @@ class InstallationSession(
     private fun enterMaintenance() {
         val current = _snapshot.value
         if (current.state != InstallationSessionState.SUCCEEDED &&
-            current.state != InstallationSessionState.COMPLETED_WITH_ERRORS
+            current.state != InstallationSessionState.COMPLETED_WITH_ERRORS &&
+            !(current.installationFlow == InstallationFlow.SELF_UPDATE &&
+                current.state == InstallationSessionState.FAILED)
         ) {
+            return
+        }
+        if (current.installationFlow == InstallationFlow.SELF_UPDATE) {
+            // The helper update has no vehicle-side desktop prerequisite. Keep
+            // the same session owner and return directly to the update page
+            // after Android's installer result has been classified.
+            returnToMaintenanceAfterSelfUpdate(current)
             return
         }
         val desktopReady = AuthorizationPlanFactory.DESKTOP_COMPONENT_ID in current.evidence.available
@@ -975,6 +1008,134 @@ class InstallationSession(
                 installationReconnectPending = false,
             ),
         )
+    }
+
+    private fun returnToMaintenanceAfterSelfUpdate(current: InstallationSessionSnapshot) {
+        val successful = current.state == InstallationSessionState.SUCCEEDED
+        val restoredMaintenanceComponents = maintenanceComponentsAfterSelfUpdate(current)
+        val restoredAvailableComponents = restoredMaintenanceComponents.filterNot {
+            it.status == ComponentStatus.UNLISTED || InstallerSelfIdentity.isSelfComponentId(it.id)
+        }
+        val action = current.maintenance.lastAction?.copy(
+            actionId = MaintenanceActionId.CHECK_UPDATES,
+            status = if (successful) MaintenanceActionStatus.SUCCEEDED else MaintenanceActionStatus.FAILED,
+            resultCode = if (successful) "self_update_completed" else null,
+            reasonCode = if (successful) null else current.failure?.reasonCode,
+            retryable = !successful,
+        ) ?: MaintenanceActionRecord(
+            actionId = MaintenanceActionId.CHECK_UPDATES,
+            status = if (successful) MaintenanceActionStatus.SUCCEEDED else MaintenanceActionStatus.FAILED,
+            resultCode = if (successful) "self_update_completed" else null,
+            reasonCode = if (successful) null else current.failure?.reasonCode,
+            retryable = !successful,
+        )
+        startNewGeneration(
+            current.copy(
+                state = InstallationSessionState.MAINTENANCE,
+                components = restoredMaintenanceComponents,
+                selectedOptionalComponentIds = emptySet(),
+                currentComponentName = null,
+                progress = null,
+                componentProgress = emptyMap(),
+                failedComponentIds = emptySet(),
+                componentFailureRetryable = emptyMap(),
+                failure = null,
+                checkpoint = null,
+                componentResults = emptyList(),
+                installationBatch = null,
+                installationBatchReceipt = null,
+                artifactManifests = emptyList(),
+                artifactCatalogStage = ArtifactCatalogStage.CONTROL_PLANE_READY,
+                evidence = SessionEvidence(
+                    installed = current.evidence.installed,
+                    configured = current.evidence.configured,
+                    available = current.evidence.available,
+                ),
+                selectedSources = emptyMap(),
+                sourceFailures = emptyList(),
+                archiveDownloads = emptyMap(),
+                archiveVerifications = emptyMap(),
+                apkExtractions = emptyMap(),
+                maintenance = current.maintenance.copy(
+                    availableComponents = restoredAvailableComponents,
+                    activeAction = null,
+                    routeAction = MaintenanceActionId.CHECK_UPDATES,
+                    lastAction = action,
+                    applicationAction = null,
+                    applicationDetails = null,
+                    installationSelection = null,
+                ),
+                maintenanceReconnectPending = false,
+                installationReconnectPending = false,
+            ),
+        )
+    }
+
+    /**
+     * Restores the maintenance component projection after the self-update
+     * batch temporarily replaced [InstallationSessionSnapshot.components] with
+     * the helper-only preparation descriptor. The signed maintenance catalog
+     * remains the preferred source; installed entries absent from that catalog
+     * stay visible as explicitly unlisted rows.
+     */
+    private fun maintenanceComponentsAfterSelfUpdate(
+        snapshot: InstallationSessionSnapshot,
+    ): List<ComponentDescriptor> {
+        val available = (
+            snapshot.maintenance.availableComponents
+                .ifEmpty {
+                    snapshot.components.filterNot {
+                        InstallerSelfIdentity.isSelfComponentId(it.id) || it.status == ComponentStatus.UNLISTED
+                    }
+                }
+            ).filterNot { InstallerSelfIdentity.isSelfComponentId(it.id) || it.status == ComponentStatus.UNLISTED }
+            .distinctBy { it.id }
+        val availableIds = available.mapTo(mutableSetOf()) { it.id }
+        val installedIds = installedMaintenanceComponentIds(snapshot)
+        val retainedUnlistedIds = snapshot.components
+            .filter { it.id !in availableIds && it.id in installedIds }
+            .mapTo(mutableSetOf()) { it.id }
+        val unlisted = buildList {
+            snapshot.components
+                .filter { it.id !in availableIds && it.id in installedIds }
+                .forEach { component ->
+                    add(component.copy(status = ComponentStatus.UNLISTED, errorReason = "unlisted"))
+                }
+            snapshot.maintenance.installedManifests
+                .filter { it.componentId !in availableIds && it.componentId !in retainedUnlistedIds }
+                .forEach { manifest ->
+                    add(
+                        manifest.toComponentDescriptor(snapshot.device?.androidSdk).copy(
+                            status = ComponentStatus.UNLISTED,
+                            errorReason = "unlisted",
+                        ),
+                    )
+                }
+            snapshot.maintenance.managedApplications
+                .filter { it.installed && it.componentId !in availableIds && it.componentId !in retainedUnlistedIds }
+                .forEach { application ->
+                    add(
+                        ComponentDescriptor(
+                            id = application.componentId,
+                            displayName = application.componentId,
+                            required = false,
+                            versionLabel = application.versionLabel,
+                            status = ComponentStatus.UNLISTED,
+                            errorReason = "unlisted",
+                        ),
+                    )
+                }
+        }
+        return (available + unlisted).distinctBy { it.id }
+    }
+
+    private fun installedMaintenanceComponentIds(
+        snapshot: InstallationSessionSnapshot,
+    ): Set<String> = buildSet {
+        snapshot.maintenance.managedApplications
+            .filter { it.installed }
+            .mapTo(this) { it.componentId }
+        snapshot.maintenance.installedManifests.mapTo(this) { it.componentId }
     }
 
     private fun disconnectDevice() {
@@ -1129,11 +1290,6 @@ class InstallationSession(
                         current.maintenance.managedApplicationsFailureRetryable
                     },
                     managedApplications = if (refreshInventory) emptyList() else current.maintenance.managedApplications,
-                    thirdPartyApplications = if (refreshInventory) {
-                        emptyList()
-                    } else {
-                        current.maintenance.thirdPartyApplications
-                    },
                     // A new route owns a new page payload. Never let a prior
                     // application detail/selection leak into this action.
                     applicationAction = null,
@@ -1141,6 +1297,158 @@ class InstallationSession(
                     installationSelection = null,
                 ),
             ),
+        )
+    }
+
+    /**
+     * Creates a frozen batch for exactly one row marked UPDATE_AVAILABLE.
+     * Vehicle updates retain the desktop prerequisite only when the existing
+     * trusted-inventory rule proves it reusable; the target row is the only
+     * visible result row. The helper update uses the same preparation states but
+     * is routed to Android's package installer by the runtime.
+     */
+    private fun startMaintenanceComponentUpdate(rawComponentId: String) {
+        val current = _snapshot.value
+        if (current.state != InstallationSessionState.MAINTENANCE ||
+            current.maintenance.activeAction != null
+        ) return
+        val status = current.maintenance.updateStatuses.firstOrNull { candidate ->
+            candidate.componentId == rawComponentId ||
+                (InstallerSelfIdentity.isSelfComponentId(candidate.componentId) &&
+                    InstallerSelfIdentity.isSelfComponentId(rawComponentId))
+        }
+        if (status == null || status.state != MaintenanceUpdateState.UPDATE_AVAILABLE) {
+            recordMaintenanceUpdateFailure(current, rawComponentId, "maintenance_update_target_unavailable")
+            return
+        }
+        val targetId = if (status.isSelf || InstallerSelfIdentity.isSelfComponentId(status.componentId)) {
+            InstallerSelfIdentity.COMPONENT_ID
+        } else {
+            status.componentId
+        }
+        if (status.isSelf || InstallerSelfIdentity.isSelfComponentId(status.componentId)) {
+            startSelfUpdatePreparation(current, status)
+        } else {
+            startMaintenanceInstallation(
+                actionId = MaintenanceActionId.CHECK_UPDATES,
+                selectedOptionalOverride = setOf(targetId),
+                targetComponentId = targetId,
+            )
+        }
+    }
+
+    private fun recordMaintenanceUpdateFailure(
+        current: InstallationSessionSnapshot,
+        componentId: String,
+        reasonCode: String,
+    ) {
+        publish(
+            current.copy(
+                maintenance = current.maintenance.copy(
+                    routeAction = MaintenanceActionId.CHECK_UPDATES,
+                    activeAction = null,
+                    lastAction = MaintenanceActionRecord(
+                        actionId = MaintenanceActionId.CHECK_UPDATES,
+                        status = MaintenanceActionStatus.FAILED,
+                        reasonCode = reasonCode,
+                        retryable = false,
+                    ),
+                ),
+            ),
+        )
+    }
+
+    private fun startSelfUpdatePreparation(
+        current: InstallationSessionSnapshot,
+        status: MaintenanceUpdateStatus,
+    ) {
+        val identity = catalogIdentity(current)
+        if (identity == null) {
+            recordMaintenanceUpdateFailure(current, status.componentId, "selected_catalog_identity_missing")
+            return
+        }
+        val descriptor = ComponentDescriptor(
+            id = InstallerSelfIdentity.COMPONENT_ID,
+            displayName = status.displayName.ifBlank { "03车机助手" },
+            required = false,
+            versionLabel = status.versionLabel,
+            compatibilityState = ComponentCompatibility.SUPPORTED,
+            iconKey = InstallerSelfIdentity.COMPONENT_ID,
+            status = ComponentStatus.UPDATE_AVAILABLE,
+        )
+        val batchId = nextSessionId(current.sessionId)
+        val batch = InstallationBatchPlan(
+            batchId = batchId,
+            flow = InstallationFlow.SELF_UPDATE,
+            strategy = InstallationStrategy.REINSTALL_SELECTED,
+            selectedComponentIds = setOf(InstallerSelfIdentity.COMPONENT_ID),
+            reusableComponentIds = emptySet(),
+            preparationComponentIds = setOf(InstallerSelfIdentity.COMPONENT_ID),
+            resultComponentIds = setOf(InstallerSelfIdentity.COMPONENT_ID),
+            catalogIdentity = identity,
+        )
+        val next = current.copy(
+            state = InstallationSessionState.SELECTION_CONFIRMED,
+            components = listOf(descriptor),
+            selectedOptionalComponentIds = setOf(InstallerSelfIdentity.COMPONENT_ID),
+            currentComponentName = descriptor.displayName,
+            progress = SessionProgress(totalCount = 1, indeterminate = true),
+            componentProgress = mapOf(
+                InstallerSelfIdentity.COMPONENT_ID to ComponentProgress(
+                    componentId = InstallerSelfIdentity.COMPONENT_ID,
+                    phase = InstallPhase.FETCH,
+                    status = ComponentProgressStatus.PENDING,
+                ),
+            ),
+            failedComponentIds = emptySet(),
+            componentFailureRetryable = emptyMap(),
+            failure = null,
+            componentResults = emptyList(),
+            artifactManifests = emptyList(),
+            artifactCatalogStage = ArtifactCatalogStage.CONTROL_PLANE_READY,
+            installationStrategy = InstallationStrategy.REINSTALL_SELECTED,
+            installationFlow = InstallationFlow.SELF_UPDATE,
+            installationBatch = batch,
+            installationBatchReceipt = null,
+            evidence = SessionEvidence(),
+            selectedSources = emptyMap(),
+            sourceFailures = emptyList(),
+            archiveDownloads = emptyMap(),
+            archiveVerifications = emptyMap(),
+            apkExtractions = emptyMap(),
+            maintenance = current.maintenance.copy(
+                routeAction = MaintenanceActionId.CHECK_UPDATES,
+                activeAction = null,
+                lastAction = MaintenanceActionRecord(
+                    actionId = MaintenanceActionId.CHECK_UPDATES,
+                    status = MaintenanceActionStatus.RUNNING,
+                ),
+                applicationAction = null,
+                applicationDetails = null,
+                installationSelection = null,
+            ),
+        )
+        startNewGeneration(withCheckpoint(next.copy(sessionId = batchId)))
+    }
+
+    private fun startPreparedSelfUpdate() {
+        val current = _snapshot.value
+        if (current.state != InstallationSessionState.ARTIFACTS_READY ||
+            current.installationFlow != InstallationFlow.SELF_UPDATE
+        ) return
+        val batch = current.installationBatch
+        val manifest = current.artifactManifests.singleOrNull {
+            InstallerSelfIdentity.isSelfComponentId(it.componentId) &&
+                it.packageName == InstallerSelfIdentity.PACKAGE_NAME
+        }
+        if (batch == null || manifest == null || current.failedComponentIds.isNotEmpty()) {
+            fail(FailureCategory.VERIFICATION, retryable = false, reasonCode = "self_update_artifact_unavailable")
+            return
+        }
+        transition(
+            state = InstallationSessionState.INSTALLING,
+            progress = progress(0.75f, indeterminate = true),
+            componentProgress = markComponents(current, InstallPhase.SEND, ComponentProgressStatus.RUNNING),
         )
     }
 
@@ -1191,15 +1499,10 @@ class InstallationSession(
             )
             return
         }
-        val thirdPartyPackage = thirdPartyPackageFromRowId(command.componentId)
-        val knownThirdParty = thirdPartyPackage != null &&
-            current.maintenance.thirdPartyApplications.any { it.packageName == thirdPartyPackage } &&
-            current.maintenance.managedApplications.none { it.packageName == thirdPartyPackage }
         val known = current.components.any { it.id == command.componentId } ||
             current.artifactManifests.any { it.componentId == command.componentId } ||
             current.maintenance.availableManifests.any { it.componentId == command.componentId } ||
-            current.maintenance.managedApplications.any { it.componentId == command.componentId } ||
-            knownThirdParty
+            current.maintenance.managedApplications.any { it.componentId == command.componentId }
         if (!known) {
             startNewGeneration(
                 current.copy(
@@ -1237,15 +1540,20 @@ class InstallationSession(
     private fun startMaintenanceInstallation(
         actionId: MaintenanceActionId,
         selectedOptionalOverride: Set<String>? = null,
+        targetComponentId: String? = null,
     ) {
         val current = _snapshot.value
         val strategy = when (actionId) {
             MaintenanceActionId.REINSTALL -> InstallationStrategy.REINSTALL_SELECTED
             MaintenanceActionId.INSTALL_APPLICATIONS,
             MaintenanceActionId.INSTALL_FILE_MANAGER -> InstallationStrategy.INSTALL_MISSING_ONLY
-            else -> return
+            else -> if (targetComponentId != null) {
+                InstallationStrategy.REINSTALL_SELECTED
+            } else {
+                return
+            }
         }
-        val requestedOptional = selectedOptionalOverride ?: when (actionId) {
+        val requestedOptional = (selectedOptionalOverride ?: when (actionId) {
             MaintenanceActionId.REINSTALL -> current.maintenance.updateStatuses
                 .filter {
                     !it.isSelf && it.state in setOf(
@@ -1262,8 +1570,8 @@ class InstallationSession(
             MaintenanceActionId.INSTALL_FILE_MANAGER ->
                 current.selectedOptionalComponentIds + AuthorizationPlanFactory.FILE_MANAGER_COMPONENT_ID
 
-            else -> return
-        }
+            else -> targetComponentId?.let { setOf(it) } ?: return
+        }).filterNot { it == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID }.toSet()
         // The maintenance catalog is the only source for a new maintenance
         // batch. The current batch manifests are not a catalog cache and must
         // never silently repopulate a newer control-plane selection.
@@ -1316,7 +1624,9 @@ class InstallationSession(
         // reuse it safely. Keep that component in the internal batch so the
         // unified preparation path can prepare a verified APK; exact identity
         // matches are still removed later by [reusableInstalledComponentIds].
-        val unverifiedInstalledOptionalIds = if (strategy == InstallationStrategy.INSTALL_MISSING_ONLY) {
+        val unverifiedInstalledOptionalIds = if (
+            strategy == InstallationStrategy.INSTALL_MISSING_ONLY && targetComponentId == null
+        ) {
             val availableIds = candidateBase.components
                 .filterNot { it.status == ComponentStatus.UNLISTED }
                 .map { it.id }
@@ -1333,7 +1643,11 @@ class InstallationSession(
         val selectedOptional = requestedOptional + unverifiedInstalledOptionalIds
         val candidateWithSelection = candidateBase.copy(selectedOptionalComponentIds = selectedOptional)
         val selectedIdsForCoverage = selectedComponents(candidateWithSelection).map { it.id }.toSet()
-        val reusableIdsForCoverage = reusableInstalledComponentIds(candidateWithSelection)
+        val reusableIdsForCoverage = if (targetComponentId != null) {
+            reusableMaintenancePrerequisiteIds(candidateWithSelection, setOf(targetComponentId))
+        } else {
+            reusableInstalledComponentIds(candidateWithSelection)
+        }
         val unresolvedManifestIds = (selectedIdsForCoverage - reusableIdsForCoverage) -
             effectiveCandidateManifests.map { it.componentId }.toSet()
         val candidateStage = when {
@@ -1362,7 +1676,11 @@ class InstallationSession(
             return
         }
         val selected = selectedComponents(candidate)
-        val reusableIds = reusableInstalledComponentIds(candidate)
+        val reusableIds = if (targetComponentId != null) {
+            reusableMaintenancePrerequisiteIds(candidate, setOf(targetComponentId))
+        } else {
+            reusableInstalledComponentIds(candidate)
+        }
         val selectedIds = selected.map { it.id }.toSet()
         // Starting a maintenance install is a new device-work generation. The
         // batch id and the checkpoint token must be created from that same
@@ -2289,6 +2607,57 @@ class InstallationSession(
         val maintenance = current.maintenance.withVerifiedInstallations(
             trustedManifests(current).values.filter { it.componentId in installedIds },
         )
+        val completedUpdateIds = results.asSequence()
+            .filter { it.status == ComponentResultStatus.READY }
+            .mapNotNull { it.componentId }
+            .toSet()
+        val updateManifestById = trustedManifests(current)
+        val updateStatuses = maintenance.updateStatuses.map { status ->
+            val canonicalId = if (InstallerSelfIdentity.isSelfComponentId(status.componentId)) {
+                InstallerSelfIdentity.COMPONENT_ID
+            } else {
+                status.componentId
+            }
+            if (canonicalId in completedUpdateIds) {
+                val manifest = updateManifestById[canonicalId]
+                status.copy(
+                    state = MaintenanceUpdateState.CURRENT,
+                    installedVersionLabel = manifest?.version?.name ?: status.versionLabel,
+                )
+            } else {
+                status
+            }
+        }
+        val maintenanceWithUpdateResult = if (
+            current.maintenance.routeAction == MaintenanceActionId.CHECK_UPDATES
+        ) {
+            maintenance.copy(
+                updateStatuses = updateStatuses,
+                activeAction = null,
+                lastAction = MaintenanceActionRecord(
+                    actionId = MaintenanceActionId.CHECK_UPDATES,
+                    status = if (terminalState == InstallationSessionState.SUCCEEDED) {
+                        MaintenanceActionStatus.SUCCEEDED
+                    } else {
+                        MaintenanceActionStatus.FAILED
+                    },
+                    resultCode = if (terminalState == InstallationSessionState.SUCCEEDED) {
+                        "update_completed"
+                    } else {
+                        null
+                    },
+                    reasonCode = if (terminalState == InstallationSessionState.SUCCEEDED) {
+                        null
+                    } else {
+                        results.firstOrNull { it.failureReason != null }?.failureReason
+                            ?: "update_failed"
+                    },
+                    retryable = terminalState != InstallationSessionState.SUCCEEDED,
+                ),
+            )
+        } else {
+            maintenance
+        }
         val resultById = results.associateBy { it.componentId }
         val terminalProgress = receipt.components.associate { component ->
             val result = checkNotNull(resultById[component.componentId])
@@ -2319,7 +2688,7 @@ class InstallationSession(
         transition(
             state = terminalState,
             evidence = evidence,
-            maintenance = maintenance,
+            maintenance = maintenanceWithUpdateResult,
             componentResults = results,
             installationBatchReceipt = receipt,
             progress = progress(1f, indeterminate = false, completedCount = selectedComponents(current).size),
@@ -2554,30 +2923,6 @@ class InstallationSession(
         ) {
             return
         }
-        val refreshedThirdParty = event.refreshedThirdPartyApplications
-        if (refreshedThirdParty != null && (
-                refreshedThirdParty.size != refreshedThirdParty.distinctBy { it.packageName }.size ||
-                    refreshedThirdParty.any(::isInvalidThirdPartyApplication)
-                )
-        ) {
-            publish(
-                current.copy(
-                    maintenance = current.maintenance.copy(
-                        applicationAction = active.copy(
-                            status = MaintenanceActionStatus.FAILED,
-                            resultCode = null,
-                            reasonCode = "maintenance_third_party_inventory_invalid",
-                            retryable = false,
-                        ),
-                        managedApplicationsState = MaintenanceInventoryState.FAILED,
-                        managedApplicationsFailureReason = "maintenance_third_party_inventory_invalid",
-                        managedApplicationsFailureRetryable = false,
-                    ),
-                ),
-                acceptedEventSequence,
-            )
-            return
-        }
         publish(
             current.copy(
                 maintenance = current.maintenance.copy(
@@ -2593,8 +2938,6 @@ class InstallationSession(
                         } else {
                             current.maintenance.managedApplications
                         },
-                    thirdPartyApplications = event.refreshedThirdPartyApplications
-                        ?: current.maintenance.thirdPartyApplications,
                     installedManifests = if (event.actionId == MaintenanceApplicationActionId.UNINSTALL) {
                         current.maintenance.installedManifests.filterNot { it.componentId == event.componentId }
                     } else {
@@ -2782,18 +3125,6 @@ class InstallationSession(
         val normalizedApplications = event.applications
             .filter { it.installed }
             .distinctBy { it.componentId }
-        val normalizedThirdPartyApplications = event.thirdPartyApplications
-            ?.distinctBy { it.packageName }
-            ?.sortedWith { left, right ->
-                val installTime = compareInstallTimesDescending(
-                    left.installTimeEpochMillis,
-                    right.installTimeEpochMillis,
-                )
-                if (installTime != 0) installTime else left.packageName.compareTo(right.packageName)
-            }
-        val thirdPartyInvalid = normalizedThirdPartyApplications?.let { applications ->
-            applications.size != event.thirdPartyApplications?.size || applications.any(::isInvalidThirdPartyApplication)
-        } ?: false
         val invalid = normalizedApplications.any { application ->
             application.componentId !in knownIds ||
                 !packagePattern.matches(application.packageName) ||
@@ -2802,9 +3133,7 @@ class InstallationSession(
         if (current.state != InstallationSessionState.MAINTENANCE ||
             (activeAction !in acceptedActions && !applicationRefreshInFlight) ||
             event.applications.size != normalizedApplications.size ||
-            invalid ||
-            thirdPartyInvalid ||
-            (event.thirdPartyApplications != null && activeAction != MaintenanceActionId.MANAGE_APPS)
+            invalid
         ) {
             if (
                 current.state == InstallationSessionState.MAINTENANCE &&
@@ -2818,8 +3147,6 @@ class InstallationSession(
             current.copy(
                 maintenance = current.maintenance.copy(
                     managedApplications = normalizedApplications,
-                    thirdPartyApplications = normalizedThirdPartyApplications
-                        ?: current.maintenance.thirdPartyApplications,
                     installedManifests = current.maintenance.installedManifests.filter { baseline ->
                         normalizedApplications.any { it.componentId == baseline.componentId }
                     },
@@ -2863,33 +3190,6 @@ class InstallationSession(
         ) return true
         return com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
             .isAllowedPackageName(componentId, packageName)
-    }
-
-    private fun isInvalidThirdPartyApplication(application: ThirdPartyApplicationStatus): Boolean {
-        if (!Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$").matches(application.packageName)) {
-            return true
-        }
-        if (
-            application.displayName.isBlank() ||
-            application.displayName.length > 256 ||
-            application.displayName.any(Char::isISOControl)
-        ) {
-            return true
-        }
-        if (application.iconKey?.matches(Regex("^third-party-icon-[a-fA-F0-9]{64}$")) == false) {
-            return true
-        }
-        val path = application.filePath ?: return true
-        if (!path.startsWith("/data/app/") || !path.endsWith("/base.apk")) return true
-        if (path.split('/').any { it == "." || it == ".." }) return true
-        if (application.versionCode?.let { it < 0L } == true ||
-            application.installTimeEpochMillis?.let { it < 0L } == true ||
-            application.updateTimeEpochMillis?.let { it < 0L } == true ||
-            application.uid?.let { it < 0 } == true
-        ) {
-            return true
-        }
-        return false
     }
 
     private fun handleMaintenanceCatalogRefreshed(event: InstallationSessionEvent.MaintenanceCatalogRefreshed) {
@@ -3470,6 +3770,30 @@ class InstallationSession(
             }
         }
         return byId
+    }
+
+    /**
+     * Update batches use REINSTALL_SELECTED for the requested row, while a
+     * trusted desktop package may still be reused as a prerequisite. Keep this
+     * rule separate from missing-only installs so a target update can never be
+     * accidentally classified as reusable.
+     */
+    private fun reusableMaintenancePrerequisiteIds(
+        snapshot: InstallationSessionSnapshot,
+        excludedIds: Set<String>,
+    ): Set<String> {
+        if (snapshot.maintenance.managedApplicationsState != MaintenanceInventoryState.READY) {
+            return emptySet()
+        }
+        return snapshot.maintenance.managedApplications.asSequence()
+            .filter { it.installed && it.componentId !in excludedIds }
+            .filter { application ->
+                val manifest = installedIdentityManifest(snapshot, application.componentId) ?: return@filter false
+                application.packageName == manifest.packageName &&
+                    application.versionCode == manifest.apkVersion.code
+            }
+            .map { it.componentId }
+            .toSet()
     }
 
     /** Components whose APK/source evidence must be produced in this attempt. */

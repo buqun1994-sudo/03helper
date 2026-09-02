@@ -2,7 +2,6 @@ package com.ninepointnine.helper.data.device
 
 import dadb.Dadb
 import com.ninepointnine.helper.data.artifact.ApkMetadataReader
-import com.ninepointnine.helper.data.artifact.ThirdPartyApplicationAssetStore
 import com.ninepointnine.helper.domain.device.ConnectedDevice
 import com.ninepointnine.helper.domain.device.DeviceCapability
 import com.ninepointnine.helper.domain.device.DeviceConnectionAttempt
@@ -27,7 +26,6 @@ class DadbDeviceConnectionFactory(
     private val readTimeoutMillis: Int = DEFAULT_READ_TIMEOUT_MILLIS,
     private val installedApkCacheDirectory: File? = null,
     private val installedApkMetadataReader: ApkMetadataReader? = null,
-    private val thirdPartyAssetStore: ThirdPartyApplicationAssetStore? = null,
 ) : DeviceConnectionFactory {
     override suspend fun open(endpoint: DeviceEndpoint): DeviceConnectionAttempt = withContext(Dispatchers.IO) {
         var adb: Dadb? = null
@@ -53,7 +51,6 @@ class DadbDeviceConnectionFactory(
                         ),
                         installedApkCacheDirectory = installedApkCacheDirectory,
                         installedApkMetadataReader = installedApkMetadataReader,
-                        thirdPartyAssetStore = thirdPartyAssetStore,
                     )
                     adb = null
                     DeviceConnectionAttempt.Connected(lease)
@@ -80,7 +77,6 @@ class DadbDeviceConnectionFactory(
         override val device: ConnectedDevice,
         installedApkCacheDirectory: File?,
         installedApkMetadataReader: ApkMetadataReader?,
-        thirdPartyAssetStore: ThirdPartyApplicationAssetStore?,
     ) : DeviceActionConnectionLease {
         private val closed = AtomicBoolean(false)
         private val ioMutex = Mutex()
@@ -90,7 +86,6 @@ class DadbDeviceConnectionFactory(
             ioMutex = ioMutex,
             installedApkCacheDirectory = installedApkCacheDirectory,
             installedApkMetadataReader = installedApkMetadataReader,
-            thirdPartyAssetStore = thirdPartyAssetStore,
         )
 
         override suspend fun check(): DeviceConnectionCheck = withContext(Dispatchers.IO) {

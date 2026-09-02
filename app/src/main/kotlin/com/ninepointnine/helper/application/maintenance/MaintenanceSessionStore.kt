@@ -131,12 +131,16 @@ internal object MaintenanceBaselineProjector {
         )
         if (!durableState) return null
 
-        val declaredSource = snapshot.maintenance.availableComponents.ifEmpty { snapshot.components }
+        val declaredSource = snapshot.maintenance.availableComponents
+            .ifEmpty { snapshot.components }
+            .filterNot { InstallerSelfIdentity.isSelfComponentId(it.id) }
         val declaredById = linkedMapOf<String, ComponentDescriptor>()
         declaredSource.forEach { component -> declaredById[component.id] = component.toBaselineComponent() }
-        snapshot.components.forEach { component ->
-            declaredById.putIfAbsent(component.id, component.toBaselineComponent())
-        }
+        snapshot.components
+            .filterNot { InstallerSelfIdentity.isSelfComponentId(it.id) }
+            .forEach { component ->
+                declaredById.putIfAbsent(component.id, component.toBaselineComponent())
+            }
         snapshot.maintenance.installedManifests.forEach { manifest ->
             if (manifest.componentId !in declaredById) {
                 declaredById[manifest.componentId] = manifest

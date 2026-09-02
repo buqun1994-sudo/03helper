@@ -12,7 +12,8 @@ object ArtifactManifestValidator {
 
     fun validate(manifest: ArtifactManifest): ManifestValidation = when {
         manifest.schemaVersion != SUPPORTED_SCHEMA_VERSION -> invalid("manifest_schema_unsupported")
-        !componentIdPattern.matches(manifest.componentId) -> invalid("component_id_invalid")
+        !componentIdPattern.matches(manifest.componentId) &&
+            !InstallerSelfIdentity.isSelfComponentId(manifest.componentId) -> invalid("component_id_invalid")
         manifest.displayName.isBlank() -> invalid("component_display_name_missing")
         manifest.description.toByteArray(Charsets.UTF_8).size > 512 -> invalid("component_description_invalid")
         manifest.version.isInvalid() -> invalid("component_version_invalid")

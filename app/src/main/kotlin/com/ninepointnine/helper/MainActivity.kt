@@ -108,6 +108,9 @@ internal fun InstallUiIntent.toInstallationSessionCommand(): InstallationSession
     is InstallUiIntent.SelectDevice -> InstallationSessionCommand.SelectDevice(deviceId)
     is InstallUiIntent.ToggleOptionalComponent -> InstallationSessionCommand.ToggleOptionalComponent(componentId, selected)
     InstallUiIntent.StartInstallation -> InstallationSessionCommand.StartInstallation
+    is InstallUiIntent.StartMaintenanceComponentUpdate ->
+        InstallationSessionCommand.StartMaintenanceComponentUpdate(componentId)
+    InstallUiIntent.InstallPreparedSelfUpdate -> InstallationSessionCommand.InstallPreparedSelfUpdate
     InstallUiIntent.CancelInstallation -> InstallationSessionCommand.CancelInstallation
     InstallUiIntent.ContinueInstallation -> InstallationSessionCommand.ContinueInstallation
     InstallUiIntent.RetryInstallation -> InstallationSessionCommand.RetryInstallation

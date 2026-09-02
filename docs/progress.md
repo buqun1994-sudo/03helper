@@ -1,8 +1,51 @@
-# 2026-09-02 第三方应用真实名称 / 图标与 03helper 1.0.2 产物（完成，未发布）
+# 2026-09-02 管理已安装应用目标模式恢复与双环境产物（完成，待用户手动测试）
 
-1. “管理已安装应用”已接入独立的第三方库存端口：车机执行 `pm list packages --user 0 -3 -f`，只接受 `/data/app/.../base.apk`，明确排除系统目录、split APK 和路径穿越；再从结构化包详情读取版本、UID、安装时间和更新时间。Android 9 的 `yyyy-MM-dd HH:mm:ss` 时间已纳入解析，按 `firstInstallTime` 倒序、包名稳定排序。
-2. 受控应用库存与第三方观测在会话中分开保存，UI 投影为一张不分组的平铺清单；同包名由受控行胜出，第三方行沿用受控行结构，标题显示 APK manifest 真实名称、图标显示同一车机 `base.apk` 的真实图标，副标题保留版本 / 安装时间，包名只在详情页出现。第三方行同样提供启动、强停、详情和卸载确认。第三方动作使用 `third-party:<package>` 行身份，每次设备动作前重新复核 `-3` 库存，不进入授权、安装或任意 shell 主链；第三方实时观测不写入维护基线。
-3. 设备适配器、会话、维护控制器和 UI 已接入第三方四类动作；新增第三方启动解析、启动 / 强停 / 卸载 / 详情、库存复核、伪造行拒绝、APK label / icon 临时读取与身份绑定有界缓存，以及 UI 投影 JVM 回归覆盖均通过，授权 fallback 仍只消费受控应用。
+1. 已撤销全量第三方应用库存、第三方详情资产缓存和第三方四项动作路由；管理页恢复为只展示签名配置 / 已验证 manifest 中声明的受控组件。
+2. 受控库存通过 `MaintenanceController.inspectApplications` 按允许包名读取，未知包和第三方包不会进入会话或 UI；不执行 `pm list packages --user 0 -3`，不为列表自动传输或解析 APK。
+3. 受控应用继续保留启动、强停、卸载确认和应用详情四项操作，动作前重新校验受控身份，卸载完成后重新读取受控库存；自更新、单项维护更新等已确认的独立能力保持不变。
+4. Release 真值已由 `1.0.4 (5)` 升级为 `1.0.5 (6)`。桌面根目录已生成四个交付物：测试 APK `03车机助手-staging-v0.1.0.apk`（21,060,648 字节，SHA-256 `2a3d76279143a3e2519d0bf339e6a9d7108e3abbfb80b48661b0b511dd754106`）及 ZIP（20,132,040 字节，SHA-256 `fa74270cb632fc5d0b48d7b2dfbee2f0fa3f2baf3e57346466890328ac52d7cc`）；正式 APK `03车机助手-v1.0.5.apk`（14,261,467 字节，SHA-256 `6eb3b2d1da87fa36cfc9f73f19d631ab07b30e75a043c6a4128b38786473db0b`）及 ZIP（13,457,668 字节，SHA-256 `1b702c058b797416fccfcf76f06c01a0e70a67f80f60b3d91a62eeb743fc1ae2`）。两 APK 均为 `com.ninepointnine.helper`，分别为 `0.1.0 (1)` / `1.0.5 (6)`，staging / production 证书、单 signer、APK Signature Scheme v2 均核对通过；ZIP 各只含一个同名 APK，通用标志 `0x0808`（含 UTF-8 位 `0x0800`），归档内外字节一致。未安装到手机或车机，等待用户手动测试。
+5. 本轮 JDK 17 下 `:app:testDebugUnitTest`（311 项）和 `:app:testReleaseUnitTest`（314 项）均为 0 failures / 0 errors / 0 skipped；Debug / Release Lint、Kotlin 编译、项目文档、Skills、本机环境和 `git diff --check` 均通过。Cloud 现有 production 候选 revision 5 未变更；本轮未提交、未推送、未上传 Cloud 或发布。
+
+# 2026-09-02 版本再次升级与正式包导出（完成，待手动上传）
+
+1. 按 `node scripts/bump-release-version.mjs` 将 Release 真值从 `1.0.3 (4)` 升级为 `1.0.4 (5)`。
+2. 使用仓库外 production 签名材料重新构建正式 APK：`com.ninepointnine.helper`、`1.0.4 (5)`、`14,294,651` 字节，APK SHA-256 `6a4ceb68e55038ddd92e9316e53782d6feff445a630fa0b0606075a718939829`，证书 SHA-256 `31ca80dd21a5208eaabd5f3e1440a3db2f7dc79122e03eaa6ba01730fb31f18b`，v2 / 单 signer 通过。
+3. 新单 APK ZIP 大小 `13,482,602` 字节，SHA-256 `701711369c5ae65b64b1f163ec431d55df5b853ddaa6620ce0267db498496dde`；根目录只有同名 `03车机助手-v1.0.4.apk`，UTF-8 标志 `0x0800`，归档内外字节完全一致。
+4. 新文件已放入桌面正式目录 `03系列正式发布包-中文名称-20260902`：`03车机助手-v1.0.4.apk` 与 `03车机助手-v1.0.4.zip`；旧 `v1.0.3` 文件保留，便于上传前后升级验证。未安装手机、未操作车机、未上传 Cloud。
+5. 本轮 `assembleRelease`、APK 元数据 / 签名 / ZIP 校验和项目文档、Skills、`git diff --check` 均通过；共享 03 APP 登记库仍是外部只读台账，未修改。
+
+# 2026-09-02 版本升级与桌面产物导出收尾（完成，未发布）
+
+1. 按 `node scripts/bump-release-version.mjs` 将 Release 真值从 `1.0.2 (3)` 升级为 `1.0.3 (4)`；Debug / staging 仍按既有约定为 `0.1.0 (1)`。
+2. 使用仓库外 staging 签名材料构建测试包：`com.ninepointnine.helper`、`0.1.0 (1)`、`21,110,216` 字节，APK SHA-256 `640d7e6ca3ea7ee6d565e6f210905b6aa11513e0f2672ebe5546a8e376da19e6`，证书 SHA-256 `aca4f178fea11ccc97a1373c8aa5345b274a3a783398929a9340a79ee83663af`，v2 / 单 signer 通过。
+3. 使用仓库外 production 签名材料构建正式包：`com.ninepointnine.helper`、`1.0.3 (4)`、`14,294,651` 字节，APK SHA-256 `afc76828989af02c7386809be23048cea1241c058c1c9beb774d1142b2a50fd6`，证书 SHA-256 `31ca80dd21a5208eaabd5f3e1440a3db2f7dc79122e03eaa6ba01730fb31f18b`，v2 / 单 signer 通过。
+4. 两个单 APK ZIP 已生成并核对：测试 ZIP `20,170,269` 字节、SHA-256 `f2455b400125b0ded3e5a9d61d27ff988861d5ec23aa8568ba81667c7335baec`；正式 ZIP `13,482,590` 字节、SHA-256 `f568c5012a903e6805e81e6835ae93fe7fcf9d7d03ca25c7c522fd77604dcb44`。每个 ZIP 根目录只有一个同名 APK，UTF-8 标志 `0x0800`，归档内外字节完全一致。
+5. 已覆盖桌面最新目录：`03系列测试包-中文名称-20260902` 下的 `03车机助手-staging-v0.1.0.apk/.zip`，以及 `03系列正式发布包-中文名称-20260902` 下的 `03车机助手-v1.0.3.apk/.zip`；其它产品文件未改动，旧正式 `v1.0.2` 文件已从该最新目录替换。
+6. 按用户当时授权曾对登记手机 `RMX1901` 卸载旧助手并确认 staging 主包安装成功；用户随后要求停止设备安装，因此 AndroidTest 安装命令已终止，未运行 instrumentation smoke，也未操作车机。最终设备状态不作为本轮 UI 验收结论。
+7. 本轮构建 / 验证通过：staging Debug 与 AndroidTest 构建、production Release 构建、Debug 单测 `331` 项、Release 单测 `334` 项、Debug / Release Lint、项目文档检查、Skills 检查和 `git diff --check`。未上传 Cloud、未发布配置、未提交或推送。
+
+# 2026-09-02 第三方应用轻量库存方案（历史方案，已撤销）
+
+1. 列表入口已固定为轻量库存主链：车机只执行 `pm list packages --user 0 -3 -f` 与至多一次 `dumpsys package packages`，严格保留 `/data/app/.../base.apk` 第三方行；列表阶段不 `pull`、不解析 APK，已有路径 / 版本绑定缓存可直接复用。用户打开单个详情后才执行远端 `stat -c %s` 大小门禁，并在 `1..128 MiB` 内进行一次有界读取；名称 / 图标失败只影响当前详情。
+2. 详情图标渲染已按 UI 行身份取回仓库返回的位图，避免把内部缓存文件键误当作 Compose 查找键；会话仍是唯一状态 owner，四项第三方 typed action 和写动作前实时库存复核保持不变。
+3. 本轮验证通过：`:app:testDebugUnitTest`、`:app:lintDebug`、`:app:assembleDebug`、`:app:assembleDebugAndroidTest`、`check-project-docs.mjs`、`check-skills.mjs`、`check-local-environment.mjs` 和 `git diff --check`。Debug 主包 SHA-256 为 `df1e72b39d427d793214455b1512b3c49aabe38d9fab42ce466af806d3eebdcc`，AndroidTest 包 SHA-256 为 `e7d46eff4e1930d9e7a297398e50b63c5615eec303af2916deaae2ae34fc0f5d`；主包 `com.ninepointnine.helper`、`0.1.0 (1)`、单 signer、APK Signature Scheme v2 通过。
+4. 目标车机 `S56_HQX`（`192.168.0.203:5555`、Android 9）只读计时为 `pm` 约 `0.04s`、`dumpsys` 约 `0.19s`，返回 10 条第三方包行且均为 `/data/app/.../base.apk`；未对车机执行写入。
+5. 登记测试手机 `RMX1901` 当前已安装 `com.ninepointnine.helper` `versionCode=3`；对本轮 Debug `versionCode=1` 执行保留数据 `adb install -r` 被系统以 `INSTALL_FAILED_VERSION_DOWNGRADE` 拒绝。未使用降级参数、未卸载、未清数据，故本轮未执行 instrumentation smoke；目标车机管理页的真实 UI 主测仍待可安全安装本轮 Debug 的测试设备。
+
+# 2026-09-02 检查更新逐项主链与助手自更新（施工完成，未发布）
+
+1. 检查更新页已移除“全部更新”；只有 `UPDATE_AVAILABLE` 应用行高亮并可点击，单次批次冻结一个目标。车机组件更新复用首次安装的 `ArtifactPreparationCoordinator` / `ArtifactBatchPrepared` / 设备安装主链，`REINSTALL_SELECTED` 只作用于当前目标；必要的 `desktop` 仅作内部 reusable prerequisite，不进入结果页。
+2. 助手自更新复用同一制品准备 owner，准备完成停在 `ARTIFACTS_READY`，用户点击“安装更新”后才调用 Android 系统安装器；回前台通过 `PackageManager` 回读包名、版本、大小、摘要和证书，成功投影为普通批次收据，不建立第二套领域成功态。
+3. 已补齐单测：逐项车机更新集合冻结、desktop reusable 隔离、自更新等待安装、系统安装器触发时机、回读版本不匹配 fail closed、取消清理和安装器缺失失败；JDK17 下全量 `:app:testDebugUnitTest` 报告为 `330` 项，`0` failures / `0` errors / `0` skipped，`:app:compileDebugKotlin`、`:app:lintDebug` 和 `:app:assembleDebug` 均通过。
+4. 新增 `REQUEST_INSTALL_PACKAGES` 仅用于助手自更新；Android O+ 未获用户授权时保留结构化失败与设置 / 重试入口。系统安装页显示“安装”或“更新”由 Android / 厂商决定，客户端以回读证据裁决结果。
+5. 最新 Debug APK 已核对为 `com.ninepointnine.helper` / `0.1.0 (1)`，Launcher 为 `.MainActivity`，APK Signature Scheme v2 有效，SHA-256 为 `57aba4c919de5dd77226d5c96ec895734707bc0b18a74374a392f2b4ddf1813b`。显式测试手机 `RMX1901` 在线，但保留数据 `adb install -r` 被系统以 `INSTALL_FAILED_VERSION_DOWNGRADE` 拒绝，因为设备已有 `1.0.2 (3)`；本轮未使用 `-d`、未卸载、未清数据、未重启。车机端点仅做在线识别，未执行写入。
+6. `node scripts/check-project-docs.mjs`、`node scripts/check-skills.mjs`、`node scripts/check-local-environment.mjs` 和 `git diff --check` 均通过；共享 03 APP 登记检查仍因 Cloud 台账版本 / versionCode、HEAD 与工作树快照落后而 fail closed，未修改共享登记库。真实 Cloud、蓝奏目录、车机更新写入和助手系统安装器回读仍待用户人工主测。
+
+# 2026-09-02 第三方应用轻量库存、按需详情与 03helper 1.0.2 产物（历史方案，已撤销）
+
+1. “管理已安装应用”已接入独立的第三方轻量库存端口：车机执行 `pm list packages --user 0 -3 -f` 与一次 `dumpsys package packages`，只接受 `/data/app/.../base.apk`，明确排除系统目录、split APK 和路径穿越；结构化输出提供版本、UID、安装时间和更新时间。Android 9 的 `yyyy-MM-dd HH:mm:ss` 时间已纳入解析，按 `firstInstallTime` 倒序、包名稳定排序，列表路径绝不自动 `pull` 或解析 APK。
+2. 受控应用库存与第三方观测在会话中分开保存，UI 投影为一张不分组的平铺清单；同包名由受控行胜出，第三方行在缓存命中时复用已验证名称 / 图标，缓存未命中时立即显示包名与轻量版本信息。用户明确打开单个详情后，才按需读取同一车机 `base.apk` 的真实名称 / 图标，并先执行远端大小门禁；详情失败只降级当前详情，不阻断库存。第三方行同样提供启动、强停、详情和卸载确认，包名只在详情页出现。
+3. 设备适配器、会话、维护控制器和 UI 已接入第三方四类动作；第三方动作使用 `third-party:<package>` 行身份，每次设备动作前重新复核 `-3` 库存，不进入授权、安装或任意 shell 主链；详情资产使用路径 / 版本绑定的有界缓存，第三方实时观测不写入维护基线。列表无 APK 传输、超大详情在传输前停止、旧详情结果隔离和 UI 投影 JVM 回归覆盖均通过，授权 fallback 仍只消费受控应用。
 4. 按用户最新要求保留 Release `1.0.2 (3)`，Debug / staging 保留 `0.1.0 (1)`；不升版本、不卸载、不清数据、不降级、不执行设备覆盖安装。正式与测试 APK / ZIP 已覆盖桌面同名交付目录：正式 APK `736d3dad6b32c5aa4057f20aca137b18263710735d7e6ea86878377e7c06cb99`（14,278,267 字节）、ZIP `25fde251b5767bc608a20564372e5c833834a08839cfd78e0407a1f1baceeb39`（13,483,589 字节）；测试 APK `953e1956982ed48ee7a8fcdb027824ad365e6c819275f7d1390fee9b5f2b1fdf`（21,093,832 字节）、ZIP `570adad885a9d758ab85db187fc62be730e5342d7c2d5328d3340c597ee059e4`（20,166,221 字节）。两个 ZIP 均由 JDK 生成并只含对应 UTF-8 文件名 APK。
 5. 本机验证：Debug / Release 单测、Kotlin 编译、Debug / Release Lint、项目文档检查、Skills 检查和 `git diff --check` 均通过；两 APK 包名均为 `com.ninepointnine.helper`，正式 `1.0.2 (3)` / staging `0.1.0 (1)`，均 v2、单 signer，ZIP 各含一个 APK 且归档字节一致。按用户要求未执行设备覆盖安装或运行级 smoke。
 6. 本轮未提交、未推送、未上传、未发布；共享 03 APP 登记库如仍与本地 `1.0.2 (3)` 不一致，只记录为外部台账阻断，不修改 Cloud。
@@ -44,10 +87,10 @@
 
 # 03helper 进度
 
-## 2026-09-02 管理已安装应用真实主测失败（待修复）
+## 2026-09-02 管理已安装应用真实主测失败（历史记录；第三方方案已撤销）
 
 1. 用户在最新 `1.0.2 (3)` 构建上进入“管理已安装应用”时，页面在“正在准备”阶段停留约 1–2 分钟；最终列表虽然出现，但部分第三方应用无法读取图标。
-2. 本次是真实 UI 运行级主测不通过，不能把第三方应用管理标记为人工验收通过；问题已记录，后续需分别定位库存准备耗时和第三方 APK 图标读取失败原因。
+2. 本次是真实 UI 运行级主测不通过，不能把第三方应用管理标记为人工验收通过；根因已确认是列表扫描同步逐包拉取 APK，代码已改为列表只读取 `pm/dumpsys` 轻量库存，已有缓存可复用，APK 名称 / 图标仅在单个详情动作中按需读取并执行远端大小门禁。
 3. 本轮只记录失败事实，不清数据、不卸载、不降级、不执行设备覆盖安装，不推送发布。
 
 ## 2026-08-30 production distribution-config 信任根与 Release 产物（完成，未上线；助手包已由上方重建记录替换）

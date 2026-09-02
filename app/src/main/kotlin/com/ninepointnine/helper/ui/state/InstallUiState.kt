@@ -49,6 +49,10 @@ sealed interface InstallUiState {
         val completedStages: Set<InstallPhase>,
         /** Business flow owning this installation page; never inferred by UI route state. */
         val installationFlow: InstallationFlow = InstallationFlow.INITIAL_INSTALL,
+        /** True when a helper APK is prepared and waiting for the user's install tap. */
+        val selfUpdateReady: Boolean = false,
+        /** True after the Android system installer has been launched. */
+        val selfUpdateInstallInProgress: Boolean = false,
     ) : InstallUiState {
         override val screen: InstallScreen = InstallScreen.INSTALLING
     }
@@ -187,8 +191,6 @@ data class MaintenanceApplicationRow(
     val filePath: String? = null,
     val uid: Int? = null,
     val iconKey: String = componentId,
-    /** True only for packages covered by the installer's signed catalog. */
-    val isControlled: Boolean = true,
 )
 
 data class MaintenanceUpdateRow(
@@ -236,6 +238,7 @@ data class MaintenanceApplicationDetailsRow(
     val updateTimeEpochMillis: Long?,
     val filePath: String?,
     val uid: Int?,
+    val iconKey: String? = null,
 )
 
 data class MaintenanceInstallationSelectionUi(
@@ -264,6 +267,8 @@ sealed interface InstallUiIntent {
     data class SelectDevice(val deviceId: String) : InstallUiIntent
     data class ToggleOptionalComponent(val componentId: String, val selected: Boolean) : InstallUiIntent
     data object StartInstallation : InstallUiIntent
+    data class StartMaintenanceComponentUpdate(val componentId: String) : InstallUiIntent
+    data object InstallPreparedSelfUpdate : InstallUiIntent
     data object CancelInstallation : InstallUiIntent
     data object ContinueInstallation : InstallUiIntent
     data object RetryInstallation : InstallUiIntent

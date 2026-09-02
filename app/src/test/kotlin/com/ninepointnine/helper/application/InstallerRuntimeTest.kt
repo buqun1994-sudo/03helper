@@ -18,6 +18,7 @@ import com.ninepointnine.helper.domain.artifact.ArtifactSourceKind
 import com.ninepointnine.helper.domain.artifact.ArtifactVerification
 import com.ninepointnine.helper.domain.artifact.ArtifactVersion
 import com.ninepointnine.helper.domain.artifact.CompatibilityRange
+import com.ninepointnine.helper.domain.artifact.InstallerSelfIdentity
 import com.ninepointnine.helper.domain.artifact.SourceSelectionEvidence
 import com.ninepointnine.helper.domain.artifact.toComponentDescriptor
 import com.ninepointnine.helper.domain.device.ConnectedDevice
@@ -54,10 +55,13 @@ import com.ninepointnine.helper.domain.session.MaintenanceInstallationOption
 import com.ninepointnine.helper.domain.session.MaintenanceInstallationSelection
 import com.ninepointnine.helper.domain.session.MaintenanceInventoryState
 import com.ninepointnine.helper.domain.session.MaintenanceSnapshot
+import com.ninepointnine.helper.domain.session.MaintenanceUpdateState
+import com.ninepointnine.helper.domain.session.MaintenanceUpdateStatus
 import com.ninepointnine.helper.domain.session.ManagedApplicationStatus
 import com.ninepointnine.helper.data.download.ArtifactCache
 import java.io.File
 import java.nio.file.Files
+import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
@@ -835,6 +839,144 @@ class InstallerRuntimeTest {
     }
 
     @Test
+    fun `self update stages without touching the vehicle and commits through the ordinary receipt`() = runTest {
+        val self = selfManifest(versionCode = 2)
+        val installer = RecordingSelfUpdateInstaller()
+        var deviceExecutionCalls = 0
+        val runtime = createSelfUpdateRuntime(
+            self = self,
+            installer = installer,
+            onDeviceExecution = { deviceExecutionCalls += 1 },
+            coroutineContext = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        runtime.dispatch(
+            InstallationSessionCommand.StartMaintenanceComponentUpdate(
+                InstallerSelfIdentity.COMPONENT_ID,
+            ),
+        )
+        advanceUntilIdle()
+
+        val prepared = runtime.session.currentSnapshot()
+        assertEquals(InstallationSessionState.ARTIFACTS_READY, prepared.state)
+        assertEquals(InstallationFlow.SELF_UPDATE, prepared.installationFlow)
+        assertEquals(1, installer.stageCalls)
+        assertEquals(0, installer.launchCalls)
+        assertEquals(0, deviceExecutionCalls)
+
+        runtime.dispatch(InstallationSessionCommand.InstallPreparedSelfUpdate)
+        assertEquals(InstallationSessionState.INSTALLING, runtime.session.currentSnapshot().state)
+        assertEquals(1, installer.launchCalls)
+
+        runtime.onForeground()
+        advanceUntilIdle()
+
+        val completed = runtime.session.currentSnapshot()
+        assertEquals(InstallationSessionState.SUCCEEDED, completed.state)
+        assertEquals(1, installer.verifyCalls)
+        assertEquals(1, installer.clearCalls)
+        assertEquals(
+            MaintenanceUpdateState.CURRENT,
+            completed.maintenance.updateStatuses.single().state,
+        )
+        assertEquals(
+            InstallerSelfIdentity.COMPONENT_ID,
+            completed.installationBatchReceipt?.components?.single()?.componentId,
+        )
+        runtime.close()
+    }
+
+    @Test
+    fun `self update readback mismatch fails closed and never reports success`() = runTest {
+        val self = selfManifest(versionCode = 2)
+        val installer = RecordingSelfUpdateInstaller { manifest ->
+            SelfUpdateVerificationResult.Confirmed(
+                InstalledArtifactEvidence(
+                    componentId = InstallerSelfIdentity.COMPONENT_ID,
+                    packageName = InstallerSelfIdentity.PACKAGE_NAME,
+                    version = ArtifactVersion("1.999.0", 999),
+                    apkSizeBytes = manifest.apkSizeBytes,
+                    apkSha256 = manifest.apkSha256,
+                    certificateSha256 = manifest.certificateSha256,
+                ),
+            )
+        }
+        val runtime = createSelfUpdateRuntime(
+            self = self,
+            installer = installer,
+            coroutineContext = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        runtime.dispatch(
+            InstallationSessionCommand.StartMaintenanceComponentUpdate(
+                InstallerSelfIdentity.COMPONENT_ID,
+            ),
+        )
+        advanceUntilIdle()
+        runtime.dispatch(InstallationSessionCommand.InstallPreparedSelfUpdate)
+        runtime.onForeground()
+        advanceUntilIdle()
+
+        val failed = runtime.session.currentSnapshot()
+        assertEquals(InstallationSessionState.FAILED, failed.state)
+        assertEquals("self_update_readback_version_mismatch", failed.failure?.reasonCode)
+        assertEquals(1, installer.clearCalls)
+        runtime.close()
+    }
+
+    @Test
+    fun `self update without a system installer fails before launch`() = runTest {
+        val runtime = createSelfUpdateRuntime(
+            self = selfManifest(versionCode = 2),
+            installer = null,
+            coroutineContext = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        runtime.dispatch(
+            InstallationSessionCommand.StartMaintenanceComponentUpdate(
+                InstallerSelfIdentity.COMPONENT_ID,
+            ),
+        )
+        advanceUntilIdle()
+
+        val failed = runtime.session.currentSnapshot()
+        assertEquals(InstallationSessionState.FAILED, failed.state)
+        assertEquals("self_update_installer_unavailable", failed.failure?.reasonCode)
+        runtime.close()
+    }
+
+    @Test
+    fun `cancelling a self update clears the staged package and ignores a late readback`() = runTest {
+        val self = selfManifest(versionCode = 2)
+        val installer = RecordingSelfUpdateInstaller()
+        val runtime = createSelfUpdateRuntime(
+            self = self,
+            installer = installer,
+            coroutineContext = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        runtime.dispatch(
+            InstallationSessionCommand.StartMaintenanceComponentUpdate(
+                InstallerSelfIdentity.COMPONENT_ID,
+            ),
+        )
+        advanceUntilIdle()
+        runtime.dispatch(InstallationSessionCommand.InstallPreparedSelfUpdate)
+        assertEquals(InstallationSessionState.INSTALLING, runtime.session.currentSnapshot().state)
+
+        runtime.dispatch(InstallationSessionCommand.CancelInstallation)
+        advanceUntilIdle()
+        assertEquals(InstallationSessionState.PAUSED, runtime.session.currentSnapshot().state)
+        assertEquals(1, installer.clearCalls)
+
+        runtime.onForeground()
+        advanceUntilIdle()
+        assertEquals(InstallationSessionState.PAUSED, runtime.session.currentSnapshot().state)
+        assertEquals(0, installer.verifyCalls)
+        runtime.close()
+    }
+
+    @Test
     fun `runtime keeps confirmed device connected when catalog is unavailable`() = runTest {
         val runtime = InstallerRuntime(
             session = InstallationSession(),
@@ -1355,6 +1497,133 @@ class InstallerRuntimeTest {
             ),
         )
     }
+
+    private fun createSelfUpdateRuntime(
+        self: ArtifactManifest,
+        installer: SelfUpdateInstaller?,
+        onDeviceExecution: () -> Unit = {},
+        coroutineContext: CoroutineContext,
+    ): InstallerRuntime {
+        val descriptor = self.toComponentDescriptor()
+        val snapshot = InstallationSessionSnapshot(
+            state = InstallationSessionState.MAINTENANCE,
+            components = listOf(descriptor),
+            catalogVersion = "self-update-catalog",
+            catalogRevision = 1L,
+            catalogKeyId = "test-key",
+            catalogSignatureAlgorithm = "Ed25519",
+            maintenance = MaintenanceSnapshot(
+                managedApplicationsState = MaintenanceInventoryState.READY,
+                availableComponents = listOf(descriptor),
+                availableManifests = listOf(self),
+                availableCatalogVersion = "self-update-catalog",
+                availableCatalogRevision = 1L,
+                availableCatalogKeyId = "test-key",
+                availableCatalogSignatureAlgorithm = "Ed25519",
+                updateStatuses = listOf(
+                    MaintenanceUpdateStatus(
+                        componentId = InstallerSelfIdentity.COMPONENT_ID,
+                        displayName = self.displayName,
+                        versionLabel = self.version.name,
+                        installedVersionLabel = "1.0.0",
+                        state = MaintenanceUpdateState.UPDATE_AVAILABLE,
+                        isSelf = true,
+                    ),
+                ),
+            ),
+        )
+        return InstallerRuntime(
+            session = InstallationSession(initialSnapshot = snapshot),
+            createDiscoveryAdapter = { port -> DeviceDiscoverySessionAdapter(fakeDiscovery(), port) },
+            createConnectionAdapter = { port -> fakeConnectionAdapter(port) },
+            loadCatalog = {},
+            prepareInstallationBatch = { batch, port ->
+                emitArtifactBatchPrepared(batch, listOf(self), port = port)
+                ArtifactPreparationResult.Prepared(
+                    artifacts = listOf(
+                        PreparedArtifact(
+                            manifest = self,
+                            sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                            finalApk = File("self-update.apk"),
+                        ),
+                    ),
+                )
+            },
+            executeDeviceInstallationWithBatch = { _, _, _, _, _ -> onDeviceExecution() },
+            selfUpdateInstaller = installer,
+            coroutineContext = coroutineContext,
+        )
+    }
+
+    private class RecordingSelfUpdateInstaller(
+        private val verification: (ArtifactManifest) -> SelfUpdateVerificationResult = { manifest ->
+            SelfUpdateVerificationResult.Confirmed(
+                InstalledArtifactEvidence(
+                    componentId = InstallerSelfIdentity.COMPONENT_ID,
+                    packageName = InstallerSelfIdentity.PACKAGE_NAME,
+                    version = manifest.apkVersion,
+                    apkSizeBytes = manifest.apkSizeBytes,
+                    apkSha256 = manifest.apkSha256,
+                    certificateSha256 = manifest.certificateSha256,
+                ),
+            )
+        },
+    ) : SelfUpdateInstaller {
+        var stageCalls = 0
+        var launchCalls = 0
+        var verifyCalls = 0
+        var clearCalls = 0
+
+        override fun stage(artifact: PreparedArtifact): SelfUpdateStageResult {
+            stageCalls += 1
+            return SelfUpdateStageResult.Ready(
+                StagedSelfUpdate(
+                    manifest = artifact.manifest,
+                    apkFile = artifact.finalApk ?: File("self-update.apk"),
+                ),
+            )
+        }
+
+        override fun launch(staged: StagedSelfUpdate): SelfUpdateLaunchResult {
+            launchCalls += 1
+            return SelfUpdateLaunchResult.Started
+        }
+
+        override fun verifyInstalled(manifest: ArtifactManifest): SelfUpdateVerificationResult {
+            verifyCalls += 1
+            return verification(manifest)
+        }
+
+        override fun clear(staged: StagedSelfUpdate) {
+            clearCalls += 1
+        }
+    }
+
+    private fun selfManifest(versionCode: Long): ArtifactManifest = ArtifactManifest(
+        schemaVersion = 1,
+        componentId = InstallerSelfIdentity.COMPONENT_ID,
+        displayName = "03车机助手",
+        required = false,
+        version = ArtifactVersion("1.$versionCode.0", versionCode),
+        compatibility = CompatibilityRange(minAndroidSdk = 26, maxAndroidSdk = 35),
+        archiveFileName = "03helper.zip",
+        archiveSizeBytes = 100L,
+        archiveSha256 = "11".repeat(32),
+        apkEntryName = "03helper.apk",
+        apkSizeBytes = 50L,
+        apkSha256 = "22".repeat(32),
+        packageName = InstallerSelfIdentity.PACKAGE_NAME,
+        apkVersion = ArtifactVersion("1.$versionCode.0", versionCode),
+        certificateSha256 = "33".repeat(32),
+        sources = listOf(
+            ArtifactSource(ArtifactSourceKind.LANZOU_SHARE, "https://wwatl.lanzouw.com/i03helper"),
+            ArtifactSource(ArtifactSourceKind.R2, "https://assets.r2.dev/03helper.zip"),
+            ArtifactSource(
+                ArtifactSourceKind.GITHUB_RELEASES,
+                "https://github.com/example/repo/releases/download/v1/03helper.zip",
+            ),
+        ),
+    )
 
     private fun manifest(componentId: String): ArtifactManifest = ArtifactManifest(
         schemaVersion = 1,

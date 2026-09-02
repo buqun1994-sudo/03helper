@@ -37,7 +37,6 @@ import com.ninepointnine.helper.ui.screens.MaintenanceActionFlowPage
 import com.ninepointnine.helper.ui.screens.MaintenanceHome
 import com.ninepointnine.helper.domain.session.MaintenanceActionId
 import com.ninepointnine.helper.domain.session.isApplicationInstallation
-import com.ninepointnine.helper.domain.session.thirdPartyRowId
 import com.ninepointnine.helper.ui.state.InstallUiIntent
 import com.ninepointnine.helper.ui.state.InstallUiState
 import com.ninepointnine.helper.ui.state.InstallUiStateMapper
@@ -70,7 +69,11 @@ fun InstallApp(
         is InstallUiState.Result -> {
             {
                 onIntent(
-                    if (state.installationFlow == InstallationFlow.MAINTENANCE_INSTALL) {
+                    if (state.installationFlow in setOf(
+                            InstallationFlow.MAINTENANCE_INSTALL,
+                            InstallationFlow.SELF_UPDATE,
+                        )
+                    ) {
                         maintenanceResultBackIntent(routedMaintenanceAction, state)
                     } else {
                         InstallUiIntent.ReturnToSelection
@@ -185,8 +188,14 @@ fun InstallApp(
                                 state = target.uiState,
                                 onIntent = onIntent,
                                 onBack = {
-                                    currentFlowBack?.invoke()
-                                        ?: onIntent(InstallUiIntent.ReturnToMaintenanceInstallationSelection)
+                                    if (target.uiState is InstallUiState.Installing &&
+                                        target.uiState.selfUpdateReady
+                                    ) {
+                                        onIntent(InstallUiIntent.CancelInstallation)
+                                    } else {
+                                        currentFlowBack?.invoke()
+                                            ?: onIntent(InstallUiIntent.ReturnToMaintenanceInstallationSelection)
+                                    }
                                 },
                             )
                         }
@@ -200,8 +209,14 @@ fun InstallApp(
 }
 
 private fun InstallUiState.ownsMaintenanceInstallation(): Boolean = when (this) {
-    is InstallUiState.Installing -> installationFlow == InstallationFlow.MAINTENANCE_INSTALL
-    is InstallUiState.Result -> installationFlow == InstallationFlow.MAINTENANCE_INSTALL
+    is InstallUiState.Installing -> installationFlow in setOf(
+        InstallationFlow.MAINTENANCE_INSTALL,
+        InstallationFlow.SELF_UPDATE,
+    )
+    is InstallUiState.Result -> installationFlow in setOf(
+        InstallationFlow.MAINTENANCE_INSTALL,
+        InstallationFlow.SELF_UPDATE,
+    )
     else -> false
 }
 
@@ -213,7 +228,11 @@ internal fun maintenanceResultBackIntent(
     // A result carrying the initial-install identity can never be routed by a
     // maintenance action argument. This guard prevents a stale page callback
     // from sending an initial failure into the maintenance recovery command.
-    if (state.installationFlow != InstallationFlow.MAINTENANCE_INSTALL) {
+    if (state.installationFlow !in setOf(
+            InstallationFlow.MAINTENANCE_INSTALL,
+            InstallationFlow.SELF_UPDATE,
+        )
+    ) {
         return if (state.kind in setOf(
                 com.ninepointnine.helper.domain.session.ResultKind.SUCCESS,
                 com.ninepointnine.helper.domain.session.ResultKind.CONFIRMATION_PENDING,
@@ -224,6 +243,9 @@ internal fun maintenanceResultBackIntent(
         } else {
             InstallUiIntent.ReturnToSelection
         }
+    }
+    if (state.installationFlow == InstallationFlow.SELF_UPDATE) {
+        return InstallUiIntent.EnterMaintenance
     }
     return when {
         state.kind in setOf(
@@ -245,9 +267,6 @@ internal fun maintenanceResultBackIntent(
 private fun buildIconRequests(snapshot: InstallationSessionSnapshot): List<ApkIconRequest> {
     val manifests = iconManifests(snapshot).associateBy { it.componentId }
     val installedApplications = snapshot.maintenance.managedApplications.associateBy { it.componentId }
-    val thirdPartyApplications = snapshot.maintenance.thirdPartyApplications.associateBy {
-        thirdPartyRowId(it.packageName)
-    }
     val ids = buildSet {
         addAll(snapshot.components.map { it.id })
         addAll(snapshot.maintenance.managedApplications.map { it.componentId })
@@ -255,22 +274,11 @@ private fun buildIconRequests(snapshot: InstallationSessionSnapshot): List<ApkIc
         addAll(snapshot.maintenance.availableManifests.map { it.componentId })
         addAll(snapshot.maintenance.installationSelection?.options.orEmpty().map { it.componentId })
         addAll(snapshot.maintenance.updateStatuses.map { it.componentId })
-        addAll(thirdPartyApplications.keys)
     }
     return ids.map { componentId ->
         val manifest = manifests[componentId]
         val installed = installedApplications[componentId]
-        val thirdParty = thirdPartyApplications[componentId]
         when {
-            thirdParty != null -> ApkIconRequest(
-                componentId = componentId,
-                packageName = thirdParty.packageName,
-                versionCode = thirdParty.versionCode,
-                preferPersisted = true,
-                thirdPartyAssetKey = thirdParty.iconKey,
-                thirdPartyRemoteFilePath = thirdParty.filePath,
-            )
-
             installed != null -> {
                 val exactManifest = manifest?.takeIf { it.packageName == installed.packageName }
                 ApkIconRequest(

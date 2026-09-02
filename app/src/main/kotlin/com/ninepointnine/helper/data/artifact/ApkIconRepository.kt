@@ -33,10 +33,6 @@ data class ApkIconRequest(
     val versionCode: Long? = null,
     /** A live car inventory row should prefer the icon captured from its installed APK. */
     val preferPersisted: Boolean = false,
-    /** Cache key produced by the verified third-party `/data/app` inventory read. */
-    val thirdPartyAssetKey: String? = null,
-    /** Exact remote base APK path used to bind the third-party cache entry. */
-    val thirdPartyRemoteFilePath: String? = null,
 )
 
 /**
@@ -50,8 +46,6 @@ class ApkIconRepository(
     private val metadataReader: ApkMetadataReader = AndroidApkMetadataReader(context.applicationContext),
     /** The active catalog channel; null is used by isolated tests/legacy callers. */
     private val preferredTrack: ArtifactReleaseTrack? = null,
-    /** Shared with the ADB inventory adapter in production; null keeps legacy callers read-only. */
-    private val thirdPartyAssetStore: ThirdPartyApplicationAssetStore? = null,
 ) {
     private val packageManager = context.applicationContext.packageManager
     private val bitmapCache = ConcurrentHashMap<String, Bitmap>()
@@ -78,25 +72,6 @@ class ApkIconRepository(
 
     /** Resolves one icon without allowing a stale cache entry to outrank a newer APK. */
     private fun loadRequestIcon(request: ApkIconRequest, files: List<File>): Pair<String, Bitmap>? {
-        // Third-party APKs are not part of the helper's publisher trust root.
-        // Their icon can only come from the path/version-bound cache populated
-        // by the ADB inventory adapter; never turn an arbitrary package name
-        // into a phone-side PackageManager lookup.
-        request.thirdPartyRemoteFilePath?.let { remotePath ->
-            val store = thirdPartyAssetStore ?: return null
-            val asset = store.lookup(
-                packageName = request.packageName ?: return null,
-                expectedVersionCode = request.versionCode,
-                remoteFilePath = remotePath,
-            ) ?: return null
-            store.loadIcon(
-                iconKey = request.thirdPartyAssetKey ?: asset.iconKey,
-                packageName = asset.packageName,
-                expectedVersionCode = request.versionCode,
-                remoteFilePath = remotePath,
-            )?.let { return request.componentId to it }
-            return null
-        }
         // A verified current APK is the strongest visual source. Persisted
         // bytes are consulted only after that exact candidate is absent, so a
         // previous version can never mask a newly extracted logo.

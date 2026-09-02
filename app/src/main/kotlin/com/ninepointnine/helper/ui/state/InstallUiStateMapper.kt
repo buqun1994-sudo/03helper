@@ -15,8 +15,6 @@ import com.ninepointnine.helper.domain.session.ArtifactCatalogStage
 import com.ninepointnine.helper.domain.session.isApplicationInstallation
 import com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
 import com.ninepointnine.helper.domain.session.resolveInstallationResult
-import com.ninepointnine.helper.domain.session.compareInstallTimesDescending
-import com.ninepointnine.helper.domain.session.thirdPartyRowId
 
 object InstallUiStateMapper {
     fun map(snapshot: InstallationSessionSnapshot): InstallUiState {
@@ -91,7 +89,23 @@ object InstallUiStateMapper {
                         .takeIf { action.status == MaintenanceActionStatus.FAILED && action.actionId.isApplicationInstallation },
                 )
             },
-            applications = maintenanceApplicationRows(snapshot),
+            applications = snapshot.maintenance.managedApplications.map { application ->
+                MaintenanceApplicationRow(
+                    componentId = application.componentId,
+                    displayName = snapshot.components.firstOrNull { it.id == application.componentId }
+                        ?.displayName ?: application.componentId,
+                    packageName = application.packageName,
+                    installed = application.installed,
+                    versionLabel = application.versionLabel,
+                    versionCode = application.versionCode,
+                    fileSizeBytes = application.fileSizeBytes,
+                    installTimeEpochMillis = application.installTimeEpochMillis,
+                    updateTimeEpochMillis = application.updateTimeEpochMillis,
+                    filePath = application.filePath,
+                    uid = application.uid,
+                    iconKey = application.componentId,
+                )
+            },
             applicationsState = snapshot.maintenance.managedApplicationsState,
             applicationsErrorReason = snapshot.maintenance.managedApplicationsFailureReason,
             applicationsErrorRetryable = snapshot.maintenance.managedApplicationsFailureRetryable,
@@ -145,6 +159,7 @@ object InstallUiStateMapper {
                     updateTimeEpochMillis = details.updateTimeEpochMillis,
                     filePath = details.filePath,
                     uid = details.uid,
+                    iconKey = details.iconKey,
                 )
             },
             installationSelection = snapshot.maintenance.installationSelection?.let { selection ->
@@ -244,77 +259,6 @@ object InstallUiStateMapper {
         )
     }
 
-    /**
-     * Projects controlled and third-party packages into one flat list. A
-     * package that is both controlled and third-party is represented once by
-     * its controlled row, while every other third-party package receives the
-     * same fixed maintenance actions through its synthetic row identity.
-     */
-    private fun maintenanceApplicationRows(
-        snapshot: InstallationSessionSnapshot,
-    ): List<MaintenanceApplicationRow> {
-        val controlled = snapshot.maintenance.managedApplications.map { application ->
-            MaintenanceApplicationRow(
-                componentId = application.componentId,
-                displayName = snapshot.components.firstOrNull { it.id == application.componentId }
-                    ?.displayName ?: application.componentId,
-                packageName = application.packageName,
-                installed = application.installed,
-                versionLabel = application.versionLabel,
-                versionCode = application.versionCode,
-                fileSizeBytes = application.fileSizeBytes,
-                installTimeEpochMillis = application.installTimeEpochMillis,
-                updateTimeEpochMillis = application.updateTimeEpochMillis,
-                filePath = application.filePath,
-                uid = application.uid,
-                iconKey = application.componentId,
-                isControlled = true,
-            )
-        }
-        val thirdPartyByPackage = snapshot.maintenance.thirdPartyApplications.associateBy { it.packageName }
-        val mergedControlled = controlled.map { row ->
-            val observed = thirdPartyByPackage[row.packageName] ?: return@map row
-            row.copy(
-                versionLabel = row.versionLabel ?: observed.versionLabel,
-                versionCode = row.versionCode ?: observed.versionCode,
-                installTimeEpochMillis = row.installTimeEpochMillis ?: observed.installTimeEpochMillis,
-                updateTimeEpochMillis = row.updateTimeEpochMillis ?: observed.updateTimeEpochMillis,
-                filePath = row.filePath ?: observed.filePath,
-                uid = row.uid ?: observed.uid,
-            )
-        }
-        val controlledPackages = controlled.mapTo(mutableSetOf()) { it.packageName }
-        val thirdParty = snapshot.maintenance.thirdPartyApplications
-            .filterNot { it.packageName in controlledPackages }
-            .map { application ->
-                MaintenanceApplicationRow(
-                    componentId = thirdPartyRowId(application.packageName),
-                    displayName = application.displayName.ifBlank { application.packageName },
-                    packageName = application.packageName,
-                    installed = true,
-                    versionLabel = application.versionLabel,
-                    versionCode = application.versionCode,
-                    installTimeEpochMillis = application.installTimeEpochMillis,
-                    updateTimeEpochMillis = application.updateTimeEpochMillis,
-                    filePath = application.filePath,
-                    uid = application.uid,
-                    // Keep the same row identity used by the icon loader and
-                    // the four typed maintenance actions.
-                    iconKey = thirdPartyRowId(application.packageName),
-                    isControlled = false,
-                )
-            }
-        return (mergedControlled + thirdParty).sortedWith { left, right ->
-            val installTime = compareInstallTimesDescending(
-                left.installTimeEpochMillis,
-                right.installTimeEpochMillis,
-            )
-            if (installTime != 0) installTime
-            else left.packageName.compareTo(right.packageName).takeUnless { it == 0 }
-                ?: left.componentId.compareTo(right.componentId)
-        }
-    }
-
     private fun installingState(snapshot: InstallationSessionSnapshot): InstallUiState.Installing {
         val currentPhase = when (snapshot.state) {
             InstallationSessionState.PREPARING_ARTIFACTS -> snapshot.componentProgress.values
@@ -346,6 +290,10 @@ object InstallUiStateMapper {
             ),
             completedStages = completedStages,
             installationFlow = snapshot.installationFlow,
+            selfUpdateReady = snapshot.installationFlow == InstallationFlow.SELF_UPDATE &&
+                snapshot.state == InstallationSessionState.ARTIFACTS_READY,
+            selfUpdateInstallInProgress = snapshot.installationFlow == InstallationFlow.SELF_UPDATE &&
+                snapshot.state == InstallationSessionState.INSTALLING,
         )
     }
 

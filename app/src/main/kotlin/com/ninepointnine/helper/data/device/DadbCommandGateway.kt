@@ -1,8 +1,6 @@
 package com.ninepointnine.helper.data.device
 
 import com.ninepointnine.helper.data.artifact.ApkMetadataReader
-import com.ninepointnine.helper.data.artifact.ThirdPartyApplicationAsset
-import com.ninepointnine.helper.data.artifact.ThirdPartyApplicationAssetStore
 import com.ninepointnine.helper.data.artifact.sha256
 import com.ninepointnine.helper.domain.artifact.ArtifactManifestValidator
 import com.ninepointnine.helper.domain.artifact.ManifestValidation
@@ -27,8 +25,6 @@ import com.ninepointnine.helper.domain.device.InstallableArtifact
 import com.ninepointnine.helper.domain.device.InstalledArtifactEvidence
 import com.ninepointnine.helper.domain.device.ManagedApplicationProbe
 import com.ninepointnine.helper.domain.device.ManagedApplicationsResult
-import com.ninepointnine.helper.domain.device.ThirdPartyApplicationProbe
-import com.ninepointnine.helper.domain.device.ThirdPartyApplicationsResult
 import com.ninepointnine.helper.domain.device.ManagedComponent
 import com.ninepointnine.helper.domain.device.ManagedApplicationDetailsProbe
 import com.ninepointnine.helper.domain.device.ManagedApplicationDetailsProbeResult
@@ -40,7 +36,6 @@ import com.ninepointnine.helper.domain.device.MaintenanceDeviceResult
 import com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
 import com.ninepointnine.helper.domain.session.MaintenanceApplicationActionId
 import com.ninepointnine.helper.domain.session.InstallationStrategy
-import com.ninepointnine.helper.domain.session.compareInstallTimesDescending
 import android.util.Log
 import dadb.AdbShellResponse
 import dadb.Dadb
@@ -51,7 +46,6 @@ import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
-import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -70,8 +64,6 @@ internal class DadbCommandGateway(
     private val ioMutex: Mutex,
     private val installedApkCacheDirectory: File?,
     private val installedApkMetadataReader: ApkMetadataReader?,
-    /** Shared app-private cache for labels/icons captured from verified inventory paths. */
-    private val thirdPartyAssetStore: ThirdPartyApplicationAssetStore? = null,
 ) : AdbCommandGateway, MaintenanceCommandGateway {
     /** Cached per lease so older Android package-manager builds are probed once. */
     private var versionedPackageInventorySupported: Boolean? = null
@@ -651,109 +643,6 @@ internal class DadbCommandGateway(
         ManagedApplicationsResult.Completed(detailed)
     }
 
-    override suspend fun inspectThirdPartyApplications(): ThirdPartyApplicationsResult = withLease(
-        whenClosed = ThirdPartyApplicationsResult.Failed(
-            DeviceActionFailure("adb_connection_closed", retryable = true),
-        ),
-    ) {
-        val packageEntries = readThirdPartyPackageInventory()
-            ?: return@withLease ThirdPartyApplicationsResult.Failed(
-                DeviceActionFailure("maintenance_third_party_inventory_failed", retryable = true),
-            )
-        if (packageEntries.isEmpty()) {
-            return@withLease ThirdPartyApplicationsResult.Completed(emptyList())
-        }
-
-        // PackageManager's package listing identifies the eligible directory;
-        // dumpsys supplies the install timestamps and version labels in one
-        // read. The path from the listing remains authoritative for the row.
-        val details = shell("dumpsys package packages")
-            ?.takeIf { it.exitCode == 0 }
-            ?.let { ThirdPartyPackageDetailsParser.parse(it.output, packageEntries) }
-            ?: return@withLease ThirdPartyApplicationsResult.Failed(
-                DeviceActionFailure("maintenance_third_party_details_failed", retryable = true),
-            )
-        ThirdPartyApplicationsResult.Completed(
-            details
-                .map(::toThirdPartyApplicationProbe)
-                .sortedWith(thirdPartyApplicationComparator()),
-        )
-    }
-
-    /** Enriches one strict `/data/app` row without allowing a failed icon read to fail the list. */
-    private fun toThirdPartyApplicationProbe(detail: ThirdPartyPackageDetail): ThirdPartyApplicationProbe {
-        val asset = loadOrCaptureThirdPartyAsset(detail)
-        return ThirdPartyApplicationProbe(
-            packageName = detail.packageName,
-            versionLabel = detail.versionLabel,
-            versionCode = detail.versionCode ?: asset?.versionCode,
-            installTimeEpochMillis = detail.installTimeEpochMillis,
-            updateTimeEpochMillis = detail.updateTimeEpochMillis,
-            filePath = detail.filePath,
-            uid = detail.uid,
-            displayName = asset?.displayName ?: detail.packageName,
-            iconKey = asset?.iconKey,
-        )
-    }
-
-    /**
-     * Reuses a path/version-bound asset when possible. A cache miss pulls only
-     * the already-validated base APK to app-private storage, reads its label
-     * and icon, and removes the temporary bytes immediately.
-     */
-    private fun loadOrCaptureThirdPartyAsset(detail: ThirdPartyPackageDetail): ThirdPartyApplicationAsset? {
-        val store = thirdPartyAssetStore
-        val cached = store?.lookup(
-            packageName = detail.packageName,
-            expectedVersionCode = detail.versionCode,
-            remoteFilePath = detail.filePath,
-        )
-        if (cached != null) return cached
-        val workingDirectory = installedApkCacheDirectory ?: return null
-        if (!workingDirectory.exists() && !workingDirectory.mkdirs()) return null
-        val temporary = workingDirectory.resolve(
-            ".third-party-${thirdPartyAssetDigest(detail.packageName, detail.filePath)}.apk",
-        )
-        temporary.delete()
-        return try {
-            adb.pull(temporary, detail.filePath)
-            if (!temporary.isFile || temporary.length() !in 1..MAX_THIRD_PARTY_APK_BYTES) return null
-            if (store != null) {
-                store.capture(
-                    apkFile = temporary,
-                    expectedPackageName = detail.packageName,
-                    expectedVersionCode = detail.versionCode,
-                    remoteFilePath = detail.filePath,
-                )
-            } else {
-                // Isolated adapter tests may inject only the metadata reader;
-                // still expose a real APK label while leaving iconKey empty.
-                val metadata = installedApkMetadataReader?.read(temporary) ?: return null
-                if (metadata.packageName != detail.packageName ||
-                    detail.versionCode != null && metadata.version.code != detail.versionCode
-                ) return null
-                ThirdPartyApplicationAsset(
-                    packageName = detail.packageName,
-                    versionCode = metadata.version.code,
-                    remoteFilePath = detail.filePath,
-                    displayName = metadata.displayName?.takeIf(String::isNotBlank) ?: detail.packageName,
-                    iconKey = null,
-                )
-            }
-        } catch (_: Exception) {
-            // One malformed or inaccessible package must not hide the other
-            // valid third-party rows in the same inventory read.
-            null
-        } finally {
-            temporary.delete()
-        }
-    }
-
-    private fun thirdPartyAssetDigest(packageName: String, remoteFilePath: String): String =
-        MessageDigest.getInstance("SHA-256")
-            .digest("$packageName|$remoteFilePath".toByteArray(Charsets.UTF_8))
-            .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
-
     override suspend fun inspectInstalledApplicationInventory(
         components: List<ManagedComponent>,
     ): ManagedApplicationsResult = withLease(
@@ -856,23 +745,6 @@ internal class DadbCommandGateway(
             return null
         }
         return entries
-    }
-
-    /** Reads only user-installed APKs and rejects system/application-framework paths. */
-    private fun readThirdPartyPackageInventory(): List<ThirdPartyPackageEntry>? {
-        val commands = listOf(
-            "pm list packages --user 0 -3 -f --show-versioncode",
-            "pm list packages --user 0 -3 -f",
-            "pm list packages -3 -f",
-        )
-        commands.forEach { command ->
-            val response = shell(command) ?: return@forEach
-            if (response.exitCode != 0) return@forEach
-            val entries = ThirdPartyPackageInventoryParser.parseEntries(response.output)
-            if (entries.isNotEmpty()) return entries
-            if (response.output.lineSequence().none { it.trim().isNotEmpty() }) return emptyList()
-        }
-        return null
     }
 
     private fun inspectComponentAuthorizationLocked(
@@ -1170,15 +1042,12 @@ internal class DadbCommandGateway(
             DeviceActionFailure("adb_connection_closed", retryable = true),
         ),
     ) {
-        if (!isValidApplicationTarget(component)) {
+        if (!COMPONENT_ID_PATTERN.matches(component.componentId) ||
+            !PACKAGE_NAME_PATTERN.matches(component.packageName)
+        ) {
             return@withLease MaintenanceDeviceResult.Failed(
                 DeviceActionFailure("maintenance_component_identity_invalid", component.componentId, retryable = false),
             )
-        }
-        if (component.isThirdParty) {
-            verifyThirdPartyPackage(component.packageName, component.componentId)?.let {
-                return@withLease MaintenanceDeviceResult.Failed(it)
-            }
         }
         if (actionId == MaintenanceApplicationActionId.UNINSTALL) {
             when (probePackagePresence(component.packageName)) {
@@ -1203,7 +1072,27 @@ internal class DadbCommandGateway(
             }
         }
         when (actionId) {
-            MaintenanceApplicationActionId.START -> launchApplication(component)
+            MaintenanceApplicationActionId.START -> {
+                val launchComponent = AuthorizationPlanFactory.fixedLaunchComponent(component)
+                if (launchComponent == null) {
+                    MaintenanceDeviceResult.Failed(
+                        DeviceActionFailure("maintenance_launch_unavailable", component.componentId, retryable = false),
+                    )
+                } else {
+                    val launch = shell("am start -n ${shellArgument(launchComponent)}")
+                    // Process publication can lag behind am start on the car.
+                    // Treat pidof as an observation, never as the launch write
+                    // result shown to the user.
+                    waitForProcess(component.packageName)
+                    if (!isLaunchAccepted(launch)) {
+                        MaintenanceDeviceResult.Failed(
+                            DeviceActionFailure("maintenance_launch_failed", component.componentId, retryable = true),
+                        )
+                    } else {
+                        MaintenanceDeviceResult.Completed("component_launched")
+                    }
+                }
+            }
             MaintenanceApplicationActionId.FORCE_STOP -> {
                 val response = shell("am force-stop ${shellArgument(component.packageName)}")
                 if (!isSuccessful(response)) {
@@ -1286,15 +1175,12 @@ internal class DadbCommandGateway(
             DeviceActionFailure("adb_connection_closed", retryable = true),
         ),
     ) {
-        if (!isValidApplicationTarget(component)) {
+        if (!COMPONENT_ID_PATTERN.matches(component.componentId) ||
+            !PACKAGE_NAME_PATTERN.matches(component.packageName)
+        ) {
             return@withLease ManagedApplicationDetailsProbeResult.Failed(
                 DeviceActionFailure("maintenance_component_identity_invalid", component.componentId, retryable = false),
             )
-        }
-        if (component.isThirdParty) {
-            verifyThirdPartyPackage(component.packageName, component.componentId)?.let {
-                return@withLease ManagedApplicationDetailsProbeResult.Failed(it)
-            }
         }
         when (val result = inspectInstalledPackage(component.componentId, component.packageName)) {
             is PackageInspection.Failed -> ManagedApplicationDetailsProbeResult.Failed(result.failure)
@@ -1315,96 +1201,6 @@ internal class DadbCommandGateway(
         }
     }
 
-    /**
-     * Starts a controlled component through its fixed manifest entry, while
-     * resolving a third-party package's launcher activity from PackageManager.
-     * The fallback `monkey` invocation is still package-scoped and is only
-     * reached when the Android 9 resolver is unavailable.
-     */
-    private suspend fun launchApplication(
-        component: com.ninepointnine.helper.domain.device.ManagedComponent,
-    ): MaintenanceDeviceResult {
-        val launchComponent = if (component.isThirdParty) {
-            resolveThirdPartyLaunchComponent(component.packageName)
-        } else {
-            AuthorizationPlanFactory.fixedLaunchComponent(component)
-        }
-        if (launchComponent != null) {
-            val launch = shell("am start -n ${shellArgument(launchComponent)}")
-            // Process publication can lag behind am start on the car.
-            // Treat pidof as an observation, never as the launch write result.
-            waitForProcess(component.packageName)
-            return if (isLaunchAccepted(launch)) {
-                MaintenanceDeviceResult.Completed("component_launched")
-            } else {
-                MaintenanceDeviceResult.Failed(
-                    DeviceActionFailure("maintenance_launch_failed", component.componentId, retryable = true),
-                )
-            }
-        }
-        if (!component.isThirdParty) {
-            return MaintenanceDeviceResult.Failed(
-                DeviceActionFailure("maintenance_launch_unavailable", component.componentId, retryable = false),
-            )
-        }
-        val fallback = shell("monkey --user 0 -p ${shellArgument(component.packageName)} 1")
-        waitForProcess(component.packageName)
-        return if (isMonkeyLaunchAccepted(fallback)) {
-            MaintenanceDeviceResult.Completed("component_launched")
-        } else {
-            MaintenanceDeviceResult.Failed(
-                DeviceActionFailure("maintenance_launch_failed", component.componentId, retryable = true),
-            )
-        }
-    }
-
-    private fun isValidApplicationTarget(
-        component: com.ninepointnine.helper.domain.device.ManagedComponent,
-    ): Boolean {
-        if (!PACKAGE_NAME_PATTERN.matches(component.packageName)) return false
-        return if (component.isThirdParty) {
-            component.componentId == "third-party:${component.packageName}"
-        } else {
-            COMPONENT_ID_PATTERN.matches(component.componentId)
-        }
-    }
-
-    /** Re-reads the third-party area immediately before a package action. */
-    private fun verifyThirdPartyPackage(
-        packageName: String,
-        componentId: String,
-    ): DeviceActionFailure? {
-        val entries = readThirdPartyPackageInventory()
-            ?: return DeviceActionFailure(
-                "maintenance_third_party_inventory_failed",
-                componentId,
-                retryable = true,
-            )
-        return if (entries.any { it.packageName == packageName }) {
-            null
-        } else {
-            DeviceActionFailure(
-                "maintenance_third_party_package_unavailable",
-                componentId,
-                retryable = false,
-            )
-        }
-    }
-
-    private fun resolveThirdPartyLaunchComponent(packageName: String): String? {
-        val commands = listOf(
-            "cmd package resolve-activity --brief --user 0 ${shellArgument(packageName)}",
-            "pm resolve-activity --brief --user 0 ${shellArgument(packageName)}",
-        )
-        commands.forEach { command ->
-            val response = shell(command)
-            if (isSuccessful(response)) {
-                ThirdPartyLaunchComponentParser.parse(response?.output.orEmpty(), packageName)?.let { return it }
-            }
-        }
-        return null
-    }
-
     override suspend fun launchManagedComponent(
         component: com.ninepointnine.helper.domain.device.ManagedComponent,
     ): MaintenanceDeviceResult = withLease(
@@ -1412,8 +1208,7 @@ internal class DadbCommandGateway(
             DeviceActionFailure("adb_connection_closed", retryable = true),
         ),
     ) {
-        if (component.isThirdParty ||
-            !COMPONENT_ID_PATTERN.matches(component.componentId) ||
+        if (!COMPONENT_ID_PATTERN.matches(component.componentId) ||
             !PACKAGE_NAME_PATTERN.matches(component.packageName)
         ) {
             return@withLease MaintenanceDeviceResult.Failed(
@@ -1801,15 +1596,6 @@ internal class DadbCommandGateway(
         }
     }
 
-    private fun isMonkeyLaunchAccepted(response: AdbShellResponse?): Boolean {
-        if (!isLaunchAccepted(response)) return false
-        val output = (response?.output.orEmpty() + "\n" + response?.errorOutput.orEmpty())
-            .lowercase()
-        return !output.contains("no activities found") &&
-            !output.contains("monkey aborted") &&
-            !output.contains("no launchable activity")
-    }
-
     private suspend fun waitForProcess(packageName: String): Boolean {
         repeat(PROCESS_READBACK_ATTEMPTS) {
             val process = shell("pidof ${shellArgument(packageName)}")
@@ -1903,7 +1689,6 @@ internal class DadbCommandGateway(
         const val SERVICE_READBACK_ATTEMPTS = 10
         const val SERVICE_READBACK_DELAY_MILLIS = 1_000L
         const val AUTHORIZATION_CONFIRMATION_ATTEMPTS = 4
-        const val MAX_THIRD_PARTY_APK_BYTES = 128L * 1024L * 1024L
     }
 
     private enum class BoundServiceProbe {
@@ -2568,156 +2353,6 @@ internal data class PackageInventoryEntry(
     val versionCode: Long?,
 )
 
-internal data class ThirdPartyPackageEntry(
-    val packageName: String,
-    val filePath: String,
-    val versionCode: Long?,
-)
-
-internal data class ThirdPartyPackageDetail(
-    val packageName: String,
-    val versionLabel: String?,
-    val versionCode: Long?,
-    val installTimeEpochMillis: Long?,
-    val updateTimeEpochMillis: Long?,
-    val filePath: String,
-    val uid: Int?,
-)
-
-/** Android 9 emits local timestamps while newer builds may emit ISO instants. */
-internal fun parseAndroidTimestampEpochMillis(value: String): Long? {
-    val normalized = value.trim()
-    if (normalized.isEmpty()) return null
-    runCatching { Instant.parse(normalized).toEpochMilli() }.getOrNull()?.let { return it }
-    return runCatching {
-        LocalDateTime.parse(normalized, ANDROID_PACKAGE_TIMESTAMP_FORMATTER)
-            // `dumpsys` emits the car's local wall-clock time on Android 9;
-            // use the phone's configured zone for a consistent display and
-            // ordering basis instead of shifting it as UTC.
-            .atZone(ZoneId.systemDefault())
-            .toInstant()
-            .toEpochMilli()
-    }.getOrNull()
-}
-
-private fun thirdPartyApplicationComparator(): Comparator<ThirdPartyApplicationProbe> =
-    Comparator { left, right ->
-        val time = compareInstallTimesDescending(
-            left.installTimeEpochMillis,
-            right.installTimeEpochMillis,
-        )
-        if (time != 0) time else left.packageName.compareTo(right.packageName)
-    }
-
-private val ANDROID_PACKAGE_TIMESTAMP_FORMATTER: DateTimeFormatter =
-    DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss", Locale.ROOT)
-
-private const val THIRD_PARTY_PACKAGE_NAME_PATTERN_TEXT =
-    "[A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z][A-Za-z0-9_]*)+"
-
-/** Parses `pm list packages -3 -f` rows and admits only `/data/app` APKs. */
-internal object ThirdPartyPackageInventoryParser {
-    private val packageNamePattern = Regex("^$THIRD_PARTY_PACKAGE_NAME_PATTERN_TEXT$")
-    private val versionCodePattern = Regex("\\s+versionCode:(\\d+)")
-
-    fun parseEntries(output: String): List<ThirdPartyPackageEntry> = output.lineSequence()
-        .mapNotNull(::parseLine)
-        .distinctBy { it.packageName }
-        .toList()
-
-    private fun parseLine(line: String): ThirdPartyPackageEntry? {
-        val trimmed = line.trim()
-        if (!trimmed.startsWith("package:")) return null
-        val payload = trimmed.removePrefix("package:")
-        val identity = payload.substringBefore(" versionCode:")
-        val separator = identity.lastIndexOf('=')
-        if (separator <= 0 || separator == identity.lastIndex) return null
-        val path = identity.substring(0, separator)
-        val packageName = identity.substring(separator + 1)
-        if (!packageNamePattern.matches(packageName) || !isThirdPartyApkPath(path)) return null
-        return ThirdPartyPackageEntry(
-            packageName = packageName,
-            filePath = path,
-            versionCode = versionCodePattern.find(payload)?.groupValues?.getOrNull(1)?.toLongOrNull(),
-        )
-    }
-
-    private fun isThirdPartyApkPath(path: String): Boolean {
-        if (!path.startsWith("/data/app/") || !path.endsWith("/base.apk")) return false
-        return path.split('/').none { it == "." || it == ".." }
-    }
-}
-
-/** Extracts stable package metadata from one bulk `dumpsys package packages` read. */
-internal object ThirdPartyPackageDetailsParser {
-    private val packageHeader = Regex(
-        "^\\s*Package \\[($THIRD_PARTY_PACKAGE_NAME_PATTERN_TEXT)] \\(",
-        RegexOption.MULTILINE,
-    )
-
-    fun parse(
-        output: String,
-        entries: List<ThirdPartyPackageEntry>,
-    ): List<ThirdPartyPackageDetail> {
-        val matches = packageHeader.findAll(output).toList()
-        val blocks = matches.mapIndexed { index, match ->
-            val end = matches.getOrNull(index + 1)?.range?.first ?: output.length
-            match.groupValues[1] to output.substring(match.range.first, end)
-        }.toMap()
-        return entries.map { entry ->
-            val block = blocks[entry.packageName].orEmpty()
-            ThirdPartyPackageDetail(
-                packageName = entry.packageName,
-                versionLabel = field(block, "versionName"),
-                versionCode = numericField(block, "versionCode") ?: entry.versionCode,
-                installTimeEpochMillis = field(block, "firstInstallTime")?.let(::parseAndroidTimestampEpochMillis),
-                updateTimeEpochMillis = field(block, "lastUpdateTime")?.let(::parseAndroidTimestampEpochMillis),
-                filePath = entry.filePath,
-                uid = field(block, "userId")?.toIntOrNull(),
-            )
-        }
-    }
-
-    private fun field(block: String, key: String): String? = Regex(
-        "(?m)^\\s*${Regex.escape(key)}=(.+)$",
-    ).find(block)?.groupValues?.getOrNull(1)?.trim()?.takeIf {
-        it.isNotEmpty() && !it.equals("null", ignoreCase = true)
-    }
-
-    private fun numericField(block: String, key: String): Long? = Regex(
-        "(?m)^\\s*${Regex.escape(key)}=(\\d+)",
-    ).find(block)?.groupValues?.getOrNull(1)?.toLongOrNull()
-}
-
-/** Parses only a launcher component belonging to the requested package. */
-internal object ThirdPartyLaunchComponentParser {
-    private val componentPattern = Regex(
-        "^([A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z][A-Za-z0-9_]*)*)/([A-Za-z0-9_.$]+)$",
-    )
-
-    fun parse(output: String, packageName: String): String? = output.lineSequence()
-        .map(String::trim)
-        .toList()
-        .asReversed()
-        .mapNotNull { line ->
-            val match = componentPattern.matchEntire(line) ?: return@mapNotNull null
-            if (match.groupValues[1] != packageName) return@mapNotNull null
-            val className = match.groupValues[2]
-            val qualifiedClassName = if (className.startsWith('.')) {
-                packageName + className
-            } else {
-                className
-            }
-            val component = "$packageName/$qualifiedClassName"
-            component.takeIf { COMPONENT_NAME_PATTERN_FOR_LAUNCH.matches(it) }
-        }
-        .firstOrNull()
-}
-
-private val COMPONENT_NAME_PATTERN_FOR_LAUNCH = Regex(
-    "^[A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z][A-Za-z0-9_]*)*/[A-Za-z0-9_.$]+$",
-)
-
 /** Parses stable package-manager lines without depending on shell locale text. */
 internal object PackageInventoryParser {
     private val packageNamePattern = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$")
@@ -2798,3 +2433,19 @@ internal fun isInstallAccepted(response: AdbShellResponse?): Boolean {
     // accept only that narrow exception, never an arbitrary non-zero warning.
     return response.exitCode == 0 || hasExplicitSuccess
 }
+
+/** Android 9 emits local timestamps while newer builds may emit ISO instants. */
+internal fun parseAndroidTimestampEpochMillis(value: String): Long? {
+    val normalized = value.trim()
+    if (normalized.isEmpty()) return null
+    runCatching { Instant.parse(normalized).toEpochMilli() }.getOrNull()?.let { return it }
+    return runCatching {
+        LocalDateTime.parse(normalized, ANDROID_PACKAGE_TIMESTAMP_FORMATTER)
+            .atZone(ZoneId.systemDefault())
+            .toInstant()
+            .toEpochMilli()
+    }.getOrNull()
+}
+
+private val ANDROID_PACKAGE_TIMESTAMP_FORMATTER: DateTimeFormatter =
+    DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss", Locale.ROOT)

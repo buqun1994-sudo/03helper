@@ -117,6 +117,30 @@ class FolderArtifactCatalogAdapter(
         ) {
             return ArtifactPreparationPlanResult.Failure("selected_catalog_identity_mismatch", retryable = false)
         }
+        // The helper update deliberately does not borrow the vehicle desktop
+        // invariant. It is still prepared by the same coordinator, but its
+        // only legal component is the canonical helper identity and its final
+        // APK package is fixed by the local trust root.
+        if (batch.flow == com.ninepointnine.helper.domain.session.InstallationFlow.SELF_UPDATE) {
+            if (batch.selectedComponentIds != setOf(InstallerSelfIdentity.COMPONENT_ID)) {
+                return ArtifactPreparationPlanResult.Failure("self_update_component_set_invalid", retryable = false)
+            }
+            val selfSource = config.declaredApps()
+                .firstOrNull { it.enabled && InstallerSelfIdentity.isSelfComponentId(it.componentId) }
+                ?: return ArtifactPreparationPlanResult.Failure("self_update_source_unavailable", retryable = true)
+            val normalized = selfSource.copy(
+                componentId = InstallerSelfIdentity.COMPONENT_ID,
+                packageName = InstallerSelfIdentity.PACKAGE_NAME,
+                trustProfileId = InstallerSelfIdentity.TRUST_PROFILE_ID,
+            )
+            return ArtifactPreparationPlanResult.Ready(
+                ArtifactPreparationPlan(
+                    batch = batch,
+                    config = config,
+                    components = listOf(normalized),
+                ),
+            )
+        }
         val declared = config.declaredApps()
             .filter { it.enabled }
             .filterNot { InstallerSelfIdentity.isSelfComponentId(it.componentId) }

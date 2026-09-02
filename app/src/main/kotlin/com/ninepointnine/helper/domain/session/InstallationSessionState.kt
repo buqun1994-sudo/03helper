@@ -66,6 +66,8 @@ enum class InstallationStrategy {
 enum class InstallationFlow {
     INITIAL_INSTALL,
     MAINTENANCE_INSTALL,
+    /** Downloads and validates the helper APK, then delegates the write to Android's installer. */
+    SELF_UPDATE,
 }
 
 enum class ResultKind {

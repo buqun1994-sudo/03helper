@@ -7,6 +7,7 @@ import com.ninepointnine.helper.domain.artifact.ArtifactFailurePhase
 import com.ninepointnine.helper.domain.artifact.ArtifactSource
 import com.ninepointnine.helper.domain.artifact.ArtifactSourceKind
 import com.ninepointnine.helper.domain.artifact.ReleaseSourcePolicy
+import com.ninepointnine.helper.domain.artifact.InstallerSelfIdentity
 import java.net.URI
 import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
@@ -95,9 +96,9 @@ class LanzouFolderSourceAdapter(
                     }
                     try {
                         val expectedArchiveFileNames = config.declaredApps()
-                            .filter { component ->
-                                component.enabled && component.clientSupported &&
-                                    (expectedComponentIds == null || component.componentId in expectedComponentIds)
+                        .filter { component ->
+                            component.enabled && component.clientSupported &&
+                                    componentMatchesExpected(component.componentId, expectedComponentIds)
                             }
                             .mapTo(mutableSetOf()) { it.archiveFileName }
                         host.startFolder(
@@ -158,7 +159,7 @@ class LanzouFolderSourceAdapter(
         val zipEntries = entries.filter { it.name.endsWith(".zip", ignoreCase = true) }
         val configuredApps = config.declaredApps().filter {
             it.enabled && it.clientSupported &&
-                (expectedComponentIds == null || it.componentId in expectedComponentIds)
+                componentMatchesExpected(it.componentId, expectedComponentIds)
         }
         val byName = zipEntries.groupBy { it.name.lowercase(Locale.ROOT) }
         val origin = "${folderUri.scheme}://${folderUri.authority}"
@@ -167,7 +168,7 @@ class LanzouFolderSourceAdapter(
         val matchedIds = mutableMapOf<String, String>()
         config.declaredApps().filter {
             it.enabled && !it.clientSupported &&
-                (expectedComponentIds == null || it.componentId in expectedComponentIds)
+                componentMatchesExpected(it.componentId, expectedComponentIds)
         }.forEach { component ->
             appFailures += LanzouFolderAppFailure(
                 componentId = component.componentId,
@@ -259,6 +260,12 @@ class LanzouFolderSourceAdapter(
 
     private companion object {
         const val DEFAULT_TIMEOUT_MILLIS = 30_000L
+
+        fun componentMatchesExpected(componentId: String, expectedComponentIds: Set<String>?): Boolean =
+            expectedComponentIds == null ||
+                componentId in expectedComponentIds ||
+                (InstallerSelfIdentity.isSelfComponentId(componentId) &&
+                    expectedComponentIds.any(InstallerSelfIdentity::isSelfComponentId))
         val SHARE_ID_PATTERN = Regex("^i[a-zA-Z0-9]+$")
         val SIZE_LABEL_PATTERN = Regex(
             "([0-9]+(?:\\.[0-9]+)?)\\s*(B|K|KB|M|MB|G|GB|T|TB)",
