@@ -289,7 +289,7 @@ object InstallUiStateMapper {
             .map { application ->
                 MaintenanceApplicationRow(
                     componentId = thirdPartyRowId(application.packageName),
-                    displayName = application.packageName,
+                    displayName = application.displayName.ifBlank { application.packageName },
                     packageName = application.packageName,
                     installed = true,
                     versionLabel = application.versionLabel,
@@ -298,7 +298,9 @@ object InstallUiStateMapper {
                     updateTimeEpochMillis = application.updateTimeEpochMillis,
                     filePath = application.filePath,
                     uid = application.uid,
-                    iconKey = "third-party",
+                    // Keep the same row identity used by the icon loader and
+                    // the four typed maintenance actions.
+                    iconKey = thirdPartyRowId(application.packageName),
                     isControlled = false,
                 )
             }

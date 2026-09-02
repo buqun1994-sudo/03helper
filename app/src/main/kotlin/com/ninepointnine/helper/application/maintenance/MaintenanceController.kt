@@ -143,7 +143,14 @@ class MaintenanceController(
                             com.ninepointnine.helper.domain.session.ManagedApplicationDetails(
                                 componentId = details.componentId,
                                 displayName = snapshot.components.firstOrNull { it.id == componentId }
-                                    ?.displayName ?: details.packageName,
+                                    ?.displayName
+                                    ?: thirdPartyPackageFromRowId(componentId)
+                                        ?.let { packageName ->
+                                            snapshot.maintenance.thirdPartyApplications
+                                                .firstOrNull { it.packageName == packageName }
+                                                ?.displayName
+                                        }
+                                    ?: details.packageName,
                                 packageName = details.packageName,
                                 versionLabel = details.versionLabel,
                                 versionCode = details.versionCode,
@@ -612,6 +619,8 @@ class MaintenanceController(
             updateTimeEpochMillis = updateTimeEpochMillis,
             filePath = filePath,
             uid = uid,
+            displayName = displayName.ifBlank { packageName },
+            iconKey = iconKey,
         )
 
     private fun managedComponents(snapshot: InstallationSessionSnapshot): List<ManagedComponent> {

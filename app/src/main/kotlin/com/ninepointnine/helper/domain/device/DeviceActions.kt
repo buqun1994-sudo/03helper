@@ -111,6 +111,10 @@ data class ThirdPartyApplicationProbe(
     val updateTimeEpochMillis: Long? = null,
     val filePath: String? = null,
     val uid: Int? = null,
+    /** APK manifest label; package name is used only when the label is unavailable. */
+    val displayName: String = packageName,
+    /** Identity-bound key for the cached APK icon, when capture succeeded. */
+    val iconKey: String? = null,
 )
 
 sealed interface ThirdPartyApplicationsResult {

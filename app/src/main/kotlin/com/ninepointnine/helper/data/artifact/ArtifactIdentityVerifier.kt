@@ -18,6 +18,8 @@ data class ApkMetadata(
     val certificateSha256s: Set<String>,
     val declarations: ApkDeclarationMetadata = ApkDeclarationMetadata(),
     val minAndroidSdk: Int? = null,
+    /** Human-readable label from the APK manifest, when one is available. */
+    val displayName: String? = null,
 )
 
 fun interface ApkMetadataReader {

@@ -713,7 +713,13 @@ private fun ManagedApplicationCard(
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                 ComponentLogo(app.iconKey, app.displayName, size = 40.dp)
                 Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
-                    Text(app.displayName, color = InstallerColors.White, style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        text = app.displayName,
+                        color = InstallerColors.White,
+                        style = MaterialTheme.typography.bodyLarge,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                     Text(
                         text = listOfNotNull(
                             app.versionLabel ?: app.versionCode?.let {
@@ -727,13 +733,6 @@ private fun ManagedApplicationCard(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                    if (!app.isControlled) {
-                        Text(
-                            text = stringResource(R.string.maintenance_third_party_label),
-                            color = InstallerColors.AuxiliaryWhite,
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
                     app.installTimeEpochMillis?.let { timestamp ->
                         Text(
                             text = stringResource(

@@ -530,6 +530,10 @@ data class ThirdPartyApplicationStatus(
     val updateTimeEpochMillis: Long? = null,
     val filePath: String? = null,
     val uid: Int? = null,
+    /** Human-readable APK manifest label; never used as an identity key. */
+    val displayName: String = packageName,
+    /** Identity-bound local icon cache key, if the APK icon was captured. */
+    val iconKey: String? = null,
 )
 
 /** Shared ordering rule for every maintenance application projection. */

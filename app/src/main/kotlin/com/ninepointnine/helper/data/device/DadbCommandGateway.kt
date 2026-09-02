@@ -1,6 +1,8 @@
 package com.ninepointnine.helper.data.device
 
 import com.ninepointnine.helper.data.artifact.ApkMetadataReader
+import com.ninepointnine.helper.data.artifact.ThirdPartyApplicationAsset
+import com.ninepointnine.helper.data.artifact.ThirdPartyApplicationAssetStore
 import com.ninepointnine.helper.data.artifact.sha256
 import com.ninepointnine.helper.domain.artifact.ArtifactManifestValidator
 import com.ninepointnine.helper.domain.artifact.ManifestValidation
@@ -49,6 +51,7 @@ import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -67,6 +70,8 @@ internal class DadbCommandGateway(
     private val ioMutex: Mutex,
     private val installedApkCacheDirectory: File?,
     private val installedApkMetadataReader: ApkMetadataReader?,
+    /** Shared app-private cache for labels/icons captured from verified inventory paths. */
+    private val thirdPartyAssetStore: ThirdPartyApplicationAssetStore? = null,
 ) : AdbCommandGateway, MaintenanceCommandGateway {
     /** Cached per lease so older Android package-manager builds are probed once. */
     private var versionedPackageInventorySupported: Boolean? = null
@@ -670,20 +675,84 @@ internal class DadbCommandGateway(
             )
         ThirdPartyApplicationsResult.Completed(
             details
-                .map { detail ->
-                    ThirdPartyApplicationProbe(
-                        packageName = detail.packageName,
-                        versionLabel = detail.versionLabel,
-                        versionCode = detail.versionCode,
-                        installTimeEpochMillis = detail.installTimeEpochMillis,
-                        updateTimeEpochMillis = detail.updateTimeEpochMillis,
-                        filePath = detail.filePath,
-                        uid = detail.uid,
-                    )
-                }
+                .map(::toThirdPartyApplicationProbe)
                 .sortedWith(thirdPartyApplicationComparator()),
         )
     }
+
+    /** Enriches one strict `/data/app` row without allowing a failed icon read to fail the list. */
+    private fun toThirdPartyApplicationProbe(detail: ThirdPartyPackageDetail): ThirdPartyApplicationProbe {
+        val asset = loadOrCaptureThirdPartyAsset(detail)
+        return ThirdPartyApplicationProbe(
+            packageName = detail.packageName,
+            versionLabel = detail.versionLabel,
+            versionCode = detail.versionCode ?: asset?.versionCode,
+            installTimeEpochMillis = detail.installTimeEpochMillis,
+            updateTimeEpochMillis = detail.updateTimeEpochMillis,
+            filePath = detail.filePath,
+            uid = detail.uid,
+            displayName = asset?.displayName ?: detail.packageName,
+            iconKey = asset?.iconKey,
+        )
+    }
+
+    /**
+     * Reuses a path/version-bound asset when possible. A cache miss pulls only
+     * the already-validated base APK to app-private storage, reads its label
+     * and icon, and removes the temporary bytes immediately.
+     */
+    private fun loadOrCaptureThirdPartyAsset(detail: ThirdPartyPackageDetail): ThirdPartyApplicationAsset? {
+        val store = thirdPartyAssetStore
+        val cached = store?.lookup(
+            packageName = detail.packageName,
+            expectedVersionCode = detail.versionCode,
+            remoteFilePath = detail.filePath,
+        )
+        if (cached != null) return cached
+        val workingDirectory = installedApkCacheDirectory ?: return null
+        if (!workingDirectory.exists() && !workingDirectory.mkdirs()) return null
+        val temporary = workingDirectory.resolve(
+            ".third-party-${thirdPartyAssetDigest(detail.packageName, detail.filePath)}.apk",
+        )
+        temporary.delete()
+        return try {
+            adb.pull(temporary, detail.filePath)
+            if (!temporary.isFile || temporary.length() !in 1..MAX_THIRD_PARTY_APK_BYTES) return null
+            if (store != null) {
+                store.capture(
+                    apkFile = temporary,
+                    expectedPackageName = detail.packageName,
+                    expectedVersionCode = detail.versionCode,
+                    remoteFilePath = detail.filePath,
+                )
+            } else {
+                // Isolated adapter tests may inject only the metadata reader;
+                // still expose a real APK label while leaving iconKey empty.
+                val metadata = installedApkMetadataReader?.read(temporary) ?: return null
+                if (metadata.packageName != detail.packageName ||
+                    detail.versionCode != null && metadata.version.code != detail.versionCode
+                ) return null
+                ThirdPartyApplicationAsset(
+                    packageName = detail.packageName,
+                    versionCode = metadata.version.code,
+                    remoteFilePath = detail.filePath,
+                    displayName = metadata.displayName?.takeIf(String::isNotBlank) ?: detail.packageName,
+                    iconKey = null,
+                )
+            }
+        } catch (_: Exception) {
+            // One malformed or inaccessible package must not hide the other
+            // valid third-party rows in the same inventory read.
+            null
+        } finally {
+            temporary.delete()
+        }
+    }
+
+    private fun thirdPartyAssetDigest(packageName: String, remoteFilePath: String): String =
+        MessageDigest.getInstance("SHA-256")
+            .digest("$packageName|$remoteFilePath".toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
 
     override suspend fun inspectInstalledApplicationInventory(
         components: List<ManagedComponent>,
@@ -1834,6 +1903,7 @@ internal class DadbCommandGateway(
         const val SERVICE_READBACK_ATTEMPTS = 10
         const val SERVICE_READBACK_DELAY_MILLIS = 1_000L
         const val AUTHORIZATION_CONFIRMATION_ATTEMPTS = 4
+        const val MAX_THIRD_PARTY_APK_BYTES = 128L * 1024L * 1024L
     }
 
     private enum class BoundServiceProbe {

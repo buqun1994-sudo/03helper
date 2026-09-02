@@ -2869,6 +2869,16 @@ class InstallationSession(
         if (!Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$").matches(application.packageName)) {
             return true
         }
+        if (
+            application.displayName.isBlank() ||
+            application.displayName.length > 256 ||
+            application.displayName.any(Char::isISOControl)
+        ) {
+            return true
+        }
+        if (application.iconKey?.matches(Regex("^third-party-icon-[a-fA-F0-9]{64}$")) == false) {
+            return true
+        }
         val path = application.filePath ?: return true
         if (!path.startsWith("/data/app/") || !path.endsWith("/base.apk")) return true
         if (path.split('/').any { it == "." || it == ".." }) return true

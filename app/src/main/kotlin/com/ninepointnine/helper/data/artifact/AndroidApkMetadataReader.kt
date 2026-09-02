@@ -41,6 +41,15 @@ class AndroidApkMetadataReader(
                 .digest(signature.toByteArray())
                 .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
         }.toSet()
+        val displayName = packageInfo.applicationInfo
+            ?.loadLabel(packageManager)
+            ?.toString()
+            ?.trim()
+            ?.takeIf { label ->
+                label.isNotEmpty() &&
+                    label.length <= MAX_DISPLAY_NAME_LENGTH &&
+                    label.none(Char::isISOControl)
+            }
         return ApkMetadata(
             packageName = packageInfo.packageName,
             version = ArtifactVersion(
@@ -58,6 +67,7 @@ class AndroidApkMetadataReader(
                 }.toSet(),
             ),
             minAndroidSdk = packageInfo.applicationInfo?.minSdkVersion?.takeIf { it > 0 },
+            displayName = displayName,
         )
     }
 
@@ -68,5 +78,9 @@ class AndroidApkMetadataReader(
             else -> "$packageName.$className"
         }
         return "$packageName/$qualified"
+    }
+
+    private companion object {
+        const val MAX_DISPLAY_NAME_LENGTH = 256
     }
 }

@@ -37,6 +37,7 @@ import com.ninepointnine.helper.ui.screens.MaintenanceActionFlowPage
 import com.ninepointnine.helper.ui.screens.MaintenanceHome
 import com.ninepointnine.helper.domain.session.MaintenanceActionId
 import com.ninepointnine.helper.domain.session.isApplicationInstallation
+import com.ninepointnine.helper.domain.session.thirdPartyRowId
 import com.ninepointnine.helper.ui.state.InstallUiIntent
 import com.ninepointnine.helper.ui.state.InstallUiState
 import com.ninepointnine.helper.ui.state.InstallUiStateMapper
@@ -244,6 +245,9 @@ internal fun maintenanceResultBackIntent(
 private fun buildIconRequests(snapshot: InstallationSessionSnapshot): List<ApkIconRequest> {
     val manifests = iconManifests(snapshot).associateBy { it.componentId }
     val installedApplications = snapshot.maintenance.managedApplications.associateBy { it.componentId }
+    val thirdPartyApplications = snapshot.maintenance.thirdPartyApplications.associateBy {
+        thirdPartyRowId(it.packageName)
+    }
     val ids = buildSet {
         addAll(snapshot.components.map { it.id })
         addAll(snapshot.maintenance.managedApplications.map { it.componentId })
@@ -251,11 +255,22 @@ private fun buildIconRequests(snapshot: InstallationSessionSnapshot): List<ApkIc
         addAll(snapshot.maintenance.availableManifests.map { it.componentId })
         addAll(snapshot.maintenance.installationSelection?.options.orEmpty().map { it.componentId })
         addAll(snapshot.maintenance.updateStatuses.map { it.componentId })
+        addAll(thirdPartyApplications.keys)
     }
     return ids.map { componentId ->
         val manifest = manifests[componentId]
         val installed = installedApplications[componentId]
+        val thirdParty = thirdPartyApplications[componentId]
         when {
+            thirdParty != null -> ApkIconRequest(
+                componentId = componentId,
+                packageName = thirdParty.packageName,
+                versionCode = thirdParty.versionCode,
+                preferPersisted = true,
+                thirdPartyAssetKey = thirdParty.iconKey,
+                thirdPartyRemoteFilePath = thirdParty.filePath,
+            )
+
             installed != null -> {
                 val exactManifest = manifest?.takeIf { it.packageName == installed.packageName }
                 ApkIconRequest(

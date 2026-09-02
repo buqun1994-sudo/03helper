@@ -895,6 +895,8 @@ class InstallUiStateMapperTest {
                             versionLabel = "3.0",
                             installTimeEpochMillis = 300L,
                             filePath = "/data/app/com.example.newest-x/base.apk",
+                            displayName = "Music Player",
+                            iconKey = "third-party-icon-${"a".repeat(64)}",
                         ),
                         // The controlled row wins when the same package appears
                         // in both inventories, even if the observed copy is newer.
@@ -919,6 +921,8 @@ class InstallUiStateMapperTest {
         )
         assertEquals(listOf(false, true, false), state.applications.map { it.isControlled })
         assertEquals("3.0", state.applications.first().versionLabel)
+        assertEquals("Music Player", state.applications.first().displayName)
+        assertEquals("third-party:com.example.newest", state.applications.first().iconKey)
         assertTrue(state.applications.last().componentId.startsWith("third-party:"))
     }
 

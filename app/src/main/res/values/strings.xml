@@ -102,7 +102,6 @@
     <string name="maintenance_installed_apps">受控应用状态</string>
     <string name="maintenance_app_installed">已安装</string>
     <string name="maintenance_app_not_installed">未安装</string>
-    <string name="maintenance_third_party_label">第三方应用</string>
     <string name="maintenance_installed_at">安装于 %1$s</string>
     <string name="maintenance_update_self_section">03车机助手</string>
     <string name="maintenance_update_apps_section">车机应用</string>
