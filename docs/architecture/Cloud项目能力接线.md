@@ -46,7 +46,7 @@ productId = 03helper
 displayName = 03车机助手
 androidPackage = com.ninepointnine.helper
 runtimeIdentifier = icar03
-releaseVersion = 1.0.6 (versionCode 7)
+releaseVersion = 1.0.8 (versionCode 9)
 ```
 
 | 环境 | 证书 SHA-256 | 构建方式 |
