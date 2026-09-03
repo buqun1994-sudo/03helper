@@ -86,6 +86,20 @@ fun InstallationResultRow(
                     style = MaterialTheme.typography.bodyMedium,
                     color = tint,
                 )
+                // Keep the stage label compact, but expose the structured
+                // reason underneath it for post-install failures. A user
+                // should not have to infer which authorization or
+                // availability check failed from the stage name alone.
+                if (
+                    result.status != ComponentResultStatus.NOT_INSTALLED &&
+                        !result.errorReason.isNullOrBlank()
+                ) {
+                    Text(
+                        text = result.errorReason,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = InstallerColors.AuxiliaryWhite,
+                    )
+                }
             }
             StatusIcon(
                 name = icon,

@@ -123,6 +123,12 @@ class InstallerRuntime(
     private val createDiscoveryAdapter: (InstallationSessionEventPort) -> DeviceDiscoverySessionAdapter,
     private val createConnectionAdapter: (InstallationSessionEventPort) -> DeviceConnectionSessionAdapter,
     private val loadCatalog: suspend (InstallationSessionEventPort) -> Unit,
+    /** First-install inventory probe; production uses the fixed maintenance gateway. */
+    private val loadInitialInventory: (suspend (
+        InstallationSessionSnapshot,
+        DeviceConnectionLease,
+        InstallationSessionBoundary,
+    ) -> Unit)? = null,
     /** Sole preparation hook for one immutable installation batch. */
     private val prepareInstallationBatch: (suspend (InstallationBatchPlan, InstallationSessionBoundary) -> ArtifactPreparationResult)? = null,
     /** Owns private preparation-file cleanup; public Download files are never removed here. */
@@ -148,6 +154,7 @@ class InstallerRuntime(
     private var lastConfirmedDevice: ConnectedDevice? = null
     private var connectionHealthJob: Job? = null
     private var catalogJob: Job? = null
+    private var initialInventoryJob: Job? = null
     private var artifactJob: Job? = null
     /**
      * One preparation owns the shared private workspace at a time. A new
@@ -623,6 +630,12 @@ class InstallerRuntime(
                 if (activeConnection == null && snapshot.checkpoint != null) {
                     beginAutomaticInstallReconnect(snapshot)
                 } else if (
+                    loadInitialInventory != null &&
+                    snapshot.initialInventory.state == com.ninepointnine.helper.domain.session.InitialApplicationInventoryState.NOT_STARTED &&
+                    initialInventoryJob?.isActive != true
+                ) {
+                    launchInitialInventory(snapshot)
+                } else if (
                     snapshot.artifactCatalogStage == ArtifactCatalogStage.NOT_LOADED ||
                     snapshot.artifactCatalogStage == ArtifactCatalogStage.CONTROL_PLANE_READY &&
                     snapshot.failure != null
@@ -808,7 +821,11 @@ class InstallerRuntime(
                 manualMaintenanceDisconnect = false
                 maintenanceReconnectGeneration = null
                 if (confirmedSnapshot.state == InstallationSessionState.CONNECTED) {
-                    launchCatalog(confirmedSnapshot)
+                    if (loadInitialInventory == null) {
+                        launchCatalog(confirmedSnapshot)
+                    } else {
+                        launchInitialInventory(confirmedSnapshot)
+                    }
                 } else {
                     scheduleConnectionHealthCheck(confirmedSnapshot)
                     reconcile(confirmedSnapshot)
@@ -840,8 +857,41 @@ class InstallerRuntime(
         }
     }
 
+    private fun launchInitialInventory(snapshot: InstallationSessionSnapshot) {
+        val loader = loadInitialInventory ?: run {
+            launchCatalog(snapshot)
+            return
+        }
+        if (initialInventoryJob?.isActive == true) return
+        val port = eventPortFor(snapshot)
+        val connection = activeConnection ?: return
+        initialInventoryJob = scope.launch {
+            try {
+                loader(snapshot, connection, port)
+                val latest = session.currentSnapshot()
+                if (
+                    latest.sessionId == snapshot.sessionId &&
+                    latest.state == InstallationSessionState.CONNECTED &&
+                    latest.initialInventory.state == com.ninepointnine.helper.domain.session.InitialApplicationInventoryState.READY
+                ) {
+                    launchCatalog(latest)
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                port.emit(
+                    InstallationSessionEvent.InitialInstalledApplicationsFailed(
+                        reasonCode = "initial_inventory_read_failed",
+                        retryable = true,
+                    ),
+                )
+            }
+        }
+    }
+
     private fun launchArtifactPreparation(snapshot: InstallationSessionSnapshot) {
         artifactJob?.cancel()
+        initialInventoryJob?.cancel()
         val port = eventPortFor(snapshot)
         val batchPlan = snapshot.installationBatch
         val preparer = prepareInstallationBatch
@@ -1248,6 +1298,7 @@ class InstallerRuntime(
         maintenanceJob?.cancel()
         catalogJob = null
         artifactJob = null
+        initialInventoryJob = null
         maintenanceJob = null
         clearPendingSelfUpdate()
     }

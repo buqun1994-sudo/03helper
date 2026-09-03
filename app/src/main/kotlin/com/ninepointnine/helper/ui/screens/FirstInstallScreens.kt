@@ -300,14 +300,25 @@ private fun SelectionScreen(
         Text(text = stringResource(R.string.selection_description), style = MaterialTheme.typography.bodyLarge, color = InstallerColors.AuxiliaryWhite)
         Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
 
-        if (state.failureReason != null) {
+        if (state.inventoryFailureReason != null) {
             SelectionFailure(
+                title = stringResource(R.string.selection_inventory_failed_title),
+                reason = state.inventoryFailureReason,
+                onRetry = { onIntent(InstallUiIntent.RetryInstallation) },
+                modifier = Modifier.weight(1f),
+            )
+        } else if (state.failureReason != null) {
+            SelectionFailure(
+                title = stringResource(R.string.selection_prepare_failed_title),
                 reason = state.failureReason,
                 onRetry = { onIntent(InstallUiIntent.RetryInstallation) },
                 modifier = Modifier.weight(1f),
             )
         } else if (state.preparing) {
-            SelectionPreparing(modifier = Modifier.weight(1f))
+            SelectionPreparing(
+                inventoryLoading = state.inventoryLoading,
+                modifier = Modifier.weight(1f),
+            )
         } else if (state.components.isEmpty()) {
             SelectionUnavailable(onIntent = onIntent, modifier = Modifier.weight(1f))
         } else {
@@ -330,15 +341,27 @@ private fun SelectionScreen(
             }
             Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
             Text(
-                text = stringResource(R.string.selection_summary, state.summaryCount, state.summarySizeLabel),
+                text = if (state.canFinish) {
+                    stringResource(R.string.selection_complete_summary, state.summaryCount)
+                } else {
+                    stringResource(R.string.selection_summary, state.summaryCount, state.summarySizeLabel)
+                },
                 style = MaterialTheme.typography.bodyMedium,
                 color = InstallerColors.AuxiliaryWhite,
             )
             Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
             PrimaryActionButton(
-                text = stringResource(R.string.selection_start),
-                onClick = { onIntent(InstallUiIntent.StartInstallation) },
-                enabled = state.canStart,
+                text = stringResource(if (state.canFinish) R.string.selection_finish else R.string.selection_start),
+                onClick = {
+                    onIntent(
+                        if (state.canFinish) {
+                            InstallUiIntent.EnterMaintenance
+                        } else {
+                            InstallUiIntent.StartInstallation
+                        },
+                    )
+                },
+                enabled = state.canFinish || state.canStart,
                 modifier = Modifier
                     .fillMaxWidth()
                     .testTag("start_installation"),
@@ -349,7 +372,10 @@ private fun SelectionScreen(
 }
 
 @Composable
-private fun SelectionPreparing(modifier: Modifier) {
+private fun SelectionPreparing(
+    inventoryLoading: Boolean,
+    modifier: Modifier,
+) {
     Column(
         modifier = modifier.fillMaxWidth(),
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -362,13 +388,25 @@ private fun SelectionPreparing(modifier: Modifier) {
         )
         Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
         Text(
-            text = stringResource(R.string.selection_prepare_loading_title),
+            text = stringResource(
+                if (inventoryLoading) {
+                    R.string.selection_inventory_loading_title
+                } else {
+                    R.string.selection_prepare_loading_title
+                },
+            ),
             style = MaterialTheme.typography.headlineSmall,
             color = InstallerColors.White,
         )
         Spacer(modifier = Modifier.height(8.dp))
         Text(
-            text = stringResource(R.string.selection_prepare_loading_description),
+            text = stringResource(
+                if (inventoryLoading) {
+                    R.string.selection_inventory_loading_description
+                } else {
+                    R.string.selection_prepare_loading_description
+                },
+            ),
             style = MaterialTheme.typography.bodyLarge,
             color = InstallerColors.AuxiliaryWhite,
         )
@@ -406,6 +444,7 @@ private fun SelectionUnavailable(
 
 @Composable
 private fun SelectionFailure(
+    title: String,
     reason: String,
     onRetry: () -> Unit,
     modifier: Modifier,
@@ -421,7 +460,7 @@ private fun SelectionFailure(
             tint = InstallerColors.Error,
         )
         Text(
-            text = stringResource(R.string.selection_prepare_failed_title),
+            text = title,
             style = MaterialTheme.typography.headlineSmall,
             color = InstallerColors.White,
             textAlign = TextAlign.Center,
@@ -446,7 +485,7 @@ private fun ComponentChoiceRow(component: ComponentRow, onToggle: (Boolean) -> U
     // Cloud's `required` field is an install recommendation for non-desktop
     // entries. Only the desktop component is locked in first-install UI.
     val mandatory = component.isMandatory()
-    val selected = mandatory || component.selected
+    val selected = !component.installed && (mandatory || component.selected)
     val supported = component.compatibilityState != com.ninepointnine.helper.domain.session.ComponentCompatibility.UNSUPPORTED &&
         component.status in setOf(
             com.ninepointnine.helper.domain.session.ComponentStatus.AVAILABLE,
@@ -456,8 +495,8 @@ private fun ComponentChoiceRow(component: ComponentRow, onToggle: (Boolean) -> U
             com.ninepointnine.helper.domain.session.ComponentStatus.DIRECTORY_MISSING,
         )
     PressableSurface(
-        onClick = { if (!mandatory && supported) onToggle(!selected) },
-        enabled = !mandatory && supported,
+        onClick = { if (!component.installed && !mandatory && supported) onToggle(!selected) },
+        enabled = !component.installed && !mandatory && supported,
         minHeight = InstallerDimensions.ComponentItemMinHeight,
         modifier = Modifier
             .testTag("component_${component.id}")
@@ -491,7 +530,15 @@ private fun ComponentChoiceRow(component: ComponentRow, onToggle: (Boolean) -> U
                         horizontalArrangement = Arrangement.End,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        if (mandatory) {
+                        if (component.installed) {
+                            Text(
+                                text = stringResource(R.string.installed_label),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = InstallerColors.Success,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        } else if (mandatory) {
                             StatusIcon(
                                 name = "lock_keyhole",
                                 contentDescription = stringResource(R.string.required_label),
@@ -500,13 +547,15 @@ private fun ComponentChoiceRow(component: ComponentRow, onToggle: (Boolean) -> U
                             )
                             Spacer(modifier = Modifier.width(4.dp))
                         }
-                        Text(
-                            text = stringResource(if (mandatory) R.string.required_label else R.string.optional_label),
-                            style = MaterialTheme.typography.bodySmall,
-                            color = InstallerColors.AuxiliaryWhite,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
+                        if (!component.installed) {
+                            Text(
+                                text = stringResource(if (mandatory) R.string.required_label else R.string.optional_label),
+                                style = MaterialTheme.typography.bodySmall,
+                                color = InstallerColors.AuxiliaryWhite,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                     }
                 }
                 Text(
@@ -523,18 +572,27 @@ private fun ComponentChoiceRow(component: ComponentRow, onToggle: (Boolean) -> U
                 modifier = Modifier.size(48.dp),
                 contentAlignment = Alignment.Center,
             ) {
-                Checkbox(
-                    checked = selected,
-                    onCheckedChange = if (mandatory || !supported) null else onToggle,
-                    enabled = !mandatory && supported,
-                    colors = CheckboxDefaults.colors(
-                        checkedColor = InstallerColors.White,
-                        uncheckedColor = InstallerColors.WhiteBorder,
-                        checkmarkColor = InstallerColors.PressedBlue,
-                        disabledCheckedColor = InstallerColors.White,
-                        disabledUncheckedColor = InstallerColors.WhiteBorder,
-                    ),
-                )
+                if (component.installed) {
+                    StatusIcon(
+                        name = "circle_check",
+                        contentDescription = stringResource(R.string.installed_label),
+                        tint = InstallerColors.Success,
+                        size = 22.dp,
+                    )
+                } else {
+                    Checkbox(
+                        checked = selected,
+                        onCheckedChange = if (mandatory || !supported) null else onToggle,
+                        enabled = !mandatory && supported,
+                        colors = CheckboxDefaults.colors(
+                            checkedColor = InstallerColors.White,
+                            uncheckedColor = InstallerColors.WhiteBorder,
+                            checkmarkColor = InstallerColors.PressedBlue,
+                            disabledCheckedColor = InstallerColors.White,
+                            disabledUncheckedColor = InstallerColors.WhiteBorder,
+                        ),
+                    )
+                }
             }
         }
     }

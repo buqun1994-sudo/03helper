@@ -41,6 +41,47 @@ class MaintenanceController(
     /** Lightweight signed config + folder listing used by the maintenance install page. */
     private val loadDistributionSelection: (suspend () -> CatalogLoadResult)? = null,
 ) {
+    /**
+     * Reads only the fixed 03 component inventory for the first-install page.
+     * This is deliberately separate from a maintenance action: no route or
+     * action feedback is created, and the result enters the initial session
+     * boundary directly.
+     */
+    suspend fun inspectInitialApplications(
+        snapshot: InstallationSessionSnapshot,
+        connection: com.ninepointnine.helper.domain.device.DeviceConnectionLease?,
+        eventPort: InstallationSessionEventPort,
+    ) {
+        val gateway = maintenanceGateway(connection)
+        if (gateway == null) {
+            eventPort.emit(
+                InstallationSessionEvent.InitialInstalledApplicationsFailed(
+                    reasonCode = "initial_inventory_connection_unavailable",
+                    retryable = true,
+                ),
+            )
+            return
+        }
+        val components = com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
+            .allManagedComponents()
+        when (val result = gateway.inspectInstalledApplicationInventory(components)) {
+            is ManagedApplicationsResult.Failed -> eventPort.emit(
+                InstallationSessionEvent.InitialInstalledApplicationsFailed(
+                    reasonCode = result.failure.reasonCode,
+                    retryable = result.failure.retryable,
+                ),
+            )
+
+            is ManagedApplicationsResult.Completed -> eventPort.emit(
+                InstallationSessionEvent.InitialInstalledApplicationsResolved(
+                    applications = result.applications
+                        .filter { it.installed }
+                        .map { it.toSnapshotStatus() },
+                ),
+            )
+        }
+    }
+
     suspend fun execute(
         actionId: MaintenanceActionId,
         snapshot: InstallationSessionSnapshot,

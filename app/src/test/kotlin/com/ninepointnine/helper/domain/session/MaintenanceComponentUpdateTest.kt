@@ -367,7 +367,7 @@ class MaintenanceComponentUpdateTest {
         assertEquals(listOf("03歌词"), state.componentResults.map { it.componentName })
         assertTrue(state.componentResults.none { it.componentName == "03桌面" })
         assertEquals(ComponentResultStatus.NOT_INSTALLED, state.componentResults.single().status)
-        assertEquals("暂时无法完成，请重试", state.componentResults.single().errorReason)
+        assertEquals("03歌词：车机拒绝安装 APK：检查车机存储和版本", state.componentResults.single().errorReason)
     }
 
     private fun selfPreparedEvent(

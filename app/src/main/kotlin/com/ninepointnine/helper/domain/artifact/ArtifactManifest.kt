@@ -1,5 +1,6 @@
 package com.ninepointnine.helper.domain.artifact
 
+import com.ninepointnine.helper.BuildConfig
 import com.ninepointnine.helper.domain.device.AuthorizationSetupDeclaration
 
 /**
@@ -56,7 +57,10 @@ data class TrustedInstallerComponent(
 object InstallerSelfIdentity {
     const val COMPONENT_ID = "03helper"
     const val LEGACY_COMPONENT_ID = "helper"
-    const val PACKAGE_NAME = "com.ninepointnine.helper"
+    const val PRODUCTION_PACKAGE_NAME = "com.ninepointnine.helper"
+    const val TEST_PACKAGE_NAME = "com.ninepointnine.helper.test"
+    /** The package identity of the running variant (Release or Debug/test). */
+    val PACKAGE_NAME: String = BuildConfig.APPLICATION_ID
     const val TRUST_PROFILE_ID = "helper-approved"
 
     private val componentIds = setOf(COMPONENT_ID, LEGACY_COMPONENT_ID)
@@ -78,6 +82,9 @@ object InstallerComponentTrustRegistry {
     const val CURRENT_DESKTOP_PACKAGE_NAME = "com.ninepointnine.desktop"
     const val CURRENT_LYRICS_PACKAGE_NAME = "com.ninepointnine.desktoplyrics"
     const val CURRENT_CAST_PACKAGE_NAME = "com.ninepointnine.desktopcast"
+    const val CURRENT_DESKTOP_TEST_PACKAGE_NAME = "com.ninepointnine.desktop.test"
+    const val CURRENT_LYRICS_TEST_PACKAGE_NAME = "com.ninepointnine.desktoplyrics.test"
+    const val CURRENT_CAST_TEST_PACKAGE_NAME = "com.ninepointnine.desktopcast.test"
     const val FILE_MANAGER_PACKAGE_NAME = "org.fossify.filemanager.debug"
 
     private const val DEBUG_CERTIFICATE_SHA256 =
@@ -142,9 +149,9 @@ object InstallerComponentTrustRegistry {
 
     /** Package names accepted for a component across debug, staging and release channels. */
     fun allowedPackageNames(componentId: String): Set<String> = when (componentId) {
-        DESKTOP_COMPONENT_ID -> setOf(DESKTOP_PACKAGE_NAME, CURRENT_DESKTOP_PACKAGE_NAME)
-        LYRICS_COMPONENT_ID -> setOf(LYRICS_PACKAGE_NAME, CURRENT_LYRICS_PACKAGE_NAME)
-        CAST_COMPONENT_ID -> setOf(CAST_PACKAGE_NAME, "com.tcrrry.desktopcast")
+        DESKTOP_COMPONENT_ID -> setOf(DESKTOP_PACKAGE_NAME, CURRENT_DESKTOP_PACKAGE_NAME, CURRENT_DESKTOP_TEST_PACKAGE_NAME)
+        LYRICS_COMPONENT_ID -> setOf(LYRICS_PACKAGE_NAME, CURRENT_LYRICS_PACKAGE_NAME, CURRENT_LYRICS_TEST_PACKAGE_NAME)
+        CAST_COMPONENT_ID -> setOf(CAST_PACKAGE_NAME, "com.tcrrry.desktopcast", CURRENT_CAST_TEST_PACKAGE_NAME)
         FILE_MANAGER_COMPONENT_ID -> setOf(FILE_MANAGER_PACKAGE_NAME)
         else -> emptySet()
     }
@@ -191,20 +198,28 @@ object InstallerPublisherTrustRegistry {
 
     private val nineStudioCertificate = TrustedPublisherCertificate(
         certificateSha256 = DEBUG_CERTIFICATE_SHA256,
-        packagePrefixes = setOf("com.tcrrry.", "com.ninepointnine.desktop", "com.ninepointnine.desktoplyrics", "com.ninepointnine.desktopcast"),
+        packagePrefixes = setOf(
+            "com.tcrrry.",
+            "com.ninepointnine.desktop",
+            "com.ninepointnine.desktop.test",
+            "com.ninepointnine.desktoplyrics",
+            "com.ninepointnine.desktoplyrics.test",
+            "com.ninepointnine.desktopcast",
+            "com.ninepointnine.desktopcast.test",
+        ),
     )
     private val nineStudioStagingCertificates = listOf(
         TrustedPublisherCertificate(
             certificateSha256 = "bfb70dc15b54ad2f1b8acd35fa26ecf552bf2ef21d416a44b7eeda5e5e9ebaa9",
-            packagePrefixes = setOf("com.ninepointnine.desktop"),
+            packagePrefixes = setOf(InstallerComponentTrustRegistry.CURRENT_DESKTOP_TEST_PACKAGE_NAME),
         ),
         TrustedPublisherCertificate(
             certificateSha256 = "1eb136fffd3f1e4c204d0933cab66c51ee4536a29e949b9c080925c01563b51d",
-            packagePrefixes = setOf("com.ninepointnine.desktoplyrics"),
+            packagePrefixes = setOf(InstallerComponentTrustRegistry.CURRENT_LYRICS_TEST_PACKAGE_NAME),
         ),
         TrustedPublisherCertificate(
             certificateSha256 = "98740b95c30064f727b9401a851ecf2e576d5e5c38fcc318284578747ba50e2a",
-            packagePrefixes = setOf("com.ninepointnine.desktopcast"),
+            packagePrefixes = setOf(InstallerComponentTrustRegistry.CURRENT_CAST_TEST_PACKAGE_NAME),
         ),
     )
     private val nineStudioProductionCertificates = listOf(
@@ -235,17 +250,20 @@ object InstallerPublisherTrustRegistry {
         // Debug certificate used by local component fixtures.
         TrustedPublisherCertificate(
             certificateSha256 = DEBUG_CERTIFICATE_SHA256,
-            packagePrefixes = setOf(InstallerSelfIdentity.PACKAGE_NAME),
+            packagePrefixes = setOf(
+                InstallerSelfIdentity.PRODUCTION_PACKAGE_NAME,
+                InstallerSelfIdentity.TEST_PACKAGE_NAME,
+            ),
         ),
         // Public staging / production certificate roots are intentionally
         // package-scoped and are only used for the signed self-update entry.
         TrustedPublisherCertificate(
             certificateSha256 = "aca4f178fea11ccc97a1373c8aa5345b274a3a783398929a9340a79ee83663af",
-            packagePrefixes = setOf(InstallerSelfIdentity.PACKAGE_NAME),
+            packagePrefixes = setOf(InstallerSelfIdentity.TEST_PACKAGE_NAME),
         ),
         TrustedPublisherCertificate(
             certificateSha256 = "31ca80dd21a5208eaabd5f3e1440a3db2f7dc79122e03eaa6ba01730fb31f18b",
-            packagePrefixes = setOf(InstallerSelfIdentity.PACKAGE_NAME),
+            packagePrefixes = setOf(InstallerSelfIdentity.PRODUCTION_PACKAGE_NAME),
         ),
     )
 
@@ -265,7 +283,13 @@ object InstallerPublisherTrustRegistry {
         ),
         TrustedArtifactIdentity(
             InstallerComponentTrustRegistry.DESKTOP_COMPONENT_ID,
-            InstallerComponentTrustRegistry.CURRENT_DESKTOP_PACKAGE_NAME,
+            InstallerComponentTrustRegistry.CURRENT_DESKTOP_TEST_PACKAGE_NAME,
+            DEBUG_CERTIFICATE_SHA256,
+            ArtifactReleaseTrack.DEBUG,
+        ),
+        TrustedArtifactIdentity(
+            InstallerComponentTrustRegistry.DESKTOP_COMPONENT_ID,
+            InstallerComponentTrustRegistry.CURRENT_DESKTOP_TEST_PACKAGE_NAME,
             "bfb70dc15b54ad2f1b8acd35fa26ecf552bf2ef21d416a44b7eeda5e5e9ebaa9",
             ArtifactReleaseTrack.STAGING,
         ),
@@ -289,7 +313,13 @@ object InstallerPublisherTrustRegistry {
         ),
         TrustedArtifactIdentity(
             InstallerComponentTrustRegistry.LYRICS_COMPONENT_ID,
-            InstallerComponentTrustRegistry.CURRENT_LYRICS_PACKAGE_NAME,
+            InstallerComponentTrustRegistry.CURRENT_LYRICS_TEST_PACKAGE_NAME,
+            DEBUG_CERTIFICATE_SHA256,
+            ArtifactReleaseTrack.DEBUG,
+        ),
+        TrustedArtifactIdentity(
+            InstallerComponentTrustRegistry.LYRICS_COMPONENT_ID,
+            InstallerComponentTrustRegistry.CURRENT_LYRICS_TEST_PACKAGE_NAME,
             "1eb136fffd3f1e4c204d0933cab66c51ee4536a29e949b9c080925c01563b51d",
             ArtifactReleaseTrack.STAGING,
         ),
@@ -313,7 +343,13 @@ object InstallerPublisherTrustRegistry {
         ),
         TrustedArtifactIdentity(
             InstallerComponentTrustRegistry.CAST_COMPONENT_ID,
-            InstallerComponentTrustRegistry.CURRENT_CAST_PACKAGE_NAME,
+            InstallerComponentTrustRegistry.CURRENT_CAST_TEST_PACKAGE_NAME,
+            DEBUG_CERTIFICATE_SHA256,
+            ArtifactReleaseTrack.DEBUG,
+        ),
+        TrustedArtifactIdentity(
+            InstallerComponentTrustRegistry.CAST_COMPONENT_ID,
+            InstallerComponentTrustRegistry.CURRENT_CAST_TEST_PACKAGE_NAME,
             "98740b95c30064f727b9401a851ecf2e576d5e5c38fcc318284578747ba50e2a",
             ArtifactReleaseTrack.STAGING,
         ),
@@ -459,7 +495,7 @@ object InstallerPublisherTrustRegistry {
         if (prefix.endsWith('.')) {
             packageName.startsWith(prefix)
         } else {
-            packageName == prefix || packageName.startsWith("$prefix.")
+            packageName == prefix
         }
 
     fun trustedCertificateSha256(profileId: String, certificateDigests: Set<String>): String? =

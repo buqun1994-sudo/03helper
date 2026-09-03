@@ -77,5 +77,5 @@
 1. `03helper` 的 `applicationId`、`namespace` 和 Kotlin 包根固定为 `com.ninepointnine.helper`，沿用 03 桌面 / 03 歌词的 `com.ninepointnine` 组织前缀，但不得复用它们的产品后缀、包名或业务源码。
 2. 默认 Debug 继续使用开发机自动证书和当前 Debug 版本；staging 使用仓库外独立 `03helper` staging 证书；Release 使用仓库外独立 `03helper` production 证书。三者不得互相回退或跨产品复用。
 3. staging / production 的 JKS、`signing.properties`、口令和私钥永不进入 Git；Gradle 只接受显式的仓库外属性文件路径，缺少材料必须 fail closed。
-4. Release 版本唯一真值是根目录 `release-version.properties`，默认 `1.0.0` / `versionCode=1`。用户未指定版本时，运行 `node scripts/bump-release-version.mjs` 只递增 patch；用户明确指定时按完整 `major.minor.patch` 写入。Debug / staging 不得读取 Release 文件覆盖版本。
+4. Release、Debug 和 staging/test 共用根目录 `release-version.properties` 作为唯一版本真值；Debug 只通过 `applicationIdSuffix=".test"` 与 `versionNameSuffix="-test"` 派生测试身份，`versionCode` 与 Release 相同。用户未指定版本时，运行 `node scripts/bump-release-version.mjs` 只递增 patch；用户明确指定时按完整 `major.minor.patch` 写入。每次递增后测试包即可在同一 `.test` 身份下覆盖更新。
 5. 任何身份、签名或版本规则变更必须同步 `docs/architecture/项目长期总纲.md`、`docs/operations/本地开发环境.md`、`docs/security/安全与密钥边界.md`、`docs/testing/验证矩阵.md` 和对应规则文件，并完成 APK 包名、版本、签名摘要与 v2 校验。

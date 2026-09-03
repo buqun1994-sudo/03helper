@@ -1,3 +1,24 @@
+# 2026-09-03 测试机 Debug 覆盖安装与 instrumentation smoke（完成，车机业务链待主测）
+
+1. 使用当前在线测试手机 `adb-497aab37-bqF2pq._adb-tls-connect._tcp`（RMX1901）执行最新 Debug 主包 `com.ninepointnine.helper.test` `1.0.6-test (7)` 和 AndroidTest 包的保留数据覆盖安装；两个安装命令均返回 `Success`。主包 SHA-256 为 `194a12ba790075ea2433ac9c2de03a85edf1d7bc3f89dfd1a9c90da0f9aead6a`，测试包为 `1b4a9b45abe37f88de9f72cea09f4d21efc500195f3325cbab582cf5d763d114`，Debug signer 摘要为 `2990047fddf6d6ec1eb7f83731fcc1398616e5fb83aec97542a4f132c35a1a27`，APK Signature Scheme v2 通过。
+2. 首次直接运行 smoke 时，设备已有前台任务造成生产入口时序干扰，出现 `productionActivityReachesResumedState` 单项失败；未修改代码。定向停止测试主包和测试包后单独重跑生产入口通过，再运行完整 `InstallAppActivitySmokeTest`，生产入口和 Debug maintenance 场景均通过，结果为 `2/2`。
+3. smoke 完成后再次覆盖安装主包并核对包路径、`versionCode=7`、解析入口 `com.ninepointnine.helper.test/com.ninepointnine.helper.MainActivity`；`am start -W` 返回 `Status: ok`，`mResumedActivity` 为该入口。未清数据、未卸载、未降级、未重启设备，也未对车机执行安装、授权或维护写入。
+4. `node scripts/check-project-docs.mjs`、`node scripts/check-skills.mjs` 和 `git diff --check` 通过；真实 ZIP / Cloud 发布资料和车机业务写入仍交由人工主测，当前未提交、未推送、未发布。
+
+# 2026-09-03 03 APP 测试身份简化（施工完成，未发布）
+
+1. 正式包名保持 `com.ninepointnine.helper`；Debug/staging 测试包统一为 `com.ninepointnine.helper.test`，版本名在同一正式版本后追加 `-test`。
+2. Debug/staging 与 Release 共用根目录 `release-version.properties`（当前 `1.0.6` / `versionCode=7`）；每次只递增这一份版本文件即可连续覆盖更新测试包。测试包与正式包可并存，不能互相覆盖升级。
+3. 身份、构建、台账、检查和文档规则已同步；Debug 产物仅用于本机测试，不上传、不部署、不上线正式产物。
+
+# 2026-09-03 首次安装主链与失败原因收口（施工完成，设备主测阻断）
+
+1. 首次安装在连接车机后先执行一次受控的 03 应用库存读取，再加载云端安装清单；已安装组件在选择页显示“已安装”并不可重复选择，全部组件已安装时直接显示“完成”，不创建空安装批次。
+2. 首次库存读取失败后保持当前明确原因，不自动循环；只有用户点击重试才重新读取。安装结果行和维护授权行均展示结构化失败原因，连接、清单、下载、ZIP、APK、安装、授权、可用性、维护和助手更新的兜底文案已去除“暂时无法”“准备失败”“无法确认”“待确认”“未返回具体结果”等模糊表达。
+3. 新增并通过首次库存、全部已安装、未列入清单保护和代表性失败文案回归；结果页阶段失败原因展示与维护动作失败分支已修正。JDK 17 下当前 Debug 单测为 `322` 项，`0 failures / 0 errors / 0 skipped`。
+4. Debug APK 已构建并核对为 `com.ninepointnine.helper.test`、`1.0.6-test` / `versionCode=7`，SHA-256 为 `194a12ba790075ea2433ac9c2de03a85edf1d7bc3f89dfd1a9c90da0f9aead6a`，单 signer、APK Signature Scheme v2 通过；AndroidTest 包为 `com.ninepointnine.helper.test.test`，SHA-256 为 `1b4a9b45abe37f88de9f72cea09f4d21efc500195f3325cbab582cf5d763d114`。
+5. 该记录形成时尚未执行 Debug 覆盖安装或 instrumentation smoke；随后已使用当日在线测试手机完成覆盖安装、`2/2` smoke 和最终入口核对，详见本文件顶部收尾记录。全程未清数据、未卸载、未降级、未重启设备，未上传、未发布、未提交或推送。
+
 # 2026-09-03 更新制品版本一致性修复与 1.0.6 产物（完成，待用户上传 / 主测）
 
 1. 根因已收口：更新制品准备不再把“本地存在 APK”当作命中条件；本地 APK 的 `versionCode` 必须与云端目标精确一致，配置提供 `versionName` 时也必须精确一致。旧版本缓存会被视为未命中并继续解析远端 ZIP。

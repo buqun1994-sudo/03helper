@@ -81,6 +81,7 @@ import com.ninepointnine.helper.ui.state.MaintenanceAuthorizationRow
 import com.ninepointnine.helper.ui.state.MaintenanceInstallationOptionRow
 import com.ninepointnine.helper.ui.state.MaintenanceInstallationSelectionUi
 import com.ninepointnine.helper.ui.state.MaintenanceUpdateRow
+import com.ninepointnine.helper.ui.state.failureReasonToUserMessage
 import com.ninepointnine.helper.ui.theme.InstallerColors
 import com.ninepointnine.helper.ui.theme.InstallerDimensions
 import com.ninepointnine.helper.ui.theme.InstallerMotion
@@ -219,6 +220,9 @@ private fun MaintenanceUpdatesPage(
         state.feedback?.status == MaintenanceActionStatus.RUNNING
     val failed = state.feedback?.actionId == MaintenanceActionId.CHECK_UPDATES &&
         state.feedback?.status == MaintenanceActionStatus.FAILED
+    val failureMessage = state.feedback?.let { feedback ->
+        feedback.message ?: failureReasonToUserMessage(feedback.reasonCode)
+    }
     // A running read-only check is still a navigable page. Consume the system
     // gesture and cancel the route through the shared maintenance owner.
     BackHandler(enabled = true, onBack = onBack)
@@ -246,7 +250,11 @@ private fun MaintenanceUpdatesPage(
             if (checking) {
                 item { MaintenanceUpdateCheckingState(stringResource(R.string.maintenance_update_self_section)) }
             } else if (failed) {
-                item { MaintenanceEmptyState(stringResource(R.string.maintenance_update_failed)) }
+                item {
+                    MaintenanceEmptyState(
+                        failureMessage ?: stringResource(R.string.maintenance_update_failed),
+                    )
+                }
             } else if (self.isEmpty()) {
                 item { MaintenanceEmptyState(stringResource(R.string.maintenance_update_unavailable)) }
             } else {
@@ -263,7 +271,11 @@ private fun MaintenanceUpdatesPage(
             if (checking) {
                 item { MaintenanceUpdateCheckingState(stringResource(R.string.maintenance_update_apps_section)) }
             } else if (failed) {
-                item { MaintenanceEmptyState(stringResource(R.string.maintenance_update_failed)) }
+                item {
+                    MaintenanceEmptyState(
+                        failureMessage ?: stringResource(R.string.maintenance_update_failed),
+                    )
+                }
             } else if (!state.connected) {
                 item { MaintenanceEmptyState(stringResource(R.string.maintenance_update_car_disconnected)) }
             } else if (apps.isEmpty()) {
@@ -474,7 +486,12 @@ private fun MaintenanceAuthorizationPage(
                 if (inventoryLoading || checking || actionRunning) {
                     item { MaintenanceActionWaiting() }
                 } else if (inventoryFailed) {
-                    item { MaintenanceEmptyState(stringResource(R.string.maintenance_inventory_failed)) }
+                    item {
+                        MaintenanceEmptyState(
+                            failureReasonToUserMessage(state.applicationsErrorReason)
+                                ?: stringResource(R.string.maintenance_inventory_failed),
+                        )
+                    }
                 } else if (!hasApplications) {
                     item { MaintenanceEmptyState(stringResource(R.string.maintenance_no_installed_apps)) }
                 } else {
@@ -551,6 +568,17 @@ private fun MaintenanceAuthorizationRowView(
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
                 )
+                if (!current && row.authorized != true) {
+                    failureReasonToUserMessage(row.reasonCode)?.let { reason ->
+                        Text(
+                            text = reason,
+                            color = InstallerColors.AuxiliaryWhite,
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+                }
             }
             if (current) {
                 CircularProgressIndicator(modifier = Modifier.size(20.dp), color = InstallerColors.White, strokeWidth = 2.dp)
@@ -614,8 +642,13 @@ private fun MaintenanceManageAppsPage(
                             state.feedback?.status == MaintenanceActionStatus.RUNNING && state.applications.isEmpty()
                         ) {
                             item { MaintenanceActionWaiting() }
-                        } else if (state.applicationsState == MaintenanceInventoryState.FAILED) {
-                            item { MaintenanceEmptyState(stringResource(R.string.maintenance_inventory_failed)) }
+                    } else if (state.applicationsState == MaintenanceInventoryState.FAILED) {
+                            item {
+                                MaintenanceEmptyState(
+                                    failureReasonToUserMessage(state.applicationsErrorReason)
+                                        ?: stringResource(R.string.maintenance_inventory_failed),
+                                )
+                            }
                         } else if (state.applications.isEmpty()) {
                             item { MaintenanceEmptyState(stringResource(R.string.maintenance_no_installed_apps)) }
                         } else {
@@ -655,6 +688,18 @@ private fun MaintenanceManageAppsPage(
             MaintenanceApplicationDetailsPage(
                 details = state.applicationDetails?.takeIf { it.componentId == selectedId },
                 fallbackName = selectedApplication?.displayName ?: selectedId.orEmpty(),
+                failureReason = state.applicationAction
+                    ?.takeIf {
+                        it.componentId == selectedId &&
+                            it.actionId == MaintenanceApplicationActionId.DETAILS &&
+                            it.status == MaintenanceActionStatus.FAILED
+                    }
+                    ?.let {
+                        failureReasonToUserMessage(
+                            it.reasonCode,
+                            selectedApplication?.displayName ?: selectedId.orEmpty(),
+                        )
+                    },
                 loading = appActionRunning,
                 onBack = returnToList,
             )
@@ -775,6 +820,9 @@ private fun ApplicationActionToast(
         feedback.status == MaintenanceActionStatus.RUNNING -> stringResource(R.string.maintenance_action_running, appName)
         feedback.actionId == MaintenanceApplicationActionId.START && feedback.status == MaintenanceActionStatus.SUCCEEDED -> stringResource(R.string.maintenance_start_success)
         feedback.actionId == MaintenanceApplicationActionId.FORCE_STOP && feedback.status == MaintenanceActionStatus.SUCCEEDED -> stringResource(R.string.maintenance_force_stop_success)
+        feedback.status == MaintenanceActionStatus.FAILED ->
+            failureReasonToUserMessage(feedback.reasonCode, appName)
+                ?: stringResource(R.string.maintenance_application_action_failed)
         else -> stringResource(R.string.maintenance_application_action_failed)
     }
     Box(
@@ -801,6 +849,7 @@ private fun ApplicationActionToast(
 private fun MaintenanceApplicationDetailsPage(
     details: com.ninepointnine.helper.ui.state.MaintenanceApplicationDetailsRow?,
     fallbackName: String,
+    failureReason: String?,
     loading: Boolean,
     onBack: () -> Unit,
 ) {
@@ -818,7 +867,9 @@ private fun MaintenanceApplicationDetailsPage(
         if (details == null) {
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 if (loading) MaintenanceActionWaiting()
-                else MaintenanceEmptyState(fallbackName)
+                else MaintenanceEmptyState(
+                    failureReason ?: stringResource(R.string.maintenance_application_action_failed),
+                )
             }
         } else {
             LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -895,7 +946,11 @@ private fun MaintenanceUninstallPage(
             } else if (success) {
                 Text(stringResource(R.string.maintenance_uninstall_success), color = InstallerColors.Success)
             } else if (feedback?.status == MaintenanceActionStatus.FAILED) {
-                Text(stringResource(R.string.maintenance_application_action_failed), color = InstallerColors.Error)
+                Text(
+                    failureReasonToUserMessage(feedback.reasonCode, application?.displayName)
+                        ?: stringResource(R.string.maintenance_application_action_failed),
+                    color = InstallerColors.Error,
+                )
             }
         }
         if (success) {
@@ -1064,7 +1119,7 @@ private fun updateStateLabel(state: com.ninepointnine.helper.domain.session.Main
     com.ninepointnine.helper.domain.session.MaintenanceUpdateState.UPDATE_AVAILABLE -> "有更新"
     com.ninepointnine.helper.domain.session.MaintenanceUpdateState.NOT_INSTALLED -> "未安装"
     com.ninepointnine.helper.domain.session.MaintenanceUpdateState.DEVICE_DISCONNECTED -> "车机未连接"
-    com.ninepointnine.helper.domain.session.MaintenanceUpdateState.UNAVAILABLE -> "暂不可用"
+    com.ninepointnine.helper.domain.session.MaintenanceUpdateState.UNAVAILABLE -> "版本号缺失"
 }
 
 private fun updateStateColor(state: com.ninepointnine.helper.domain.session.MaintenanceUpdateState) = when (state) {
@@ -1098,8 +1153,8 @@ private fun authorizationStateLabel(state: MaintenanceAuthorizationState): Strin
     MaintenanceAuthorizationState.CHECKING -> "检查中"
     MaintenanceAuthorizationState.AUTHORIZED -> "授权正常"
     MaintenanceAuthorizationState.NOT_AUTHORIZED -> "未授权"
-    MaintenanceAuthorizationState.UNKNOWN -> "待检查"
-    MaintenanceAuthorizationState.ERROR -> "检查失败"
+    MaintenanceAuthorizationState.UNKNOWN -> "未读取"
+    MaintenanceAuthorizationState.ERROR -> "授权状态读取失败"
 }
 
 private fun formatBytes(value: Long): String = when {
@@ -1711,6 +1766,11 @@ private fun MaintenanceFeedbackBlock(
             stringResource(actionTitle(feedback.actionId)),
         )
     }
+    val description = when (feedback.status) {
+        MaintenanceActionStatus.FAILED ->
+            feedback.message ?: failureReasonToUserMessage(feedback.reasonCode)
+        else -> maintenanceFeedbackDescription(feedback)?.let { stringResource(it) }
+    }
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -1730,13 +1790,7 @@ private fun MaintenanceFeedbackBlock(
             }
             Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Text(text = title, style = MaterialTheme.typography.bodyLarge, color = InstallerColors.White)
-                maintenanceFeedbackDescription(feedback)?.let { description ->
-                    Text(
-                        text = stringResource(description),
-                        style = MaterialTheme.typography.bodySmall,
-                        color = InstallerColors.AuxiliaryWhite,
-                    )
-                } ?: feedback.message?.let { message ->
+                description?.let { message ->
                     Text(
                         text = message,
                         style = MaterialTheme.typography.bodySmall,
@@ -1939,31 +1993,5 @@ private fun maintenanceFeedbackDescription(feedback: MaintenanceFeedback): Int? 
         else -> null
     }
 
-    MaintenanceActionStatus.FAILED -> when {
-        feedback.reasonCode in setOf(
-            "adb_connection_closed",
-            "device_action_gateway_unavailable",
-            "device_disconnected",
-        ) -> R.string.maintenance_failure_disconnected
-
-        feedback.reasonCode?.startsWith("catalog_") == true ||
-            feedback.reasonCode in setOf(
-                "artifact_catalog_not_prepared",
-                "installed_component_manifest_unavailable",
-                "selected_catalog_preparer_strategy_unavailable",
-            ) -> R.string.maintenance_failure_catalog
-        feedback.reasonCode in setOf(
-            "maintenance_package_identity_invalid",
-            "maintenance_package_path_missing",
-            "maintenance_installed_apk_metadata_unreadable",
-            "maintenance_installed_apk_read_failed",
-            "maintenance_installed_apk_verify_failed",
-            "maintenance_installed_package_mismatch",
-            "maintenance_installed_certificate_mismatch",
-            "maintenance_installed_version_mismatch",
-            "maintenance_installed_apk_hash_mismatch",
-        ) -> R.string.maintenance_failure_identity
-        feedback.actionId.isApplicationInstallation -> null
-        else -> R.string.maintenance_failure_generic
-    }
+    MaintenanceActionStatus.FAILED -> null
 }

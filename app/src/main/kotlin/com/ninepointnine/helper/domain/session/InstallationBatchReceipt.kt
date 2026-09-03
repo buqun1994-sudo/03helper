@@ -405,13 +405,18 @@ data class AvailabilityStageReceipt(
     }
 }
 
-/** Merges only this batch's facts, retaining preparation and reusable baseline evidence. */
+/** Merges this batch's facts and the read-only preinstalled baseline. */
 internal fun InstallationBatchReceipt.toSessionEvidence(
     snapshot: InstallationSessionSnapshot,
 ): SessionEvidence {
     val current = snapshot.evidence
-    val selectedIds = snapshot.installationBatch?.selectedComponentIds
+    val batch = snapshot.installationBatch
+    val selectedIds = batch?.selectedComponentIds
         ?: components.mapTo(linkedSetOf()) { it.componentId }
+    // Initial inventory is an explicit presence fact. It is not a fresh write,
+    // but it is sufficient to satisfy the existing desktop prerequisite and to
+    // keep an already-installed component out of the post-install failure path.
+    val preinstalledIds = batch?.preinstalledComponentIds.orEmpty()
     val installed = components.filter { it.installation.status == InstallationStageReceiptStatus.VERIFIED }
         .mapTo(linkedSetOf()) { it.componentId }
     val writeConfirmed = components.filter { it.installation.writeConfirmed }
@@ -433,14 +438,14 @@ internal fun InstallationBatchReceipt.toSessionEvidence(
         warning.componentId == null || warning.componentId !in selectedIds
     }
     return current.copy(
-        installed = (current.installed - selectedIds) + installed,
+        installed = (current.installed - selectedIds) + preinstalledIds + installed,
         writeConfirmed = (current.writeConfirmed - selectedIds) + writeConfirmed,
         confirmationPending = (current.confirmationPending - selectedIds) + pending,
         installation = (current.installation - selectedIds) + components.mapNotNull { item ->
             item.installation.evidence?.let { item.componentId to it }
         }.toMap(),
-        configured = (current.configured - selectedIds) + configured,
-        available = (current.available - selectedIds) + available,
+        configured = (current.configured - selectedIds) + preinstalledIds + configured,
+        available = (current.available - selectedIds) + preinstalledIds + available,
         authorizationActions = current.authorizationActions.filter { evidence ->
             evidence.componentId !in selectedIds || evidence.componentId in preservedAuthorizationIds
         } + components.flatMap { it.authorization.evidence },

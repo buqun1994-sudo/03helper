@@ -16,6 +16,8 @@ data class InstallationBatchPlan(
     val selectedComponentIds: Set<String>,
     /** Components proven reusable by the inventory snapshot used for this batch. */
     val reusableComponentIds: Set<String>,
+    /** Components already present on the vehicle before this batch started. */
+    val preinstalledComponentIds: Set<String> = emptySet(),
     /** Components that need a verified APK before device installation. */
     val preparationComponentIds: Set<String>,
     /** Rows that belong to the user's current result, excluding reused maintenance items. */
@@ -26,6 +28,8 @@ data class InstallationBatchPlan(
     init {
         require(batchId >= 0L)
         require(selectedComponentIds.isNotEmpty())
+        require(preinstalledComponentIds.all(String::isNotBlank))
+        require(preinstalledComponentIds.intersect(selectedComponentIds).isEmpty())
         require(reusableComponentIds.all { it in selectedComponentIds })
         require(preparationComponentIds == selectedComponentIds - reusableComponentIds)
         require(resultComponentIds == selectedComponentIds - reusableComponentIds)

@@ -95,8 +95,8 @@ android {
         applicationId = "com.ninepointnine.helper"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = releaseVersionCode
+        versionName = releaseVersionName
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
@@ -121,6 +121,8 @@ android {
 
     buildTypes {
         getByName("debug") {
+            applicationIdSuffix = ".test"
+            versionNameSuffix = "-test"
             signingConfigs.findByName("staging")?.let { signingConfig = it }
         }
         release {

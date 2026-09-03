@@ -103,6 +103,16 @@ object ProductionInstallerRuntimeFactory {
             configAdapter = distributionConfigAdapter,
         )
 
+        val maintenanceController = MaintenanceController(
+            artifactCache = artifactCache,
+            diagnosticStore = MaintenanceDiagnosticStore(
+                File(applicationContext.cacheDir, DIAGNOSTIC_CACHE_DIRECTORY),
+            ),
+            loadDistributionConfig = { folderCatalogAdapter.loadConfiguration() },
+            loadDistributionSelection = { folderCatalogAdapter.loadSelection() },
+            selfVersion = ArtifactVersion(BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE.toLong()),
+        )
+
         val apkIconRepository = ApkIconRepository(
             context = applicationContext,
             artifactCache = artifactCache,
@@ -133,6 +143,11 @@ object ProductionInstallerRuntimeFactory {
                     eventPort = eventPort,
                     selectionLoader = { folderCatalogAdapter.loadSelection() },
                 ).loadSelection()
+            },
+            loadInitialInventory = { snapshot, connection, eventPort ->
+                // The first-install probe shares the same retained lease and
+                // fixed package inventory reader as maintenance actions.
+                maintenanceController.inspectInitialApplications(snapshot, connection, eventPort)
             },
             prepareInstallationBatch = { batch, eventPort ->
                 when (val planResult = folderCatalogAdapter.buildPreparationPlan(batch)) {
@@ -197,15 +212,7 @@ object ProductionInstallerRuntimeFactory {
                     )
                 }
             },
-            maintenanceController = MaintenanceController(
-                artifactCache = artifactCache,
-                diagnosticStore = MaintenanceDiagnosticStore(
-                    File(applicationContext.cacheDir, DIAGNOSTIC_CACHE_DIRECTORY),
-                ),
-                loadDistributionConfig = { folderCatalogAdapter.loadConfiguration() },
-                loadDistributionSelection = { folderCatalogAdapter.loadSelection() },
-                selfVersion = ArtifactVersion(BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE.toLong()),
-            ),
+            maintenanceController = maintenanceController,
             persistMaintenanceSnapshot = { snapshot ->
                 withContext(Dispatchers.IO) {
                     check(maintenanceSessionStore.save(snapshot)) { "maintenance_baseline_rejected" }

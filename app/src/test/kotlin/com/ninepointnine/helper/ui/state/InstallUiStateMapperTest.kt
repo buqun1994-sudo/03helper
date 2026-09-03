@@ -17,6 +17,8 @@ import com.ninepointnine.helper.domain.session.FailureCategory
 import com.ninepointnine.helper.domain.session.InstallPhase
 import com.ninepointnine.helper.domain.session.InstallationSessionSnapshot
 import com.ninepointnine.helper.domain.session.InstallationSessionState
+import com.ninepointnine.helper.domain.session.InitialApplicationInventory
+import com.ninepointnine.helper.domain.session.InitialApplicationInventoryState
 import com.ninepointnine.helper.domain.session.InstallationBatchPlan
 import com.ninepointnine.helper.domain.session.InstallationBatchReceipt
 import com.ninepointnine.helper.domain.session.InstallationComponentReceipt
@@ -110,6 +112,114 @@ class InstallUiStateMapperTest {
         ) as InstallUiState.Selection
 
         assertFalse(blocked.canStart)
+    }
+
+    @Test
+    fun `selection exposes installed rows and finish action when inventory is complete`() {
+        val components = listOf(
+            component("desktop", required = true, size = "12 MB"),
+            component("lyrics", required = false, size = "18 MB"),
+        )
+        val state = InstallUiStateMapper.map(
+            selectionSnapshot(components).copy(
+                initialInventory = InitialApplicationInventory(
+                    state = InitialApplicationInventoryState.READY,
+                    applications = listOf(
+                        ManagedApplicationStatus(
+                            componentId = "desktop",
+                            packageName = "com.tcrrry.desktop",
+                            installed = true,
+                        ),
+                        ManagedApplicationStatus(
+                            componentId = "lyrics",
+                            packageName = "com.tcrrry.desktoplyrics",
+                            installed = true,
+                        ),
+                    ),
+                ),
+            ),
+        ) as InstallUiState.Selection
+
+        assertTrue(state.canFinish)
+        assertFalse(state.canStart)
+        assertEquals(2, state.summaryCount)
+        assertTrue(state.components.all { it.installed })
+    }
+
+    @Test
+    fun `selection keeps missing rows actionable when desktop is already installed`() {
+        val state = InstallUiStateMapper.map(
+            selectionSnapshot(
+                listOf(
+                    component("desktop", required = true, size = "12 MB"),
+                    component("lyrics", required = false, size = "18 MB"),
+                ),
+                selectedOptionalIds = setOf("lyrics"),
+            ).copy(
+                initialInventory = InitialApplicationInventory(
+                    state = InitialApplicationInventoryState.READY,
+                    applications = listOf(
+                        ManagedApplicationStatus(
+                            componentId = "desktop",
+                            packageName = "com.tcrrry.desktop",
+                            installed = true,
+                        ),
+                    ),
+                ),
+            ),
+        ) as InstallUiState.Selection
+
+        assertFalse(state.canFinish)
+        assertTrue(state.canStart)
+        assertTrue(state.components.first { it.id == "desktop" }.installed)
+        assertFalse(state.components.first { it.id == "lyrics" }.installed)
+    }
+
+    @Test
+    fun `unlisted catalog rows do not make the selection appear complete`() {
+        val state = InstallUiStateMapper.map(
+            selectionSnapshot(
+                listOf(
+                    component("legacy", required = false, size = "1 MB").copy(
+                        status = com.ninepointnine.helper.domain.session.ComponentStatus.UNLISTED,
+                    ),
+                ),
+            ).copy(
+                initialInventory = InitialApplicationInventory(
+                    state = InitialApplicationInventoryState.READY,
+                    applications = listOf(
+                        ManagedApplicationStatus(
+                            componentId = "legacy",
+                            packageName = "com.example.legacy",
+                            installed = true,
+                        ),
+                    ),
+                ),
+            ),
+        ) as InstallUiState.Selection
+
+        assertFalse(state.canFinish)
+        assertFalse(state.canStart)
+    }
+
+    @Test
+    fun `selection shows the concrete initial inventory failure`() {
+        val state = InstallUiStateMapper.map(
+            selectionSnapshot(emptyList()).copy(
+                initialInventory = InitialApplicationInventory(
+                    state = InitialApplicationInventoryState.FAILED,
+                    failureReason = "initial_inventory_connection_unavailable",
+                    failureRetryable = true,
+                ),
+                failure = SessionFailure(
+                    category = FailureCategory.CONNECTION,
+                    reasonCode = "initial_inventory_connection_unavailable",
+                ),
+            ),
+        ) as InstallUiState.Selection
+
+        assertEquals("车机连接已断开：重新连接车机", state.failureReason)
+        assertEquals(state.failureReason, state.inventoryFailureReason)
     }
 
     @Test
@@ -216,7 +326,7 @@ class InstallUiStateMapperTest {
         assertTrue(row.installed)
         assertTrue(row.configured)
         assertFalse(row.available)
-        assertEquals("03桌面未通过可用性检查", row.errorReason)
+        assertEquals("03桌面启动后未进入可用状态：重新安装 03桌面", row.errorReason)
     }
 
     @Test
@@ -305,7 +415,7 @@ class InstallUiStateMapperTest {
 
         assertFalse(state.kind == ResultKind.SUCCESS)
         assertEquals(ResultKind.INSTALLATION_FAILED, state.kind)
-        assertEquals("安装结果未能确认，请重新检查车机状态", state.failureReason)
+        assertEquals("车机未返回完整安装结果：重新连接车机", state.failureReason)
     }
 
     @Test
@@ -326,7 +436,7 @@ class InstallUiStateMapperTest {
 
         assertFalse(state.kind == ResultKind.SUCCESS)
         assertEquals(ResultKind.INSTALLATION_FAILED, state.kind)
-        assertEquals("安装结果未能确认，请重新检查车机状态", state.failureReason)
+        assertEquals("车机未返回完整安装结果：重新连接车机", state.failureReason)
     }
 
     @Test
@@ -362,7 +472,7 @@ class InstallUiStateMapperTest {
             com.ninepointnine.helper.domain.session.ComponentResultStatus.AUTHORIZATION_INCOMPLETE,
             state.componentResults.single().status,
         )
-        assertEquals("车机授权未完成，请重新授权", state.componentResults.single().errorReason)
+        assertEquals("03投屏：车机授权未完成：重新授权", state.componentResults.single().errorReason)
     }
 
     @Test
@@ -606,7 +716,7 @@ class InstallUiStateMapperTest {
         ) as InstallUiState.Result
 
         assertEquals(ResultKind.INSTALLATION_FAILED, state.kind)
-        assertEquals("安装结果未能确认，请重新检查车机状态", state.failureReason)
+        assertEquals("车机未返回完整安装结果：重新连接车机", state.failureReason)
     }
 
     @Test
@@ -789,6 +899,7 @@ class InstallUiStateMapperTest {
 
         assertTrue(state.components.isEmpty())
         assertTrue(state.preparing)
+        assertTrue(state.inventoryLoading)
         assertFalse(state.canStart)
     }
 
@@ -980,7 +1091,7 @@ class InstallUiStateMapperTest {
         ) as InstallUiState.Maintenance
 
         assertEquals("distribution_archive_invalid", state.feedback?.reasonCode)
-        assertEquals("压缩包或安装包校验失败", state.feedback?.message)
+        assertEquals("ZIP 解压失败：重新下载", state.feedback?.message)
     }
 
     @Test
@@ -1000,7 +1111,50 @@ class InstallUiStateMapperTest {
         ) as InstallUiState.Selection
 
         assertFalse(state.canStart)
-        assertEquals("暂时无法读取安装配置，请重试", state.failureReason)
+        assertEquals("安装配置读取失败：检查网络后重试", state.failureReason)
+    }
+
+    @Test
+    fun `failure reason resolver gives a concrete next action for representative failures`() {
+        val reasons = listOf(
+            "lanzou_folder_missing_lyrics",
+            "distribution_archive_invalid",
+            "apk_package_mismatch",
+            "adb_install_transport_failed",
+            "adb_identity_read_failed",
+            "authorization_confirmation_unavailable",
+            "availability_evidence_invalid",
+            "maintenance_action_failed",
+            "maintenance_install_failed",
+            "self_update_readback_failed",
+            "self_update_installer_unavailable",
+            "reason_not_in_catalog",
+        )
+
+        reasons.forEach { reason ->
+            val message = failureReasonToUserMessage(reason, "03歌词")
+            assertTrue("missing message for $reason", !message.isNullOrBlank())
+            assertFalse("vague message for $reason: $message", message!!.contains("暂时无法"))
+            assertFalse("vague message for $reason: $message", message.contains("准备失败"))
+            assertFalse("vague message for $reason: $message", message.contains("无法确认"))
+            assertFalse("vague message for $reason: $message", message.contains("待确认"))
+        }
+
+        assertTrue(
+            failureReasonToUserMessage("lanzou_folder_missing_lyrics").orEmpty().contains("03歌词"),
+        )
+        assertEquals(
+            "安装流程数据无效：返回上一步并重新开始",
+            failureReasonToUserMessage("reason_not_in_catalog"),
+        )
+        assertEquals(
+            "维护操作未完成：重新连接车机后重试",
+            failureReasonToUserMessage("maintenance_action_failed"),
+        )
+        assertEquals(
+            "安装结果缺少车机回执：重新连接车机",
+            failureReasonToUserMessage("maintenance_install_failed"),
+        )
     }
 
     private fun selectionSnapshot(

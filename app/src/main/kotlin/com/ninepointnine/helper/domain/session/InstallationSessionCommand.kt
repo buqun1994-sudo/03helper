@@ -79,6 +79,16 @@ sealed interface InstallationSessionEvent {
 
     data class DeviceConnectionConfirmed(val device: DeviceSummary) : InstallationSessionEvent
 
+    /** Lightweight inventory read performed once after the first connection. */
+    data class InitialInstalledApplicationsResolved(
+        val applications: List<ManagedApplicationStatus>,
+    ) : InstallationSessionEvent
+
+    data class InitialInstalledApplicationsFailed(
+        val reasonCode: String,
+        val retryable: Boolean = true,
+    ) : InstallationSessionEvent
+
     data class DeviceConnectionFailed(
         val deviceId: String,
         val reasonCode: String,

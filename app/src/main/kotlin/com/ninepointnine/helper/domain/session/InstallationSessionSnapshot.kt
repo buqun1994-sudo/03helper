@@ -22,6 +22,8 @@ data class InstallationSessionSnapshot(
     val device: DeviceSummary? = null,
     val discoveredDevices: List<DeviceSummary> = emptyList(),
     val components: List<ComponentDescriptor> = emptyList(),
+    /** One bounded, read-only inventory pass performed before the first catalog view. */
+    val initialInventory: InitialApplicationInventory = InitialApplicationInventory(),
     val selectedOptionalComponentIds: Set<String> = emptySet(),
     val currentComponentName: String? = null,
     val progress: SessionProgress? = null,
@@ -91,6 +93,20 @@ data class ComponentDescriptor(
     val status: ComponentStatus = ComponentStatus.READING,
     val errorReason: String? = null,
 )
+
+data class InitialApplicationInventory(
+    val state: InitialApplicationInventoryState = InitialApplicationInventoryState.NOT_STARTED,
+    val applications: List<ManagedApplicationStatus> = emptyList(),
+    val failureReason: String? = null,
+    val failureRetryable: Boolean = false,
+)
+
+enum class InitialApplicationInventoryState {
+    NOT_STARTED,
+    LOADING,
+    READY,
+    FAILED,
+}
 
 enum class ComponentCompatibility {
     SUPPORTED,
@@ -357,7 +373,8 @@ fun InstallationSessionSnapshot.resolveInstallationResult(): InstallationResultS
     }
     val desktopParticipates = batch?.let {
         AuthorizationPlanFactory.DESKTOP_COMPONENT_ID in it.resultComponentIds ||
-            AuthorizationPlanFactory.DESKTOP_COMPONENT_ID in it.reusableComponentIds
+            AuthorizationPlanFactory.DESKTOP_COMPONENT_ID in it.reusableComponentIds ||
+            AuthorizationPlanFactory.DESKTOP_COMPONENT_ID in it.preinstalledComponentIds
     } ?: true
     val desktopReady = desktopParticipates &&
         AuthorizationPlanFactory.DESKTOP_COMPONENT_ID in evidence.available &&
@@ -563,6 +580,24 @@ internal fun mergeVerifiedManagedApplications(
         )
     }
     return byComponent.values.toList()
+}
+
+/** Promotes the one-time initial inventory into the maintenance baseline. */
+internal fun MaintenanceSnapshot.withInitialInventory(
+    inventory: InitialApplicationInventory,
+): MaintenanceSnapshot {
+    if (inventory.state != InitialApplicationInventoryState.READY) return this
+    val byComponent = linkedMapOf<String, ManagedApplicationStatus>()
+    managedApplications.forEach { application -> byComponent[application.componentId] = application }
+    inventory.applications.filter { it.installed }.forEach { application ->
+        byComponent[application.componentId] = application
+    }
+    return copy(
+        managedApplications = byComponent.values.toList(),
+        managedApplicationsState = MaintenanceInventoryState.READY,
+        managedApplicationsFailureReason = null,
+        managedApplicationsFailureRetryable = false,
+    )
 }
 
 /** The one domain rule for promoting verified installation identities into maintenance facts. */

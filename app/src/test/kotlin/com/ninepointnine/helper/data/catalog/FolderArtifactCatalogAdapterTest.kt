@@ -276,8 +276,8 @@ class FolderArtifactCatalogAdapterTest {
                 displayName = definition.displayName,
                 minAndroidSdk = definition.minAndroidSdk,
                 packageName = when (definition.componentId) {
-                    "desktop" -> "com.ninepointnine.desktop"
-                    "lyrics" -> "com.ninepointnine.desktoplyrics"
+                    "desktop" -> "com.ninepointnine.desktop.test"
+                    "lyrics" -> "com.ninepointnine.desktoplyrics.test"
                     else -> definition.packageName
                 },
                 certificateSha256 = definition.certificateSha256,

@@ -33,6 +33,12 @@ sealed interface InstallUiState {
         val summaryCount: Int,
         val summarySizeLabel: String,
         val canStart: Boolean,
+        /** True when every managed component was found on the vehicle. */
+        val canFinish: Boolean = false,
+        /** True while the one-time vehicle inventory is being read. */
+        val inventoryLoading: Boolean = false,
+        /** Concrete inventory failure shown before the remote catalog loads. */
+        val inventoryFailureReason: String? = null,
         /** True while the connected session is still building the remote catalog. */
         val preparing: Boolean = false,
         /** User-facing reason when the connected catalog or preparation failed. */
@@ -132,6 +138,8 @@ data class ComponentRow(
     val displayName: String,
     val required: Boolean,
     val selected: Boolean,
+    /** The one-time vehicle inventory already confirmed this package. */
+    val installed: Boolean = false,
     val versionLabel: String?,
     val sizeLabel: String?,
     /** Retained for state/test compatibility; never rendered as raw Android API text. */

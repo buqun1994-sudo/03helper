@@ -44,7 +44,7 @@ class ArtifactSecurityTest {
         assertTrue(
             InstallerPublisherTrustRegistry.isTrusted(
                 "nine-studio",
-                "com.ninepointnine.desktop",
+                "com.ninepointnine.desktop.test",
                 setOf("bfb70dc15b54ad2f1b8acd35fa26ecf552bf2ef21d416a44b7eeda5e5e9ebaa9"),
             ),
         )
@@ -53,6 +53,13 @@ class ArtifactSecurityTest {
                 "nine-studio",
                 "com.ninepointnine.desktoplyrics",
                 setOf("934b9151fe62b39a3474a11f00c2114c7f392b18fec85f39f8d71b9596860e03"),
+            ),
+        )
+        assertFalse(
+            InstallerPublisherTrustRegistry.isTrusted(
+                "nine-studio",
+                "com.ninepointnine.desktoplyrics",
+                setOf("1eb136fffd3f1e4c204d0933cab66c51ee4536a29e949b9c080925c01563b51d"),
             ),
         )
         assertTrue(
@@ -85,10 +92,20 @@ class ArtifactSecurityTest {
             profileId = "nine-studio",
             environment = "staging",
             channel = "debug",
-            packageName = "com.ninepointnine.desktop",
+            packageName = "com.ninepointnine.desktop.test",
             certificateDigests = setOf("bfb70dc15b54ad2f1b8acd35fa26ecf552bf2ef21d416a44b7eeda5e5e9ebaa9"),
         )
         assertEquals(ArtifactReleaseTrack.STAGING, stagingDesktop?.track)
+        assertNull(
+            InstallerPublisherTrustRegistry.matchComponentIdentity(
+                componentId = "desktop",
+                profileId = "nine-studio",
+                environment = "staging",
+                channel = "debug",
+                packageName = "com.ninepointnine.desktop",
+                certificateDigests = setOf("bfb70dc15b54ad2f1b8acd35fa26ecf552bf2ef21d416a44b7eeda5e5e9ebaa9"),
+            ),
+        )
         assertNull(
             InstallerPublisherTrustRegistry.matchComponentIdentity(
                 componentId = "desktop",
@@ -138,7 +155,7 @@ class ArtifactSecurityTest {
                 profileId = "nine-studio",
                 environment = "staging",
                 channel = "debug",
-                packageName = "com.ninepointnine.desktoplyrics",
+                packageName = "com.ninepointnine.desktoplyrics.test",
                 certificateDigests = setOf("1eb136fffd3f1e4c204d0933cab66c51ee4536a29e949b9c080925c01563b51d"),
             )?.track,
         )
@@ -149,7 +166,7 @@ class ArtifactSecurityTest {
                 profileId = "nine-studio",
                 environment = "staging",
                 channel = "debug",
-                packageName = "com.ninepointnine.desktopcast",
+                packageName = "com.ninepointnine.desktopcast.test",
                 certificateDigests = setOf("98740b95c30064f727b9401a851ecf2e576d5e5c38fcc318284578747ba50e2a"),
             )?.track,
         )

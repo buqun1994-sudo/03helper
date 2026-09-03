@@ -387,9 +387,10 @@ class DeviceInstallationCoordinator(
     ): PostInstallationFacts {
         val authorization = linkedMapOf<String, AuthorizationStageReceipt>()
         val availability = linkedMapOf<String, AvailabilityStageReceipt>()
+        val preinstalledIds = batchPlan.preinstalledComponentIds
         val installedIds = installation.stages.filterValues {
             it.status == InstallationStageReceiptStatus.VERIFIED
-        }.keys
+        }.keys + preinstalledIds
 
         (batchPlan.selectedComponentIds - installedIds).forEach { componentId ->
             authorization[componentId] = authorizationNotAttempted(
@@ -404,7 +405,9 @@ class DeviceInstallationCoordinator(
             availability[componentId] = AvailabilityStageReceipt(AvailabilityStageReceiptStatus.PRESERVED)
         }
 
-        val freshInstalledIds = installedIds - batchPlan.reusableComponentIds
+        // Initial preinstalled components are already present on the vehicle;
+        // they are prerequisites, not fresh authorization targets in this batch.
+        val freshInstalledIds = installedIds - batchPlan.reusableComponentIds - preinstalledIds
         if (AuthorizationPlanFactory.DESKTOP_COMPONENT_ID !in installedIds) {
             freshInstalledIds.forEach { componentId ->
                 authorization[componentId] = AuthorizationStageReceipt(
@@ -899,7 +902,9 @@ class DeviceInstallationCoordinator(
         if (
             preparationFailures.keys.any { it !in plan.preparationComponentIds } ||
             preparationFailures.keys.any { it in byId } ||
-            preparationFailures.values.any { it.reasonCode.isBlank() }
+            preparationFailures.values.any { it.reasonCode.isBlank() } ||
+            plan.preinstalledComponentIds.intersect(plan.selectedComponentIds).isNotEmpty() ||
+            plan.preinstalledComponentIds.intersect(plan.reusableComponentIds).isNotEmpty()
         ) {
             return DeviceActionFailure("installation_batch_plan_invalid", retryable = false)
         }

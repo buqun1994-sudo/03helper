@@ -105,6 +105,52 @@ class InstallerRuntimeTest {
     }
 
     @Test
+    fun `initial inventory failure waits for an explicit retry`() = runTest {
+        var inventoryReads = 0
+        var catalogLoads = 0
+        val runtime = InstallerRuntime(
+            session = InstallationSession(),
+            createDiscoveryAdapter = { port -> DeviceDiscoverySessionAdapter(fakeDiscovery(), port) },
+            createConnectionAdapter = { port -> fakeConnectionAdapter(port) },
+            loadCatalog = {
+                catalogLoads += 1
+            },
+            loadInitialInventory = { _, _, port ->
+                inventoryReads += 1
+                port.emit(
+                    InstallationSessionEvent.InitialInstalledApplicationsFailed(
+                        reasonCode = "initial_inventory_package_inventory_failed",
+                    ),
+                )
+            },
+            coroutineContext = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        runtime.onForeground()
+        advanceUntilIdle()
+        runtime.dispatch(InstallationSessionCommand.SelectDevice("adb:vehicle-1"))
+        advanceUntilIdle()
+
+        assertEquals(InstallationSessionState.CONNECTED, runtime.session.currentSnapshot().state)
+        assertEquals(1, inventoryReads)
+        assertEquals(0, catalogLoads)
+
+        advanceUntilIdle()
+        assertEquals(1, inventoryReads)
+
+        runtime.dispatch(InstallationSessionCommand.RetryInstallation)
+        advanceUntilIdle()
+
+        assertEquals(2, inventoryReads)
+        assertEquals(0, catalogLoads)
+        assertEquals(
+            "initial_inventory_package_inventory_failed",
+            runtime.session.currentSnapshot().failure?.reasonCode,
+        )
+        runtime.close()
+    }
+
+    @Test
     fun `foreground reestablishes a connected checkpoint instead of resetting the install flow`() = runTest {
         val seed = InstallationSession()
         seed.dispatch(InstallationSessionCommand.StartDiscovery)

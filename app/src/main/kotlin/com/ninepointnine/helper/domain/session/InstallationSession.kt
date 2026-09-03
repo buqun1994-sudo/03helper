@@ -231,6 +231,11 @@ class InstallationSession(
                 evidence = if (maintenanceReconnect) current.evidence else SessionEvidence(),
                 componentResults = if (maintenanceReconnect) current.componentResults else emptyList(),
                 components = current.components.ifEmpty { catalog },
+                initialInventory = if (maintenanceReconnect) {
+                    current.initialInventory
+                } else {
+                    InitialApplicationInventory()
+                },
                 selectedSources = if (maintenanceReconnect) current.selectedSources else emptyMap(),
                 sourceFailures = if (maintenanceReconnect) current.sourceFailures else emptyList(),
                 archiveDownloads = if (maintenanceReconnect) current.archiveDownloads else emptyMap(),
@@ -363,6 +368,7 @@ class InstallationSession(
                 state = InstallationSessionState.IDLE,
                 device = null,
                 discoveredDevices = emptyList(),
+                initialInventory = InitialApplicationInventory(),
                 selectedOptionalComponentIds = emptySet(),
                 currentComponentName = null,
                 progress = null,
@@ -474,6 +480,7 @@ class InstallationSession(
                 state = InstallationSessionState.IDLE,
                 device = null,
                 discoveredDevices = emptyList(),
+                initialInventory = InitialApplicationInventory(),
                 selectedOptionalComponentIds = emptySet(),
                 currentComponentName = null,
                 progress = null,
@@ -512,6 +519,8 @@ class InstallationSession(
                 return
             }
 
+            component.id in initialInstalledComponentIds(current) -> return
+
             !isSelectable(component) -> return
 
             command.selected -> publish(
@@ -544,27 +553,38 @@ class InstallationSession(
 
         val selected = selectedComponents(current)
         val selectedIds = selected.map { it.id }.toSet()
+        val preinstalledIds = initialInstalledComponentIds(current) intersect selectedIds
+        val batchSelectedIds = selectedIds - preinstalledIds
+        if (batchSelectedIds.isEmpty()) {
+            // There is no device write to perform. The explicit completion
+            // action can move this connected, already-installed session into
+            // maintenance without manufacturing an empty batch receipt.
+            enterMaintenance()
+            return
+        }
         val batchPlan = InstallationBatchPlan(
             batchId = current.sessionId,
             flow = InstallationFlow.INITIAL_INSTALL,
             strategy = InstallationStrategy.INSTALL_MISSING_ONLY,
-            selectedComponentIds = selectedIds,
+            selectedComponentIds = batchSelectedIds,
             reusableComponentIds = emptySet(),
-            preparationComponentIds = selectedIds,
-            resultComponentIds = selectedIds,
+            preinstalledComponentIds = preinstalledIds,
+            preparationComponentIds = batchSelectedIds,
+            resultComponentIds = batchSelectedIds,
             catalogIdentity = catalogIdentity(current),
         )
+        val batchSnapshot = current.copy(installationBatch = batchPlan)
         val next = current.copy(
             state = InstallationSessionState.SELECTION_CONFIRMED,
             installationStrategy = InstallationStrategy.INSTALL_MISSING_ONLY,
             installationFlow = InstallationFlow.INITIAL_INSTALL,
-            currentComponentName = selected.firstOrNull()?.displayName,
+            currentComponentName = selected.firstOrNull { it.id in batchSelectedIds }?.displayName,
             progress = SessionProgress(
                 completedCount = 0,
-                totalCount = selected.size,
+                totalCount = batchSelectedIds.size,
                 indeterminate = true,
             ),
-            componentProgress = selected.associate { component ->
+            componentProgress = selected.filter { it.id in batchSelectedIds }.associate { component ->
                 component.id to ComponentProgress(
                     componentId = component.id,
                     phase = InstallPhase.FETCH,
@@ -575,7 +595,7 @@ class InstallationSession(
             componentFailureRetryable = emptyMap(),
             failure = null,
             evidence = SessionEvidence(),
-            componentResults = buildComponentResults(SessionEvidence(), current),
+            componentResults = buildComponentResults(SessionEvidence(), batchSnapshot),
             installationBatch = batchPlan,
             installationBatchReceipt = null,
         )
@@ -651,10 +671,17 @@ class InstallationSession(
             // Catalog retry has no installation checkpoint. Clear the stale
             // preparation error and invalidate the old batch before asking
             // the runtime to load a fresh signed control-plane snapshot.
+            val retryInitialInventory = current.initialInventory.state == InitialApplicationInventoryState.FAILED &&
+                current.failure?.reasonCode?.startsWith("initial_inventory") == true
             publish(
                 current.copy(
                     components = emptyList(),
                     selectedOptionalComponentIds = emptySet(),
+                    initialInventory = if (retryInitialInventory) {
+                        InitialApplicationInventory()
+                    } else {
+                        current.initialInventory
+                    },
                     artifactManifests = emptyList(),
                     artifactCatalogStage = ArtifactCatalogStage.NOT_LOADED,
                     installationBatch = null,
@@ -922,6 +949,16 @@ class InstallationSession(
 
     private fun enterMaintenance() {
         val current = _snapshot.value
+        if (
+            current.state == InstallationSessionState.CONNECTED &&
+            current.installationFlow == InstallationFlow.INITIAL_INSTALL &&
+            current.initialInventory.state == InitialApplicationInventoryState.READY &&
+            selectedComponents(current).isNotEmpty() &&
+            selectedComponents(current).all { it.id in initialInstalledComponentIds(current) }
+        ) {
+            enterMaintenanceFromInitialInventory(current)
+            return
+        }
         if (current.state != InstallationSessionState.SUCCEEDED &&
             current.state != InstallationSessionState.COMPLETED_WITH_ERRORS &&
             !(current.installationFlow == InstallationFlow.SELF_UPDATE &&
@@ -997,6 +1034,67 @@ class InstallationSession(
                 // installation cannot resurrect the previous install page or
                 // its warning on the next visit.
                 maintenance = maintenanceBaseline.copy(
+                    activeAction = null,
+                    routeAction = null,
+                    lastAction = null,
+                    applicationAction = null,
+                    applicationDetails = null,
+                    installationSelection = null,
+                ),
+                maintenanceReconnectPending = false,
+                installationReconnectPending = false,
+            ),
+        )
+    }
+
+    /**
+     * Completes the first-install route when the live inventory already
+     * contains every catalog component. No synthetic APK receipt is created;
+     * the inventory remains the source of truth for this in-memory maintenance
+     * session and will be read again after a cold start.
+     */
+    private fun enterMaintenanceFromInitialInventory(
+        current: InstallationSessionSnapshot,
+    ) {
+        val inventory = current.initialInventory
+        val installedIds = initialInstalledComponentIds(current)
+        val availableComponents = current.components
+            .filterNot { InstallerSelfIdentity.isSelfComponentId(it.id) }
+            .filter { it.status != ComponentStatus.UNLISTED }
+        val maintenance = current.maintenance
+            .withInitialInventory(inventory)
+            .copy(availableComponents = availableComponents)
+        publish(
+            current.copy(
+                state = InstallationSessionState.MAINTENANCE,
+                selectedOptionalComponentIds = emptySet(),
+                currentComponentName = null,
+                progress = null,
+                componentProgress = emptyMap(),
+                failedComponentIds = emptySet(),
+                componentFailureRetryable = emptyMap(),
+                failure = null,
+                componentResults = emptyList(),
+                checkpoint = null,
+                installationBatch = null,
+                installationBatchReceipt = null,
+                artifactManifests = emptyList(),
+                artifactCatalogStage = if (catalogIdentity(current) != null) {
+                    ArtifactCatalogStage.CONTROL_PLANE_READY
+                } else {
+                    ArtifactCatalogStage.NOT_LOADED
+                },
+                evidence = SessionEvidence(
+                    installed = installedIds,
+                    configured = installedIds,
+                    available = installedIds,
+                ),
+                selectedSources = emptyMap(),
+                sourceFailures = emptyList(),
+                archiveDownloads = emptyMap(),
+                archiveVerifications = emptyMap(),
+                apkExtractions = emptyMap(),
+                maintenance = maintenance.copy(
                     activeAction = null,
                     routeAction = null,
                     lastAction = null,
@@ -1905,6 +2003,10 @@ class InstallationSession(
             is InstallationSessionEvent.DiscoverySnapshot -> handleDiscoverySnapshot(event.devices)
             is InstallationSessionEvent.DiscoveryFinished -> handleDiscoveryFinished(event)
             is InstallationSessionEvent.DeviceConnectionConfirmed -> handleDeviceConnectionConfirmed(event.device)
+            is InstallationSessionEvent.InitialInstalledApplicationsResolved ->
+                handleInitialInstalledApplicationsResolved(event)
+            is InstallationSessionEvent.InitialInstalledApplicationsFailed ->
+                handleInitialInstalledApplicationsFailed(event)
             is InstallationSessionEvent.DeviceConnectionFailed -> handleDeviceConnectionFailed(event)
             is InstallationSessionEvent.DistributionConfigResolved -> handleDistributionConfigResolved(event)
             is InstallationSessionEvent.ArtifactBatchPrepared -> handleArtifactBatchPrepared(event)
@@ -2072,6 +2174,7 @@ class InstallationSession(
             else -> {
                 val maintenanceReconnect = current.maintenanceReconnectPending
                 val installationReconnect = current.installationReconnectPending
+                val initialInstall = !maintenanceReconnect && !installationReconnect
                 val restoredState = if (installationReconnect) {
                     current.checkpoint?.state ?: InstallationSessionState.PAUSED
                 } else {
@@ -2100,6 +2203,11 @@ class InstallationSession(
                     // replacing it with the previously selected manifest subset
                     // is what made the installation page lose applications.
                     components = retainedComponents,
+                    initialInventory = if (initialInstall) {
+                        InitialApplicationInventory(state = InitialApplicationInventoryState.LOADING)
+                    } else {
+                        current.initialInventory
+                    },
                     failure = null,
                     maintenanceReconnectPending = false,
                     installationReconnectPending = false,
@@ -2114,6 +2222,77 @@ class InstallationSession(
                 )
             }
         }
+    }
+
+    private fun handleInitialInstalledApplicationsResolved(
+        event: InstallationSessionEvent.InitialInstalledApplicationsResolved,
+    ) {
+        val current = _snapshot.value
+        if (current.state != InstallationSessionState.CONNECTED ||
+            current.initialInventory.state == InitialApplicationInventoryState.READY
+        ) {
+            return
+        }
+        val normalized = event.applications
+            .filter { it.installed }
+            .distinctBy { it.componentId }
+        val knownIds = buildSet {
+            addAll(current.components.map { it.id })
+            addAll(com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry.ids())
+        }
+        val packagePattern = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$")
+        val invalid = normalized.any { application ->
+            application.componentId !in knownIds ||
+                !packagePattern.matches(application.packageName) ||
+                !isKnownManagedPackage(current, application.componentId, application.packageName)
+        }
+        if (event.applications.size != normalized.size || invalid) {
+            handleInitialInstalledApplicationsFailed(
+                InstallationSessionEvent.InitialInstalledApplicationsFailed(
+                    reasonCode = "initial_inventory_result_invalid",
+                    retryable = false,
+                ),
+            )
+            return
+        }
+        val inventory = InitialApplicationInventory(
+            state = InitialApplicationInventoryState.READY,
+            applications = normalized.sortedBy { it.componentId },
+        )
+        val installedIds = inventory.applications.mapTo(linkedSetOf()) { it.componentId }
+        val nextComponents = markInitialInstalledComponents(current.components, installedIds)
+        publish(
+            current.copy(
+                initialInventory = inventory,
+                components = nextComponents,
+                selectedOptionalComponentIds = current.selectedOptionalComponentIds - installedIds,
+                failure = current.failure?.takeUnless(::isInitialInventoryFailure),
+            ),
+            acceptedEventSequence,
+        )
+    }
+
+    private fun handleInitialInstalledApplicationsFailed(
+        event: InstallationSessionEvent.InitialInstalledApplicationsFailed,
+    ) {
+        val current = _snapshot.value
+        if (current.state != InstallationSessionState.CONNECTED || event.reasonCode.isBlank()) return
+        publish(
+            current.copy(
+                initialInventory = InitialApplicationInventory(
+                    state = InitialApplicationInventoryState.FAILED,
+                    failureReason = event.reasonCode,
+                    failureRetryable = event.retryable,
+                ),
+                failure = SessionFailure(
+                    category = FailureCategory.CONNECTION,
+                    retryable = event.retryable,
+                    reasonCode = event.reasonCode,
+                ),
+                checkpoint = null,
+            ),
+            acceptedEventSequence,
+        )
     }
 
     private fun handleDeviceConnectionFailed(event: InstallationSessionEvent.DeviceConnectionFailed) {
@@ -2436,17 +2615,22 @@ class InstallationSession(
         val components = event.components
             .filter { it.status != ComponentStatus.UNLISTED }
             .filterNot { InstallerSelfIdentity.isSelfComponentId(it.id) }
-        val ids = components.map { it.id }
+        val initiallyInstalledIds = initialInstalledComponentIds(current)
+        val displayedComponents = markInitialInstalledComponents(components, initiallyInstalledIds)
+        val ids = displayedComponents.map { it.id }
         if (
             ids.size != ids.toSet().size ||
-            components.none { it.id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID } ||
-            components.any { it.displayName.isBlank() }
+            displayedComponents.none { it.id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID } ||
+            displayedComponents.any { it.displayName.isBlank() }
         ) {
             fail(FailureCategory.VERIFICATION, retryable = false, reasonCode = "distribution_config_components_invalid")
             return
         }
-        val selectableIds = components.filterNot(::isMandatory).map { it.id }.toSet()
-        val recommendedIds = components.filter { it.required && !isMandatory(it) }.map { it.id }.toSet()
+        val selectableIds = displayedComponents.filterNot(::isMandatory).map { it.id }.toSet()
+        val recommendedIds = displayedComponents
+            .filter { it.required && !isMandatory(it) }
+            .map { it.id }
+            .toSet()
         // The first control-plane snapshot is the user's initial install
         // choice: every non-desktop component starts checked. Once a catalog
         // identity exists, retain explicit opt-outs across a refresh and only
@@ -2458,13 +2642,13 @@ class InstallationSession(
         val hasResolvedCatalog = current.components.isNotEmpty() &&
             current.artifactCatalogStage == ArtifactCatalogStage.CONTROL_PLANE_READY
         val selectedOptionalIds = if (hasResolvedCatalog) {
-            (current.selectedOptionalComponentIds intersect selectableIds) + recommendedIds
+            ((current.selectedOptionalComponentIds intersect selectableIds) + recommendedIds) - initiallyInstalledIds
         } else {
-            selectableIds
+            selectableIds - initiallyInstalledIds
         }
         publish(
             current.copy(
-                components = components,
+                components = displayedComponents,
                 artifactManifests = emptyList(),
                 artifactCatalogStage = ArtifactCatalogStage.CONTROL_PLANE_READY,
                 installationBatch = null,
@@ -2487,7 +2671,7 @@ class InstallationSession(
                 apkExtractions = emptyMap(),
                 failure = null,
                 maintenance = current.maintenance.copy(
-                    availableComponents = components,
+                    availableComponents = displayedComponents,
                     managedApplicationsState = current.maintenance.managedApplicationsState,
                 ),
             ),
@@ -3713,7 +3897,10 @@ class InstallationSession(
         // desktop entry remains the only mandatory core invariant.
 
         val selectableIds = components.filterNot(::isMandatory).map { it.id }.toSet()
-        if (!snapshot.selectedOptionalComponentIds.all { it in selectableIds }) return "unknown_component"
+        val initiallyInstalledIds = initialInstalledComponentIds(snapshot)
+        if (!snapshot.selectedOptionalComponentIds.all { it in selectableIds || it in initiallyInstalledIds }) {
+            return "unknown_component"
+        }
 
         val selected = selectedComponents(snapshot)
         if (selected.isEmpty()) return "required_components_missing"
@@ -3731,7 +3918,9 @@ class InstallationSession(
         }
         if (snapshot.artifactCatalogStage != ArtifactCatalogStage.PREPARED) {
             if (selected.any { component ->
-                    !isSelectable(component) && !isAlreadyInstalledMaintenanceComponent(snapshot, component.id)
+                    !isSelectable(component) &&
+                        !isAlreadyInstalledMaintenanceComponent(snapshot, component.id) &&
+                        component.id !in initiallyInstalledIds
                 }) {
                 return "component_unavailable"
             }
@@ -3861,6 +4050,36 @@ class InstallationSession(
         snapshot.maintenance.managedApplications.any {
             it.componentId == componentId && it.installed
         }
+
+    private fun initialInstalledComponentIds(snapshot: InstallationSessionSnapshot): Set<String> =
+        snapshot.initialInventory.applications.asSequence()
+            .filter { it.installed }
+            .mapTo(linkedSetOf()) { it.componentId }
+
+    private fun markInitialInstalledComponents(
+        components: List<ComponentDescriptor>,
+        installedIds: Set<String>,
+    ): List<ComponentDescriptor> = components.map { component ->
+        if (component.id in installedIds) {
+            component.copy(
+                status = ComponentStatus.INSTALLED_LATEST,
+                errorReason = null,
+            )
+        } else {
+            component
+        }
+    }
+
+    private fun isInitialInventoryFailure(failure: SessionFailure): Boolean =
+        failure.reasonCode?.startsWith("initial_inventory") == true
+
+    private fun allInitialComponentsInstalled(snapshot: InstallationSessionSnapshot): Boolean {
+        if (snapshot.initialInventory.state != InitialApplicationInventoryState.READY) return false
+        val targetIds = snapshot.components
+            .filter { it.status != ComponentStatus.UNLISTED }
+            .mapTo(linkedSetOf()) { it.id }
+        return targetIds.isNotEmpty() && targetIds.all { it in initialInstalledComponentIds(snapshot) }
+    }
 
     private fun catalogFailureStatus(reasonCode: String): ComponentStatus =
         componentStatusForReasonCode(reasonCode)

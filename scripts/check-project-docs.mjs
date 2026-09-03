@@ -89,6 +89,16 @@ if (!/namespace\s*=\s*"com\.ninepointnine\.helper"/.test(appBuild)) {
 if (!/applicationId\s*=\s*"com\.ninepointnine\.helper"/.test(appBuild)) {
   failures.push("app/build.gradle.kts 的 applicationId 不是 com.ninepointnine.helper");
 }
+if (!/applicationIdSuffix\s*=\s*["']\.test["']/.test(appBuild)) {
+  failures.push("Debug 构建未追加 applicationIdSuffix = \".test\"");
+}
+if (!/versionNameSuffix\s*=\s*["']-test["']/.test(appBuild)) {
+  failures.push("Debug 构建未追加 versionNameSuffix = \"-test\"");
+}
+if (!/versionCode\s*=\s*releaseVersionCode/.test(appBuild) ||
+    !/versionName\s*=\s*releaseVersionName/.test(appBuild)) {
+  failures.push("Debug / Release 未共用 release-version.properties 版本入口");
+}
 if (!/^releaseVersionName=\d+\.\d+\.\d+$/m.test(releaseVersion)) {
   failures.push("release-version.properties 缺少合法的 releaseVersionName");
 }

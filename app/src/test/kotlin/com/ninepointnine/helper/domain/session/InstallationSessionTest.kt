@@ -22,6 +22,7 @@ import com.ninepointnine.helper.domain.device.DeviceAvailabilityEvidence
 import com.ninepointnine.helper.domain.device.DeviceCapability
 import com.ninepointnine.helper.domain.device.InstalledArtifactEvidence
 import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationState
+import com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -1163,6 +1164,65 @@ class InstallationSessionTest {
         val maintenance = session.currentSnapshot()
         assertEquals(InstallationSessionState.MAINTENANCE, maintenance.state)
         assertEquals(null, maintenance.installationBatch)
+    }
+
+    @Test
+    fun `initial inventory marks existing applications and completes without an empty batch`() {
+        val session = connectedSession(includeOptional = false)
+        val inventory = components.map { component ->
+            ManagedApplicationStatus(
+                componentId = component.id,
+                packageName = when (component.id) {
+                    "desktop" -> AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME
+                    "lyrics" -> AuthorizationPlanFactory.LYRICS_PACKAGE_NAME
+                    else -> InstallerComponentTrustRegistry.FILE_MANAGER_PACKAGE_NAME
+                },
+                installed = true,
+                versionCode = 1L,
+            )
+        }
+
+        session.dispatchEvent(InstallationSessionEvent.InitialInstalledApplicationsResolved(inventory))
+
+        val beforeFinish = session.currentSnapshot()
+        assertEquals(InitialApplicationInventoryState.READY, beforeFinish.initialInventory.state)
+        assertTrue(beforeFinish.components.all { it.status == ComponentStatus.INSTALLED_LATEST })
+        assertTrue(beforeFinish.selectedOptionalComponentIds.isEmpty())
+
+        session.dispatch(InstallationSessionCommand.EnterMaintenance)
+
+        val afterFinish = session.currentSnapshot()
+        assertEquals(InstallationSessionState.MAINTENANCE, afterFinish.state)
+        assertEquals(null, afterFinish.installationBatch)
+        assertEquals(
+            inventory.map { it.componentId }.toSet(),
+            afterFinish.maintenance.managedApplications.map { it.componentId }.toSet(),
+        )
+    }
+
+    @Test
+    fun `initial inventory keeps an installed desktop out of the fresh batch`() {
+        val session = connectedSession(includeOptional = true)
+        session.dispatchEvent(
+            InstallationSessionEvent.InitialInstalledApplicationsResolved(
+                listOf(
+                    ManagedApplicationStatus(
+                        componentId = "desktop",
+                        packageName = AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME,
+                        installed = true,
+                        versionCode = 1L,
+                    ),
+                ),
+            ),
+        )
+        session.dispatch(InstallationSessionCommand.StartInstallation)
+
+        assertEquals(InstallationSessionState.SELECTION_CONFIRMED, session.currentSnapshot().state)
+        assertEquals(
+            setOf("lyrics", "file-manager"),
+            session.currentSnapshot().installationBatch?.selectedComponentIds,
+        )
+        assertEquals(setOf("desktop"), session.currentSnapshot().installationBatch?.preinstalledComponentIds)
     }
 
     @Test
