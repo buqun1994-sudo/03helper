@@ -496,6 +496,8 @@ data class MaintenanceSnapshot(
     val managedApplicationsFailureReason: String? = null,
     val managedApplicationsFailureRetryable: Boolean = false,
     val managedApplications: List<ManagedApplicationStatus> = emptyList(),
+    /** The first-install route reached maintenance without manufacturing APK identities. */
+    val initialInstallationCompleted: Boolean = false,
     /** Full signed/configured component set used by maintenance installation. */
     val availableComponents: List<ComponentDescriptor> = emptyList(),
     /** Last verified APK identities for applications currently installed on the car. */
@@ -628,12 +630,17 @@ internal fun MaintenanceSnapshot.toDurableMaintenanceBaseline(): MaintenanceSnap
         application.installed && application.componentId in verifiedIds
     }
     return MaintenanceSnapshot(
-        managedApplicationsState = if (verifiedIds.isEmpty()) {
-            MaintenanceInventoryState.NOT_STARTED
-        } else {
+        managedApplicationsState = if (normalized.initialInstallationCompleted || verifiedIds.isNotEmpty()) {
             MaintenanceInventoryState.READY
+        } else {
+            MaintenanceInventoryState.NOT_STARTED
         },
-        managedApplications = verifiedApplications,
+        managedApplications = if (normalized.initialInstallationCompleted && verifiedIds.isEmpty()) {
+            normalized.managedApplications.filter { it.installed }
+        } else {
+            verifiedApplications
+        },
+        initialInstallationCompleted = normalized.initialInstallationCompleted,
         availableComponents = normalized.availableComponents,
         installedManifests = normalized.installedManifests,
         availableManifests = normalized.availableManifests,

@@ -479,6 +479,11 @@ class DeviceInstallationCoordinator(
             val plan = when (val build = AuthorizationPlanFactory.createForComponents(
                 candidates.map(::toManagedComponent),
                 requireDesktop = requireDesktop,
+                declaredServicesByComponent = candidates.mapNotNull { artifact ->
+                    artifact.declarations?.services?.let { services ->
+                        artifact.manifest.componentId to services
+                    }
+                }.toMap(),
             )) {
                 is AuthorizationPlanBuildResult.Ready -> build.plan
                 is AuthorizationPlanBuildResult.Rejected -> {

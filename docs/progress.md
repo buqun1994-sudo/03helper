@@ -811,3 +811,9 @@ F2 Debug APK 已按用户授权安装到指定手机。该段记录的是 F2 交
 3. 最终手机交付使用显式 serial `adb-RFCX412AN1X-gWfMRD._adb-tls-connect._tcp` 保留数据覆盖安装，安装返回 `Success`，包身份、版本和启动入口核对一致；`.codex/local-context.properties` 已同步为该 serial。历史进度中的旧 serial 文本保留作审计，不再作为当前设备配置。
 4. 当前样本车机 `S56_HQX`（Android 9，`192.168.0.203:5555`）只读回读已确认 03桌面、03歌词和 03投屏库存，授权状态为正常；Android 9 缩写 Service 证据为 `requested=true`、`received=true`、`hasBound=true`。本轮没有对车机执行安装、授权写入、清数据、卸载、降级或重启。
 5. 文档长期总纲、验证矩阵和代码规则已同步当时边界；`check-project-docs.mjs`、`check-skills.mjs` 和 `git diff --check` 通过。该段交接时要求的完整“安装应用”主链及连续批次结果已由本文件顶部 2026-08-28 真实车机复测覆盖；维护基线保存警告仍是独立待测项。本轮不提交、不推送、不发布。
+# 2026-09-03 初始化闭环、动态授权与维护任务取消（完成）
+
+1. 初始化库存已增加独立的 `initialInstallationCompleted` 持久化事实；全部受控应用已安装且包含 03桌面时，点击“完成”后冷启动直接恢复维护入口，不伪造 APK manifest 或安装收据。
+2. 授权失败根因在 03helper：旧逻辑把 APK 的实际 `applicationId` 同时当成 Kotlin namespace，错误拼接 Service。现改为由已校验 APK Manifest 的实际声明生成授权计划，安装、更新、维护检查、修复和运行验证复用同一计划；跨包 Service 和同用途多 Service 均在写入前拒绝。
+3. 离开维护二级页时统一取消库存、清单、制品和维护任务，避免旧任务继续持有共享设备租约，使再次进入“管理已安装应用”或“检查更新”长期停在“正在准备”。
+4. JVM 全量单测已通过；手机 Debug 覆盖安装与车机授权写入未在隔离分支执行，设备实测仍按收尾记录为准。

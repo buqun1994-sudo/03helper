@@ -61,6 +61,13 @@ interface MaintenanceCommandGateway {
         installedApplications: List<ManagedApplicationProbe>,
     ): MaintenanceAuthorizationResult
 
+    /** Uses declarations from the verified APK when available. */
+    suspend fun inspectComponentAuthorization(
+        components: List<ManagedComponent>,
+        installedApplications: List<ManagedApplicationProbe>,
+        declarationsByComponent: Map<String, ApkDeclarationMetadata>,
+    ): MaintenanceAuthorizationResult = inspectComponentAuthorization(components, installedApplications)
+
     /** Fixed application operation selected by the maintenance UI. */
     suspend fun performApplicationAction(
         component: ManagedComponent,
@@ -346,6 +353,8 @@ data class AuthorizationPlan(
     val version: Int,
     val components: List<ManagedComponent>,
     val actions: List<AuthorizationAction>,
+    /** APK-derived service identities frozen for this authorization transaction. */
+    val runtimeServiceOverrides: Map<String, List<String>> = emptyMap(),
 )
 
 data class ManagedComponent(
@@ -494,7 +503,12 @@ object AuthorizationPlanFactory {
     fun createForComponents(
         components: List<ManagedComponent>,
         requireDesktop: Boolean = true,
-    ): AuthorizationPlanBuildResult = createComponents(components, requireDesktop = requireDesktop)
+        declaredServicesByComponent: Map<String, Set<ApkServiceDeclaration>> = emptyMap(),
+    ): AuthorizationPlanBuildResult = createComponents(
+        components,
+        requireDesktop = requireDesktop,
+        declaredServicesByComponent = declaredServicesByComponent,
+    )
 
     /**
      * Builds the same typed action set for a read-only probe without requiring
@@ -587,13 +601,42 @@ object AuthorizationPlanFactory {
     private fun createComponents(
         components: List<ManagedComponent>,
         requireDesktop: Boolean = true,
+        declaredServicesByComponent: Map<String, Set<ApkServiceDeclaration>> = emptyMap(),
     ): AuthorizationPlanBuildResult {
         if (components.isEmpty()) return AuthorizationPlanBuildResult.Rejected("authorization_artifacts_missing")
         if (components.map { it.componentId }.toSet().size != components.size) {
             return AuthorizationPlanBuildResult.Rejected("authorization_component_duplicate")
         }
+        val componentIds = components.mapTo(linkedSetOf()) { it.componentId }
+        if (declaredServicesByComponent.keys.any { it !in componentIds } ||
+            declaredServicesByComponent.any { (componentId, services) ->
+                val packageName = components.firstOrNull { it.componentId == componentId }?.packageName
+                packageName == null || services.any { !serviceBelongsToPackage(it.componentName, packageName) }
+            }
+        ) {
+            return AuthorizationPlanBuildResult.Rejected("authorization_service_component_mismatch")
+        }
         if (components.any { component -> !isAllowedDynamicComponent(component) }) {
             return AuthorizationPlanBuildResult.Rejected("authorization_component_unapproved")
+        }
+        if (declaredServicesByComponent.any { (componentId, services) ->
+                val component = components.firstOrNull { it.componentId == componentId } ?: return@any true
+                val accessibilityCount = services.count {
+                    it.permission == "android.permission.BIND_ACCESSIBILITY_SERVICE" &&
+                        serviceBelongsToPackage(it.componentName, component.packageName)
+                }
+                val notificationCount = services.count {
+                    it.permission == "android.permission.BIND_NOTIFICATION_LISTENER_SERVICE" &&
+                        serviceBelongsToPackage(it.componentName, component.packageName)
+                }
+                when (componentId) {
+                    DESKTOP_COMPONENT_ID -> accessibilityCount > 1
+                    LYRICS_COMPONENT_ID -> notificationCount > 1 || accessibilityCount > 1
+                    else -> false
+                }
+            }
+        ) {
+            return AuthorizationPlanBuildResult.Rejected("authorization_service_ambiguous")
         }
         if (requireDesktop && components.none { it.componentId == DESKTOP_COMPONENT_ID }) {
             return AuthorizationPlanBuildResult.Rejected("authorization_desktop_missing")
@@ -603,7 +646,15 @@ object AuthorizationPlanFactory {
             AuthorizationPlan(
                 version = CURRENT_VERSION,
                 components = orderedComponents,
-                actions = orderedComponents.flatMap(::actionsFor),
+                actions = orderedComponents.flatMap { component ->
+                    actionsFor(component, declaredServicesByComponent[component.componentId].orEmpty())
+                },
+                runtimeServiceOverrides = orderedComponents.mapNotNull { component ->
+                    val contract = managedComponent(component) ?: return@mapNotNull null
+                    val declared = declaredServicesByComponent[component.componentId].orEmpty()
+                    if (declared.isEmpty()) return@mapNotNull null
+                    component.componentId to runtimeServicesFor(component, contract, declared)
+                }.toMap().filterValues { it.isNotEmpty() },
             ),
         )
     }
@@ -613,12 +664,24 @@ object AuthorizationPlanFactory {
         if (plan.components.map { it.componentId }.toSet().size != plan.components.size) return false
         if (plan.components.any { !isAllowedDynamicComponent(it) }) return false
         val expectedComponents = plan.components.sortedWith(compareBy<ManagedComponent> { componentOrder(it) }.thenBy { it.componentId })
-        return plan.components == expectedComponents &&
-            plan.actions == expectedComponents.flatMap(::actionsFor)
+        if (plan.components != expectedComponents) return false
+        if (plan.runtimeServiceOverrides.any { (componentId, services) ->
+                val component = plan.components.firstOrNull { it.componentId == componentId } ?: return@any true
+                services.isEmpty() || services.distinct().size != services.size ||
+                    services.any { !serviceBelongsToPackage(it, component.packageName) }
+            }
+        ) return false
+        return plan.actions == expectedComponents.flatMap { component ->
+            actionsFor(component, runtimeServiceOverride = plan.runtimeServiceOverrides[component.componentId])
+        }
     }
 
     fun requiredRuntimeService(component: ManagedComponent): String? =
         requiredRuntimeServices(component).firstOrNull()
+
+    fun requiredRuntimeService(plan: AuthorizationPlan, component: ManagedComponent): String? =
+        plan.runtimeServiceOverrides[component.componentId]?.singleOrNull()
+            ?: requiredRuntimeService(component)
 
     fun requiredRuntimeServices(component: ManagedComponent): List<String> =
         component.setup?.requiredServices?.toList()?.sorted()
@@ -628,9 +691,14 @@ object AuthorizationPlanFactory {
     fun fixedLaunchComponent(component: ManagedComponent): String? =
         component.setup?.launchComponent ?: managedComponent(component)?.fixedLaunchComponent
 
-    private fun actionsFor(component: ManagedComponent): List<AuthorizationAction> {
+    private fun actionsFor(
+        component: ManagedComponent,
+        declaredServices: Set<ApkServiceDeclaration> = emptySet(),
+        runtimeServiceOverride: List<String>? = null,
+    ): List<AuthorizationAction> {
         val contract = managedComponent(component)
         if (contract == null) return component.setup?.let { compileSetupActions(component, it) }.orEmpty()
+        val runtimeServices = runtimeServiceOverride ?: runtimeServicesFor(component, contract, declaredServices)
         val fixed = when (component.componentId) {
         LYRICS_COMPONENT_ID -> listOf(
             AuthorizationAction.EnsureAppOpAllowed(
@@ -643,13 +711,13 @@ object AuthorizationPlanFactory {
                 id = "lyrics-notification-listener-v1",
                 componentId = component.componentId,
                 setting = ManagedSecureComponentList.ENABLED_NOTIFICATION_LISTENERS,
-                targetComponent = checkNotNull(contract.requiredRuntimeServices.firstOrNull()),
+                targetComponent = checkNotNull(runtimeServices.firstOrNull()),
             ),
             AuthorizationAction.AppendSecureComponent(
                 id = "lyrics-accessibility-service-v1",
                 componentId = component.componentId,
                 setting = ManagedSecureComponentList.ENABLED_ACCESSIBILITY_SERVICES,
-                targetComponent = checkNotNull(contract.requiredRuntimeServices.getOrNull(1)),
+                targetComponent = checkNotNull(runtimeServices.getOrNull(1)),
             ),
         )
 
@@ -675,7 +743,7 @@ object AuthorizationPlanFactory {
                 id = "desktop-accessibility-service-v1",
                 componentId = component.componentId,
                 setting = ManagedSecureComponentList.ENABLED_ACCESSIBILITY_SERVICES,
-                targetComponent = checkNotNull(contract.requiredRuntimeServices.singleOrNull()),
+                targetComponent = checkNotNull(runtimeServices.singleOrNull()),
             ),
         )
 
@@ -719,6 +787,29 @@ object AuthorizationPlanFactory {
         return fixed + declared.filter { it.id !in fixedIds }
     }
 
+    private fun runtimeServicesFor(
+        component: ManagedComponent,
+        contract: ManagedComponentContract,
+        declaredServices: Set<ApkServiceDeclaration>,
+    ): List<String> {
+        if (declaredServices.isEmpty()) return contract.requiredRuntimeServices
+        val accessibility = declaredServices.filter {
+            it.permission == "android.permission.BIND_ACCESSIBILITY_SERVICE" &&
+                serviceBelongsToPackage(it.componentName, component.packageName)
+        }.map { it.componentName }.sorted()
+        val notification = declaredServices.filter {
+            it.permission == "android.permission.BIND_NOTIFICATION_LISTENER_SERVICE" &&
+                serviceBelongsToPackage(it.componentName, component.packageName)
+        }.map { it.componentName }.sorted()
+        return when (component.componentId) {
+            DESKTOP_COMPONENT_ID -> accessibility.singleOrNull()?.let(::listOf)
+                ?: contract.requiredRuntimeServices
+            LYRICS_COMPONENT_ID -> listOfNotNull(notification.singleOrNull(), accessibility.singleOrNull())
+                .takeIf { it.size == 2 } ?: contract.requiredRuntimeServices
+            else -> contract.requiredRuntimeServices
+        }
+    }
+
     private fun managedComponent(component: ManagedComponent): ManagedComponentContract? {
         if (!InstallerComponentTrustRegistry.isAllowedPackageName(component.componentId, component.packageName)) {
             return null
@@ -729,8 +820,8 @@ object AuthorizationPlanFactory {
                 packageName = packageName,
                 order = 1,
                 requiredRuntimeServices = listOf(
-                    "$packageName/$packageName.MediaListenerService",
-                    "$packageName/$packageName.IcarDockAccessibilityService",
+                    "$packageName/${runtimeNamespace(packageName)}.MediaListenerService",
+                    "$packageName/${runtimeNamespace(packageName)}.IcarDockAccessibilityService",
                 ),
                 fixedLaunchComponent = "$packageName/.MainActivity",
             )
@@ -739,7 +830,7 @@ object AuthorizationPlanFactory {
                 packageName = packageName,
                 order = 0,
                 requiredRuntimeServices = listOf(
-                    "$packageName/$packageName.debug.NavigationDemoAccessibilityService",
+                    "$packageName/${runtimeNamespace(packageName)}.debug.NavigationDemoAccessibilityService",
                 ),
                 fixedLaunchComponent = "$packageName/.MainActivity",
             )
@@ -765,6 +856,16 @@ object AuthorizationPlanFactory {
         if (component.componentId in BUILT_IN_COMPONENT_IDS && managedComponent(component) == null) return false
         return validateSetup(component)
     }
+
+    private fun runtimeNamespace(packageName: String): String = packageName
+        .removeSuffix(".test")
+        .removeSuffix(".staging")
+        .removeSuffix(".release")
+
+    private fun serviceBelongsToPackage(service: String, packageName: String): Boolean =
+        service.substringBefore('/', missingDelimiterValue = "") == packageName &&
+            service.length <= MAX_COMPONENT_NAME_LENGTH &&
+            COMPONENT_NAME_PATTERN.matches(service)
 
     private fun validateSetup(component: ManagedComponent): Boolean {
         val setup = component.setup ?: return true
@@ -965,6 +1066,18 @@ object AuthorizationDeclarationValidator {
 
                         ManagedSecureComponentList.ENABLED_ACCESSIBILITY_SERVICES ->
                             PERMISSION_BIND_ACCESSIBILITY_SERVICE
+                    }
+                    val componentPackage = plan.components
+                        .firstOrNull { it.componentId == action.componentId }
+                        ?.packageName
+                    if (componentPackage == null ||
+                        action.targetComponent.substringBefore('/', missingDelimiterValue = "") != componentPackage
+                    ) {
+                        return DeviceActionFailure(
+                            "authorization_service_component_mismatch",
+                            action.componentId,
+                            retryable = false,
+                        )
                     }
                     val declared = declarations.services.any { service ->
                         service.componentName == action.targetComponent && service.permission == requiredPermission

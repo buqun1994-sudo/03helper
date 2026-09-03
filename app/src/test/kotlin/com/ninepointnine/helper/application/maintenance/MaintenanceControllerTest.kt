@@ -21,6 +21,9 @@ import com.ninepointnine.helper.domain.device.DeviceInstallResult
 import com.ninepointnine.helper.domain.device.DeviceShortcut
 import com.ninepointnine.helper.domain.device.DeviceShortcutResult
 import com.ninepointnine.helper.domain.device.AuthorizationPlan
+import com.ninepointnine.helper.domain.device.ApkDeclarationMetadata
+import com.ninepointnine.helper.domain.device.ApkServiceDeclaration
+import com.ninepointnine.helper.domain.device.InstalledArtifactEvidence
 import com.ninepointnine.helper.domain.device.ManagedApplicationProbe
 import com.ninepointnine.helper.domain.device.ManagedApplicationsResult
 import com.ninepointnine.helper.domain.device.MaintenanceCommandGateway
@@ -392,6 +395,61 @@ class MaintenanceControllerTest {
     }
 
     @Test
+    fun `authorization check forwards installed apk declarations`() = runBlocking {
+        val desktop = manifest("desktop", 1)
+        val declaration = ApkDeclarationMetadata(
+            requestedPermissions = setOf(
+                "android.permission.SYSTEM_ALERT_WINDOW",
+                "android.permission.REQUEST_INSTALL_PACKAGES",
+            ),
+            services = setOf(
+                ApkServiceDeclaration(
+                    "${desktop.packageName}/com.ninepointnine.desktop.debug.NavigationDemoAccessibilityService",
+                    "android.permission.BIND_ACCESSIBILITY_SERVICE",
+                ),
+            ),
+        )
+        val gateway = FakeGateway().apply {
+            val live = ManagedApplicationProbe("desktop", desktop.packageName, true)
+            managedApplications = ManagedApplicationsResult.Completed(listOf(live))
+            authorizationStatuses = com.ninepointnine.helper.domain.device.MaintenanceAuthorizationResult.Completed(
+                listOf(
+                    com.ninepointnine.helper.domain.device.ManagedApplicationAuthorizationStatus(
+                        "desktop",
+                        desktop.packageName,
+                        authorized = true,
+                    ),
+                ),
+            )
+        }
+        val snapshot = maintenanceSnapshot(listOf(desktop)).copy(
+            evidence = com.ninepointnine.helper.domain.session.SessionEvidence(
+                installed = setOf("desktop"),
+                installation = mapOf(
+                    "desktop" to InstalledArtifactEvidence(
+                        "desktop",
+                        desktop.packageName,
+                        desktop.apkVersion,
+                        desktop.apkSizeBytes,
+                        desktop.apkSha256,
+                        desktop.certificateSha256,
+                        declarations = declaration,
+                    ),
+                ),
+            ),
+        )
+
+        MaintenanceController(tempCache(), tempDiagnostics()).execute(
+            MaintenanceActionId.REPAIR_CONFIGURATION,
+            snapshot,
+            lease(gateway),
+            InstallationSessionEventPort { },
+        )
+
+        assertEquals(mapOf("desktop" to declaration), gateway.authorizationDeclarations)
+    }
+
+    @Test
     fun `update inspection does not call missing inventory a not-installed result`() = runBlocking {
         val events = mutableListOf<InstallationSessionEvent>()
         val gateway = FakeGateway().apply {
@@ -537,6 +595,7 @@ class MaintenanceControllerTest {
         var authorizationStatuses: com.ninepointnine.helper.domain.device.MaintenanceAuthorizationResult =
             com.ninepointnine.helper.domain.device.MaintenanceAuthorizationResult.Completed(emptyList())
         var authorizationInventory: List<ManagedApplicationProbe> = emptyList()
+        var authorizationDeclarations: Map<String, ApkDeclarationMetadata> = emptyMap()
         var repairResult: MaintenanceDeviceResult = MaintenanceDeviceResult.Completed("authorization_repaired")
         var repairManifests: List<ArtifactManifest> = emptyList()
 
@@ -577,6 +636,16 @@ class MaintenanceControllerTest {
             installedApplications: List<ManagedApplicationProbe>,
         ): com.ninepointnine.helper.domain.device.MaintenanceAuthorizationResult {
             authorizationInventory = installedApplications
+            return authorizationStatuses
+        }
+
+        override suspend fun inspectComponentAuthorization(
+            components: List<com.ninepointnine.helper.domain.device.ManagedComponent>,
+            installedApplications: List<ManagedApplicationProbe>,
+            declarationsByComponent: Map<String, ApkDeclarationMetadata>,
+        ): com.ninepointnine.helper.domain.device.MaintenanceAuthorizationResult {
+            authorizationInventory = installedApplications
+            authorizationDeclarations = declarationsByComponent
             return authorizationStatuses
         }
 

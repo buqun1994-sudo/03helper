@@ -50,6 +50,92 @@ class DynamicAuthorizationTest {
     }
 
     @Test
+    fun `declared service uses actual application id while retaining base namespace`() {
+        val packageName = "com.ninepointnine.desktop.test"
+        val declaredService = ApkServiceDeclaration(
+            "$packageName/com.ninepointnine.desktop.debug.NavigationDemoAccessibilityService",
+            "android.permission.BIND_ACCESSIBILITY_SERVICE",
+        )
+        val ready = AuthorizationPlanFactory.createForComponents(
+            components = listOf(
+                ManagedComponent(AuthorizationPlanFactory.DESKTOP_COMPONENT_ID, packageName, order = 0),
+            ),
+            declaredServicesByComponent = mapOf(
+                AuthorizationPlanFactory.DESKTOP_COMPONENT_ID to setOf(declaredService),
+            ),
+        ) as AuthorizationPlanBuildResult.Ready
+
+        val action = ready.plan.actions.filterIsInstance<AuthorizationAction.AppendSecureComponent>().single()
+        assertEquals(declaredService.componentName, action.targetComponent)
+        assertEquals(
+            declaredService.componentName,
+            AuthorizationPlanFactory.requiredRuntimeService(ready.plan, ready.plan.components.single()),
+        )
+        assertTrue(AuthorizationPlanFactory.validate(ready.plan))
+    }
+
+    @Test
+    fun `test suffix fallback keeps the published kotlin namespace`() {
+        val component = ManagedComponent(
+            componentId = AuthorizationPlanFactory.DESKTOP_COMPONENT_ID,
+            packageName = "com.ninepointnine.desktop.test",
+            order = 0,
+        )
+
+        assertEquals(
+            "com.ninepointnine.desktop.test/com.ninepointnine.desktop.debug.NavigationDemoAccessibilityService",
+            AuthorizationPlanFactory.requiredRuntimeService(component),
+        )
+    }
+
+    @Test
+    fun `cross package declared service is rejected before plan construction`() {
+        val result = AuthorizationPlanFactory.createForComponents(
+            components = listOf(
+                ManagedComponent(
+                    AuthorizationPlanFactory.DESKTOP_COMPONENT_ID,
+                    "com.ninepointnine.desktop.test",
+                    order = 0,
+                ),
+            ),
+            declaredServicesByComponent = mapOf(
+                AuthorizationPlanFactory.DESKTOP_COMPONENT_ID to setOf(
+                    ApkServiceDeclaration(
+                        "com.attacker.desktop/com.attacker.desktop.Service",
+                        "android.permission.BIND_ACCESSIBILITY_SERVICE",
+                    ),
+                ),
+            ),
+        )
+
+        assertEquals(AuthorizationPlanBuildResult.Rejected("authorization_service_component_mismatch"), result)
+    }
+
+    @Test
+    fun `multiple services for one authorization role are rejected`() {
+        val packageName = "com.ninepointnine.desktop.test"
+        val services = setOf(
+            ApkServiceDeclaration(
+                "$packageName/com.ninepointnine.desktop.debug.NavigationDemoAccessibilityService",
+                "android.permission.BIND_ACCESSIBILITY_SERVICE",
+            ),
+            ApkServiceDeclaration(
+                "$packageName/com.ninepointnine.desktop.debug.SecondAccessibilityService",
+                "android.permission.BIND_ACCESSIBILITY_SERVICE",
+            ),
+        )
+
+        val result = AuthorizationPlanFactory.createForComponents(
+            components = listOf(
+                ManagedComponent(AuthorizationPlanFactory.DESKTOP_COMPONENT_ID, packageName, order = 0),
+            ),
+            declaredServicesByComponent = mapOf(AuthorizationPlanFactory.DESKTOP_COMPONENT_ID to services),
+        )
+
+        assertEquals(AuthorizationPlanBuildResult.Rejected("authorization_service_ambiguous"), result)
+    }
+
+    @Test
     fun `catalog component gate binds built in package and typed setup to the APK`() {
         val invalidSetup = ManagedComponent(
             componentId = "notes",

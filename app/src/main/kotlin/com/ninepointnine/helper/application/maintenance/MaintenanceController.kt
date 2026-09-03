@@ -387,6 +387,7 @@ class MaintenanceController(
         val statuses = when (val inspection = gateway.inspectComponentAuthorization(
             installedComponents,
             installedApplications,
+            declarations,
         )) {
             is MaintenanceAuthorizationResult.Failed -> {
                 fail(actionId, inspection.failure.reasonCode, inspection.failure.retryable, eventPort)

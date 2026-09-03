@@ -373,10 +373,10 @@ class InstallerRuntime(
             }
 
             InstallationSessionCommand.LeaveMaintenanceAction -> {
-                // The command only clears the maintenance route state; keep
-                // the confirmed device lease alive for the home page.
-                maintenanceJob?.cancel()
-                maintenanceJob = null
+                // Leaving a secondary route is a hard task boundary. Cancel
+                // every page-owned adapter job so the next page cannot wait
+                // behind a stale operation holding the shared device lease.
+                cancelTransferWork()
             }
 
             is InstallationSessionCommand.ToggleOptionalComponent,
@@ -1294,6 +1294,7 @@ class InstallerRuntime(
         cancelDiscovery()
         cancelConnectionAttempt()
         catalogJob?.cancel()
+        initialInventoryJob?.cancel()
         artifactJob?.cancel()
         maintenanceJob?.cancel()
         catalogJob = null

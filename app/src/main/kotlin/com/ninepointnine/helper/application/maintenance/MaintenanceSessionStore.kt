@@ -180,10 +180,14 @@ internal object MaintenanceBaselineProjector {
             .copy(availableComponents = availableComponents)
             .withVerifiedInstallations(verifiedCurrentBatch)
             .toDurableMaintenanceBaseline()
-        // A durable maintenance entry is a verified device identity, never an
-        // empty inventory marker or a UI-ready flag.
-        if (maintenance.installedManifests.isEmpty()) return null
+        // A durable maintenance entry is normally a verified device identity.
+        // The completed initial-inventory route is a navigation checkpoint
+        // only and grants no APK reuse privilege.
         val installedIds = maintenance.installedManifests.mapTo(mutableSetOf()) { it.componentId }
+        if (installedIds.isEmpty() && maintenance.initialInstallationCompleted) {
+            maintenance.managedApplications.filter { it.installed }.forEach { installedIds += it.componentId }
+        }
+        if (installedIds.isEmpty()) return null
         val configuredIds = snapshot.evidence.configured intersect installedIds
         val availableIds = snapshot.evidence.available intersect configuredIds
         val controlPlaneReady = snapshot.catalogRevision > 0L &&
@@ -254,6 +258,8 @@ private data class StoredMaintenanceState(
     val configured: Set<String>,
     val available: Set<String>,
     val managedApplications: List<StoredApplication>,
+    /** Explicit first-install completion marker; defaults preserve schema-1 records. */
+    val initialInstallationCompleted: Boolean = false,
     val lastAction: StoredMaintenanceAction? = null,
     /** Domain-owned secondary route; absent in older schema-1 records means home. */
     val routeAction: String? = null,
@@ -293,6 +299,7 @@ private data class StoredMaintenanceState(
             configured = snapshot.evidence.configured,
             available = snapshot.evidence.available,
             managedApplications = snapshot.maintenance.managedApplications.map(StoredApplication::from),
+            initialInstallationCompleted = snapshot.maintenance.initialInstallationCompleted,
             // Action history belongs to the live session/UI route. Persisting
             // it would make a cold start carry stale page feedback; the
             // durable record contains only the verified maintenance baseline.
@@ -430,6 +437,13 @@ private data class StoredMaintenanceState(
         } catch (_: Exception) {
             return null
         }
+        if (initialInstallationCompleted &&
+            (parsedInventoryState != MaintenanceInventoryState.READY ||
+                managedApplications.none { it.installed } ||
+                AuthorizationPlanFactory.DESKTOP_COMPONENT_ID !in installed)
+        ) {
+            return null
+        }
         val parsedLastAction = lastAction?.toDomainOrNull() ?: if (lastAction == null) null else return null
         routeAction?.let {
             if (runCatching { MaintenanceActionId.valueOf(it) }.getOrNull() == null) {
@@ -473,7 +487,7 @@ private data class StoredMaintenanceState(
         // Evaluate legacy migration first: schema-1 records did not carry the
         // dedicated installedManifests field, but can still contain valid
         // artifact identities tied to installation evidence.
-        if (effectiveInstalledManifests.isEmpty() ||
+        if ((effectiveInstalledManifests.isEmpty() && !initialInstallationCompleted) ||
             !validateManifestEntries(effectiveInstalledManifests, sourcePolicy)
         ) {
             return null
@@ -553,6 +567,7 @@ private data class StoredMaintenanceState(
                 managedApplicationsFailureReason = null,
                 managedApplicationsFailureRetryable = false,
                 managedApplications = effectiveApplications,
+                initialInstallationCompleted = initialInstallationCompleted,
                 installedManifests = effectiveInstalledManifests,
                 availableComponents = parsedAvailableComponents.ifEmpty {
                     parsedComponents.filter {

@@ -1051,7 +1051,9 @@ class InstallationSession(
      * Completes the first-install route when the live inventory already
      * contains every catalog component. No synthetic APK receipt is created;
      * the inventory remains the source of truth for this in-memory maintenance
-     * session and will be read again after a cold start.
+     * session. A separate completion marker is persisted so a cold start does
+     * not repeat this route; the device inventory is still re-read for later
+     * maintenance actions.
      */
     private fun enterMaintenanceFromInitialInventory(
         current: InstallationSessionSnapshot,
@@ -1063,7 +1065,10 @@ class InstallationSession(
             .filter { it.status != ComponentStatus.UNLISTED }
         val maintenance = current.maintenance
             .withInitialInventory(inventory)
-            .copy(availableComponents = availableComponents)
+            .copy(
+                availableComponents = availableComponents,
+                initialInstallationCompleted = true,
+            )
         publish(
             current.copy(
                 state = InstallationSessionState.MAINTENANCE,

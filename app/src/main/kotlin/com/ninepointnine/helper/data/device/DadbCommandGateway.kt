@@ -429,7 +429,7 @@ internal class DadbCommandGateway(
             reasonCode = "desktop_missing",
             retryable = false,
         )
-        val service = AuthorizationPlanFactory.requiredRuntimeService(desktop)
+        val service = AuthorizationPlanFactory.requiredRuntimeService(plan, desktop)
             ?: return completed.toVerificationFailure(
                 reasonCode = "desktop_service_missing",
                 retryable = false,
@@ -538,12 +538,6 @@ internal class DadbCommandGateway(
                 order = it.sortOrder,
             )
         }
-        val plan = when (val result = AuthorizationPlanFactory.createForComponents(components)) {
-            is AuthorizationPlanBuildResult.Ready -> result.plan
-            is AuthorizationPlanBuildResult.Rejected -> return@withLease MaintenanceDeviceResult.Failed(
-                DeviceActionFailure(result.reasonCode, retryable = false),
-            )
-        }
         val declarations = linkedMapOf<String, com.ninepointnine.helper.domain.device.ApkDeclarationMetadata?>()
         manifests.forEach { manifest ->
             verifyInstalledArtifactQuick(manifest)?.let { failure ->
@@ -576,7 +570,24 @@ internal class DadbCommandGateway(
                 }
             }
         }
-        AuthorizationDeclarationValidator.validateDeclarations(plan, declarations)?.let { failure ->
+        val resolvedDeclarations = declarations.mapNotNull { (componentId, declaration) ->
+            declaration?.let { componentId to it }
+        }.toMap()
+        if (resolvedDeclarations.size != manifests.size) {
+            return@withLease MaintenanceDeviceResult.Failed(
+                DeviceActionFailure("authorization_capability_metadata_missing", retryable = false),
+            )
+        }
+        val plan = when (val result = AuthorizationPlanFactory.createForComponents(
+            components,
+            declaredServicesByComponent = resolvedDeclarations.mapValues { it.value.services },
+        )) {
+            is AuthorizationPlanBuildResult.Ready -> result.plan
+            is AuthorizationPlanBuildResult.Rejected -> return@withLease MaintenanceDeviceResult.Failed(
+                DeviceActionFailure(result.reasonCode, retryable = false),
+            )
+        }
+        AuthorizationDeclarationValidator.validateDeclarations(plan, resolvedDeclarations)?.let { failure ->
             return@withLease MaintenanceDeviceResult.Failed(failure)
         }
         probeAuthorizationCapacity(plan)?.let { failure ->
@@ -661,7 +672,19 @@ internal class DadbCommandGateway(
             DeviceActionFailure("adb_connection_closed", retryable = true),
         ),
     ) {
-        inspectComponentAuthorizationLocked(components, installedApplications)
+        inspectComponentAuthorizationLocked(components, installedApplications, emptyMap())
+    }
+
+    override suspend fun inspectComponentAuthorization(
+        components: List<ManagedComponent>,
+        installedApplications: List<ManagedApplicationProbe>,
+        declarationsByComponent: Map<String, com.ninepointnine.helper.domain.device.ApkDeclarationMetadata>,
+    ): MaintenanceAuthorizationResult = withLease(
+        whenClosed = MaintenanceAuthorizationResult.Failed(
+            DeviceActionFailure("adb_connection_closed", retryable = true),
+        ),
+    ) {
+        inspectComponentAuthorizationLocked(components, installedApplications, declarationsByComponent)
     }
 
     private fun inspectInstalledApplicationInventoryLocked(
@@ -750,6 +773,7 @@ internal class DadbCommandGateway(
     private fun inspectComponentAuthorizationLocked(
         components: List<ManagedComponent>,
         installedApplications: List<ManagedApplicationProbe>? = null,
+        declarationsByComponent: Map<String, com.ninepointnine.helper.domain.device.ApkDeclarationMetadata> = emptyMap(),
     ): MaintenanceAuthorizationResult {
         if (components.map { it.componentId }.toSet().size != components.size ||
             components.any {
@@ -769,7 +793,15 @@ internal class DadbCommandGateway(
             .associateBy { it.componentId }
         val statuses = components.mapNotNull { component ->
             val installed = installedById[component.componentId] ?: return@mapNotNull null
-            val plan = when (val result = AuthorizationPlanFactory.createForInspection(listOf(component))) {
+            val declarations = declarationsByComponent[component.componentId]
+                ?: readInstalledApkDeclarations(component, installed.packageName)
+            val plan = when (val result = AuthorizationPlanFactory.createForComponents(
+                components = listOf(component),
+                requireDesktop = false,
+                declaredServicesByComponent = mapOf(
+                    component.componentId to declarations?.services.orEmpty(),
+                ).filterValues { it.isNotEmpty() },
+            )) {
                 is AuthorizationPlanBuildResult.Ready -> result.plan
                 is AuthorizationPlanBuildResult.Rejected -> {
                     return@mapNotNull ManagedApplicationAuthorizationStatus(
@@ -1275,6 +1307,37 @@ internal class DadbCommandGateway(
         return null
     }
 
+    /** Reads declarations only for an explicit authorization probe. */
+    private fun readInstalledApkDeclarations(
+        component: ManagedComponent,
+        packageName: String,
+    ): com.ninepointnine.helper.domain.device.ApkDeclarationMetadata? {
+        val verificationDirectory = installedApkCacheDirectory ?: return null
+        val metadataReader = installedApkMetadataReader ?: return null
+        if (!verificationDirectory.mkdirs() && !verificationDirectory.isDirectory) return null
+        val remotePath = readInstalledApkPath(packageName) ?: return null
+        val remoteSize = shell("stat -c %s ${shellArgument(remotePath)}")
+            ?.takeIf { it.exitCode == 0 }
+            ?.output
+            ?.trim()
+            ?.toLongOrNull()
+            ?: return null
+        if (remoteSize !in 1L..MAX_DECLARATION_READ_BYTES) return null
+        val pulledApk = verificationDirectory.resolve(
+            "authorization-${component.componentId}-${Integer.toHexString(packageName.hashCode())}.apk",
+        )
+        pulledApk.delete()
+        return try {
+            adb.pull(pulledApk, remotePath)
+            val metadata = metadataReader.read(pulledApk) ?: return null
+            metadata.declarations.takeIf { metadata.packageName == packageName }
+        } catch (_: Exception) {
+            null
+        } finally {
+            pulledApk.delete()
+        }
+    }
+
     private suspend fun verifyInstalledArtifactIdentity(
         artifact: InstallableArtifact,
         metadataReader: ApkMetadataReader,
@@ -1689,6 +1752,7 @@ internal class DadbCommandGateway(
         const val SERVICE_READBACK_ATTEMPTS = 10
         const val SERVICE_READBACK_DELAY_MILLIS = 1_000L
         const val AUTHORIZATION_CONFIRMATION_ATTEMPTS = 4
+        const val MAX_DECLARATION_READ_BYTES = 128L * 1024L * 1024L
     }
 
     private enum class BoundServiceProbe {

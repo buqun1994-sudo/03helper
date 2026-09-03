@@ -6,6 +6,7 @@ import com.ninepointnine.helper.domain.artifact.ArtifactSourceKind
 import com.ninepointnine.helper.domain.artifact.ArtifactVersion
 import com.ninepointnine.helper.domain.artifact.AppIconAsset
 import com.ninepointnine.helper.domain.artifact.CompatibilityRange
+import com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
 import com.ninepointnine.helper.domain.artifact.toComponentDescriptor
 import com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
 import com.ninepointnine.helper.domain.device.AuthorizationSetupDeclaration
@@ -243,6 +244,48 @@ class MaintenanceSessionStoreTest {
         file.writeText("{\"schemaVersion\":1}")
         assertNull(store.load())
         assertFalse(file.exists())
+    }
+
+    @Test
+    fun `initial completion marker survives without inventing installed apk identities`() {
+        val file = Files.createTempDirectory("maintenance-store-initial-complete")
+            .resolve("session.json")
+            .toFile()
+        val base = maintenanceSnapshot(manifests(1L), emptyList()).copy(artifactManifests = emptyList())
+        val snapshot = base.copy(
+            evidence = SessionEvidence(
+                installed = setOf("desktop", "lyrics"),
+                configured = setOf("desktop", "lyrics"),
+                available = setOf("desktop", "lyrics"),
+            ),
+            maintenance = base.maintenance.copy(
+                managedApplicationsState = MaintenanceInventoryState.READY,
+                managedApplications = listOf(
+                    ManagedApplicationStatus(
+                        "desktop",
+                        InstallerComponentTrustRegistry.CURRENT_DESKTOP_TEST_PACKAGE_NAME,
+                        installed = true,
+                        versionCode = 2L,
+                    ),
+                    ManagedApplicationStatus(
+                        "lyrics",
+                        InstallerComponentTrustRegistry.CURRENT_LYRICS_TEST_PACKAGE_NAME,
+                        installed = true,
+                        versionCode = 2L,
+                    ),
+                ),
+                availableComponents = base.components,
+                initialInstallationCompleted = true,
+            ),
+        )
+        val store = MaintenanceSessionStore(file)
+
+        assertTrue(store.save(snapshot))
+        val restored = store.load() ?: error("initial_completion_not_restored")
+        assertTrue(restored.maintenance.initialInstallationCompleted)
+        assertTrue(restored.maintenance.installedManifests.isEmpty())
+        assertEquals(MaintenanceInventoryState.READY, restored.maintenance.managedApplicationsState)
+        assertEquals(setOf("desktop", "lyrics"), restored.evidence.installed)
     }
 
     @Test
