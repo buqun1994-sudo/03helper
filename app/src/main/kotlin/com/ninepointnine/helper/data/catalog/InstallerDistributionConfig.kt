@@ -4,6 +4,7 @@ import com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
 import com.ninepointnine.helper.domain.artifact.InstallerPublisherTrustRegistry
 import com.ninepointnine.helper.domain.artifact.ReleaseSourcePolicy
 import com.ninepointnine.helper.domain.artifact.AppIconAsset
+import com.ninepointnine.helper.domain.artifact.ArtifactVersion
 import com.ninepointnine.helper.domain.artifact.formatArtifactSizeLabel
 import com.ninepointnine.helper.domain.artifact.formatArtifactVersionLabel
 import com.ninepointnine.helper.domain.device.AuthorizationSetupDeclaration
@@ -205,6 +206,15 @@ data class InstallerComponentSource(
     val iconAsset: AppIconAsset? = null,
 ) {
     val appId: String get() = componentId
+
+    /**
+     * Cloud's signed release metadata is the target for this preparation.
+     * Package and certificate identity remain separate local trust decisions.
+     */
+    fun matchesDeclaredVersion(actual: ArtifactVersion): Boolean =
+        versionCode > 0L &&
+            actual.code == versionCode &&
+            (versionName.isBlank() || actual.name == versionName)
 
     val displayVersionLabel: String?
         get() = formatArtifactVersionLabel(versionName)

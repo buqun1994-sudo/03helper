@@ -22,8 +22,8 @@
 
 ### 3.1 控制面与对象流分离
 
-1. 03helper 需要一个很小的 schema V4 签名配置作为控制面，配置描述当前蓝奏根文件夹、运行时密码、`environment`、`channel`、`catalogVersion`、`catalogRevision` 和动态 `apps[]`；每个条目可声明 `versionCode`、`versionName`、`apkSizeBytes`、展示信息、安装策略、排序、客户端能力门槛、受限 typed `deviceSetup` 和带 SHA-256 的 `icon` 元数据。包名、证书、最低 SDK、APK 哈希和实际身份由客户端读取并用官方发布者证书根校验；Cloud 版本 / 大小只负责展示与发布追踪，不再作为重复 APK 身份门禁。v3 仅作为无 Logo 历史配置的过渡读取。
-2. 安装包对象流不经过 03helper 自有服务器。客户端每次从配置取得同一个受密码保护的蓝奏根文件夹，在隐藏 WebView 中完成验证并枚举文件，只定位启用 `apps[]` 声明的 ZIP；未声明文件忽略，缺失 ZIP（包括 `desktop`）不在目录阶段把整次安装判死。用户确认后先扫描手机公共 `Download`，只有没有通过包名 / 受信证书身份校验的本地 APK 时才下载对应 ZIP；单个远端或本地来源失败逐项隔离，结果页再决定是否允许进入维护。最新版本展示以签名 `apps[]` 的 `versionCode`、`versionName`、`apkSizeBytes` 为准，`catalogVersion` 只作配置修订。
+1. 03helper 需要一个很小的 schema V4 签名配置作为控制面，配置描述当前蓝奏根文件夹、运行时密码、`environment`、`channel`、`catalogVersion`、`catalogRevision` 和动态 `apps[]`；每个条目可声明 `versionCode`、`versionName`、`apkSizeBytes`、展示信息、安装策略、排序、客户端能力门槛、受限 typed `deviceSetup` 和带 SHA-256 的 `icon` 元数据。包名、证书、最低 SDK、APK 哈希和实际身份由客户端读取并用官方发布者证书根校验；签名配置的 `versionCode` / `versionName` 同时是本次准备的精确目标，APK 必须匹配后才能进入安装，`apkSizeBytes` 继续用于展示与传输证据。v3 仅作为无 Logo 历史配置的过渡读取。
+2. 安装包对象流不经过 03helper 自有服务器。客户端每次从配置取得同一个受密码保护的蓝奏根文件夹，在隐藏 WebView 中完成验证并枚举文件，只定位启用 `apps[]` 声明的 ZIP；未声明文件忽略，缺失 ZIP（包括 `desktop`）不在目录阶段把整次安装判死。用户确认后先扫描手机公共 `Download`，只有通过包名 / 受信证书且匹配签名目标版本的本地 APK 才能复用；版本不匹配视为未命中，继续下载对应 ZIP。单个远端或本地来源失败逐项隔离，结果页再决定是否允许进入维护。最新版本展示以签名 `apps[]` 的 `versionCode`、`versionName`、`apkSizeBytes` 为准，`catalogVersion` 只作配置修订。
 3. R2 / GitHub Releases 不参与当前根文件夹自动版本判断；后续若增加备用对象，必须继续由同一签名配置声明并保持组件版本一致，不能让多个来源各自决定“最新版本”。
 4. 600GB/月额度只用于评估对象流量，不用于否定小清单控制面；几 KB 的清单请求不构成 APK 直链流量。
 
@@ -46,7 +46,7 @@ productId = 03helper
 displayName = 03车机助手
 androidPackage = com.ninepointnine.helper
 runtimeIdentifier = icar03
-releaseVersion = 1.0.5 (versionCode 6)
+releaseVersion = 1.0.6 (versionCode 7)
 ```
 
 | 环境 | 证书 SHA-256 | 构建方式 |
@@ -54,9 +54,9 @@ releaseVersion = 1.0.5 (versionCode 6)
 | staging | `aca4f178fea11ccc97a1373c8aa5345b274a3a783398929a9340a79ee83663af` | `assembleDebug` + `helperSigningEnvironment=staging` |
 | production | `31ca80dd21a5208eaabd5f3e1440a3db2f7dc79122e03eaa6ba01730fb31f18b` | `assembleRelease` + `helperProductionSigningPropertiesFile` |
 
-Cloud 已登记 `productId`、包名、环境、APK 公开证书摘要和免费 profile；03helper 不进入许可证或 Device Commerce 主链。`1.0.5 (6)` production APK 已固定接入独立配置公钥并完成本地构建、包名、版本、单 signer、v2 和证书摘要核验，但尚未上传或切换线上配置。Cloud 不接收 JKS、口令、私钥或本机路径。真实蓝奏入口、文件完整性、Logo 公网对象和 production 配置仍未上线，不得把本地产物就绪写成线上发布完成。
+Cloud 已登记 `productId`、包名、环境、APK 公开证书摘要和免费 profile；03helper 不进入许可证或 Device Commerce 主链。`1.0.6 (7)` production APK 已固定接入独立配置公钥并完成本地构建、包名、版本、单 signer、v2 和证书摘要核验，但尚未上传或切换线上配置。Cloud 不接收 JKS、口令、私钥或本机路径。真实蓝奏入口、文件完整性、Logo 公网对象和 production 配置仍未上线，不得把本地产物就绪写成线上发布完成。
 
-包名、证书 SHA-256 和最低 SDK 不由网络 payload 覆盖：包名、版本和最低 SDK 从 APK 读取，证书必须属于客户端内置官方发布者证书集合及其包名命名空间。未知算法、未知 key、字段缺失、过期或桌面条目缺失均 fail closed。
+包名、证书 SHA-256 和最低 SDK 不由网络 payload 覆盖：包名、版本和最低 SDK 从 APK 读取，证书必须属于客户端内置官方发布者证书集合及其包名命名空间；实际 `versionCode` / `versionName` 还必须与签名配置目标精确一致。未知算法、未知 key、字段缺失、过期或桌面条目缺失均 fail closed。
 
 客户端从实际归档构造的 `ArtifactManifest` 仍包含 `archiveFormat`、`archiveSizeBytes`、`archiveSha256`、`apkEntryName`、`apkSizeBytes`、`apkSha256`、`packageName`、`apkVersion` 和 `certificateSha256`；这些字段不是 Cloud v3 payload 字段，而是本地校验结果。
 
@@ -110,7 +110,7 @@ Cloud 最新 iCAR 03 官网已确认的可复用语言：
 
 ## 7. Cloud 路由索引
 
-本轮协议补充：`apps[]` 启用条目必须包含 `versionCode`、`versionName`、`apkSizeBytes`；客户端选择页展示为 `v1.2.3`、`2.6M`，下载后以包名 / 发布者证书完成最小身份校验，并保留实际大小与摘要证据。
+本轮协议补充：`apps[]` 启用条目必须包含 `versionCode`、`versionName`、`apkSizeBytes`；客户端选择页展示为 `v1.2.3`、`2.6M`，下载后要求 APK 的 `versionCode` / `versionName` 精确匹配签名目标，再以包名 / 发布者证书完成身份校验，并保留实际大小与摘要证据。
 
 在 Cloud 仓库中继续读取：
 

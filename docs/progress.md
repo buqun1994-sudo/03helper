@@ -1,3 +1,12 @@
+# 2026-09-03 更新制品版本一致性修复与 1.0.6 产物（完成，待用户上传 / 主测）
+
+1. 根因已收口：更新制品准备不再把“本地存在 APK”当作命中条件；本地 APK 的 `versionCode` 必须与云端目标精确一致，配置提供 `versionName` 时也必须精确一致。旧版本缓存会被视为未命中并继续解析远端 ZIP。
+2. 远端 ZIP 解压后的 APK 在进入缓存、安装或 `ArtifactBatchPrepared` 之前执行同一版本门禁；包名、证书正确但版本不一致时 fail closed，避免把 A 版本缓存误用于 B 版本更新。逐项更新、自更新和首次安装继续共用 `ArtifactPreparationCoordinator` 唯一制品准备 owner。
+3. 新增回归覆盖：旧本地 APK 不阻断目标版本下载、精确目标版本可命中、远端错误版本拒绝、版本代码 / 版本名精确匹配；JDK 17 下 Debug 单测 `314` 项、Release 单测 `317` 项均为 `0 failures / 0 errors / 0 skipped`。Debug Kotlin 编译、Debug Lint、Debug APK 和 Release APK 构建均通过。
+4. Release 真值已由 `1.0.5 (6)` 升级为 `1.0.6 (7)`。测试产物已覆盖桌面目录 `03系列测试包-中文名称-20260831`：`03车机助手-staging-v0.1.0.apk`（21,060,648 字节，SHA-256 `3afb09cb9b4236c223681ecfa60adf301e066d7908ec020b7b361f637fb86636`）及对应 ZIP（20,132,417 字节，SHA-256 `3bda86c8b4b4d9e0490c2458e08f76db5c99a331252c42ceb34c3d16da4e4db2`）。
+5. 正式产物已覆盖桌面目录 `03系列正式发布包-中文名称-20260830`：`03车机助手-v1.0.6.apk`（14,261,467 字节，SHA-256 `ee4df5607351959411cdb043956a10ca3d982a94e60e5622a81ac555152d8d00`）及对应 ZIP（13,458,596 字节，SHA-256 `48d08ac7404d6e3acecf259421cdcb8334a27c1a58c3325a9dad0a1327b89ccc`）。两 ZIP 均只含对应 APK，UTF-8 文件名标志和归档内外字节一致；APK 包名、版本、单 signer 与 v2 签名已核对。
+6. `check-project-docs.mjs`、`check-skills.mjs`、`check-local-environment.mjs` 和 `git diff --check` 均通过。`check-03app-repository.mjs` 仅因共享登记仍记录 `1.0.5 (6)` 且登记快照为 clean 而 fail closed；未修改共享 Cloud 登记库、未上传、未发布、未安装到手机或车机。
+
 # 2026-09-02 管理已安装应用目标模式恢复与双环境产物（完成，待用户手动测试）
 
 1. 已撤销全量第三方应用库存、第三方详情资产缓存和第三方四项动作路由；管理页恢复为只展示签名配置 / 已验证 manifest 中声明的受控组件。

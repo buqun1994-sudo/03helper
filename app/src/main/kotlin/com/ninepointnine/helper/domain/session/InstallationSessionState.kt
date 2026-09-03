@@ -183,6 +183,7 @@ fun componentStatusForReasonCode(reasonCode: String): ComponentStatus = when {
             "maintenance_installed_apk_hash_mismatch",
             "apk_hash_mismatch",
             "apk_size_mismatch",
+            "distribution_apk_version_mismatch",
         ) -> ComponentStatus.ZIP_VALIDATION_FAILED
 
     reasonCode in setOf(
@@ -219,6 +220,7 @@ fun installPhaseForReasonCode(reasonCode: String): InstallPhase = when {
         "maintenance_installed_certificate_mismatch",
         "maintenance_installed_version_mismatch",
         "maintenance_installed_apk_hash_mismatch",
+        "distribution_apk_version_mismatch",
         "installation_detail_invalid",
         "installation_evidence_invalid",
         "installation_evidence_missing",

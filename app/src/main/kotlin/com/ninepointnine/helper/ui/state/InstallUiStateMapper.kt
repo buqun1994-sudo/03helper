@@ -388,6 +388,8 @@ private fun String.toUserMessage(): String = when (this) {
     "apk_hash_mismatch",
     -> "车机上的应用内容与官方发布包不一致，请重新安装"
 
+    "distribution_apk_version_mismatch" -> "云端安装包版本与当前配置不一致，请重试"
+
     "archive_verification_failed",
     "distribution_archive_invalid",
     "archive_identity_invalid",

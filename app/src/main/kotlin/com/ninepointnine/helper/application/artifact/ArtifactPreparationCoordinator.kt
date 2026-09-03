@@ -293,6 +293,7 @@ class ArtifactPreparationCoordinator(
         if (InstallerComponentTrustRegistry.get(component.componentId) != null &&
             !InstallerComponentTrustRegistry.isAllowedPackageName(component.componentId, metadata.packageName)
         ) return null
+        if (!component.matchesDeclaredVersion(metadata.version)) return null
         if (!InstallerPublisherTrustRegistry.isKnownProfile(component.trustProfileId)) return null
         if (component.certificateSha256.isNotBlank() && metadata.certificateSha256s.none {
                 it.equals(component.certificateSha256, ignoreCase = true)
@@ -485,6 +486,17 @@ class ArtifactPreparationCoordinator(
                         retryable = false,
                     ),
                 )
+            if (!component.matchesDeclaredVersion(metadata.version)) {
+                return PlanAttemptResult.Failed(
+                    ArtifactFailure(
+                        phase = ArtifactFailurePhase.APK_VERIFICATION,
+                        componentId = component.componentId,
+                        sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                        reasonCode = "distribution_apk_version_mismatch",
+                        retryable = false,
+                    ),
+                )
+            }
             val manifest = ArtifactManifest(
                 schemaVersion = ArtifactManifestValidator.SUPPORTED_SCHEMA_VERSION,
                 componentId = component.componentId,

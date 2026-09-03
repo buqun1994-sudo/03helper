@@ -93,6 +93,126 @@ class ArtifactPreparationCoordinatorTest {
     }
 
     @Test
+    fun `trusted stale public APK is ignored and the signed target is resolved remotely`() = runBlocking {
+        val root = Files.createTempDirectory("artifact-stale-target").toFile()
+        val publicDownload = root.resolve("Download").apply { mkdirs() }
+        val baseConfig = config()
+        val target = component(baseConfig, "desktop").copy(versionCode = 2L, versionName = "2.0")
+        val targetConfig = baseConfig.copy(
+            apps = baseConfig.apps.map { if (it.componentId == target.componentId) target else it },
+        )
+        val oldBytes = "desktop-old".toByteArray()
+        val targetBytes = "desktop-target".toByteArray()
+        publicDownload.resolve("old-desktop.apk").writeBytes(oldBytes)
+        var folderCalls = 0
+        var shareCalls = 0
+        var downloadCalls = 0
+        val metadataReader = ApkMetadataReader { apk ->
+            val version = if (apk.readBytes().contentEquals(oldBytes)) {
+                com.ninepointnine.helper.domain.artifact.ArtifactVersion("1.0", 1L)
+            } else {
+                com.ninepointnine.helper.domain.artifact.ArtifactVersion(target.versionName, target.versionCode)
+            }
+            ApkMetadata(
+                packageName = target.packageName,
+                version = version,
+                certificateSha256s = setOf(target.certificateSha256),
+            )
+        }
+        try {
+            val result = coordinator(
+                config = targetConfig,
+                cache = ArtifactCache(root.resolve("private"), publicDownload),
+                metadataReader = metadataReader,
+                folderHost = {
+                    folderCalls += 1
+                    FolderHost(listOf(LanzouFolderEntry("idesktop", target.archiveFileName)))
+                },
+                shareHost = {
+                    shareCalls += 1
+                    ShareHost {
+                        ResolvedDownloadRequest(
+                            ArtifactSourceKind.LANZOU_SHARE,
+                            "https://zip1.webgetstore.com/desktop",
+                            userAgent = "test",
+                        )
+                    }
+                },
+                transport = { _, _ ->
+                    downloadCalls += 1
+                    val bytes = zip(target.apkEntryName, targetBytes)
+                    ArtifactTransportResponse(200, bytes.size.toLong(), "application/zip", ByteArrayInputStream(bytes))
+                },
+            ).prepare(plan(targetConfig, setOf(target.componentId)))
+
+            assertTrue(result is ArtifactPreparationResult.Prepared)
+            val prepared = result as ArtifactPreparationResult.Prepared
+            assertEquals(listOf(target.componentId), prepared.artifacts.map { it.manifest.componentId })
+            assertEquals(target.versionCode, prepared.artifacts.single().manifest.apkVersion.code)
+            assertEquals(ArtifactSourceKind.LANZOU_SHARE, prepared.artifacts.single().sourceKind)
+            assertEquals(1, folderCalls)
+            assertEquals(1, shareCalls)
+            assertEquals(1, downloadCalls)
+            assertTrue(publicDownload.resolve("old-desktop.apk").exists())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `remote APK with trusted identity but wrong signed target version is rejected`() = runBlocking {
+        val root = Files.createTempDirectory("artifact-remote-version-mismatch").toFile()
+        val publicDownload = root.resolve("Download").apply { mkdirs() }
+        val baseConfig = config()
+        val target = component(baseConfig, "desktop").copy(versionCode = 2L, versionName = "2.0")
+        val targetConfig = baseConfig.copy(
+            apps = baseConfig.apps.map { if (it.componentId == target.componentId) target else it },
+        )
+        val remoteBytes = "desktop-old-remote".toByteArray()
+        var downloadCalls = 0
+        val metadataReader = ApkMetadataReader {
+            ApkMetadata(
+                packageName = target.packageName,
+                version = com.ninepointnine.helper.domain.artifact.ArtifactVersion("1.0", 1L),
+                certificateSha256s = setOf(target.certificateSha256),
+            )
+        }
+        try {
+            val result = coordinator(
+                config = targetConfig,
+                cache = ArtifactCache(root.resolve("private"), publicDownload),
+                metadataReader = metadataReader,
+                folderHost = {
+                    FolderHost(listOf(LanzouFolderEntry("idesktop", target.archiveFileName)))
+                },
+                shareHost = {
+                    ShareHost {
+                        ResolvedDownloadRequest(
+                            ArtifactSourceKind.LANZOU_SHARE,
+                            "https://zip1.webgetstore.com/desktop",
+                            userAgent = "test",
+                        )
+                    }
+                },
+                transport = { _, _ ->
+                    downloadCalls += 1
+                    val bytes = zip(target.apkEntryName, remoteBytes)
+                    ArtifactTransportResponse(200, bytes.size.toLong(), "application/zip", ByteArrayInputStream(bytes))
+                },
+            ).prepare(plan(targetConfig, setOf(target.componentId)))
+
+            assertTrue(result is ArtifactPreparationResult.Prepared)
+            val prepared = result as ArtifactPreparationResult.Prepared
+            assertTrue(prepared.artifacts.isEmpty())
+            assertEquals("distribution_apk_version_mismatch", prepared.failures.single().reasonCode)
+            assertEquals(1, downloadCalls)
+            assertTrue(publicDownload.listFiles().orEmpty().none { it.name.startsWith("03helper-desktop-") })
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
     fun `mixed batch resolves Lanzou only for the missing component and publishes its APK`() = runBlocking {
         val root = Files.createTempDirectory("artifact-mixed-batch").toFile()
         val publicDownload = root.resolve("Download").apply { mkdirs() }

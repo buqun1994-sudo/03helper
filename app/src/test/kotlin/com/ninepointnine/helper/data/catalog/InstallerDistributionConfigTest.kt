@@ -6,6 +6,7 @@ import java.security.Signature
 import java.nio.file.Files
 import java.time.Instant
 import java.util.Base64
+import com.ninepointnine.helper.domain.artifact.ArtifactVersion
 import com.ninepointnine.helper.domain.artifact.formatArtifactSizeLabel
 import kotlinx.coroutines.runBlocking
 import kotlinx.serialization.encodeToString
@@ -15,6 +16,22 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class InstallerDistributionConfigTest {
+    @Test
+    fun `declared release target requires exact code and nonblank name`() {
+        val component = InstallerComponentSource(
+            componentId = "desktop",
+            archiveFileName = "desktop.zip",
+            required = true,
+            displayName = "desktop",
+            versionCode = 7L,
+            versionName = "1.0.6",
+        )
+
+        assertTrue(component.matchesDeclaredVersion(ArtifactVersion("1.0.6", 7L)))
+        assertFalse(component.matchesDeclaredVersion(ArtifactVersion("1.0.5", 7L)))
+        assertFalse(component.matchesDeclaredVersion(ArtifactVersion("1.0.6", 6L)))
+    }
+
     @Test
     fun `v3 verifies exact payload bytes and exposes dynamic apps`() = runBlocking {
         val keys = KeyPairGenerator.getInstance("EC").apply { initialize(256) }.generateKeyPair()
