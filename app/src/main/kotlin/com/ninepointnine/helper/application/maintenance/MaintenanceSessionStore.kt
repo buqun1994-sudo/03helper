@@ -139,13 +139,9 @@ internal object MaintenanceBaselineProjector {
         val declaredSource = snapshot.maintenance.availableComponents
             .ifEmpty { snapshot.components }
             .filterNot { InstallerSelfIdentity.isSelfComponentId(it.id) }
+            .filterNot { it.status == ComponentStatus.UNLISTED }
         val declaredById = linkedMapOf<String, ComponentDescriptor>()
         declaredSource.forEach { component -> declaredById[component.id] = component.toBaselineComponent() }
-        snapshot.components
-            .filterNot { InstallerSelfIdentity.isSelfComponentId(it.id) }
-            .forEach { component ->
-                declaredById.putIfAbsent(component.id, component.toBaselineComponent())
-            }
         snapshot.maintenance.installedManifests.forEach { manifest ->
             if (manifest.componentId !in declaredById) {
                 declaredById[manifest.componentId] = manifest
@@ -153,20 +149,6 @@ internal object MaintenanceBaselineProjector {
                     .copy(status = ComponentStatus.UNLISTED, errorReason = "unlisted")
             }
         }
-        snapshot.maintenance.managedApplications
-            .filter { it.installed }
-            .forEach { application ->
-                if (application.componentId !in declaredById) {
-                    declaredById[application.componentId] = ComponentDescriptor(
-                        id = application.componentId,
-                        displayName = application.componentId,
-                        required = false,
-                        versionLabel = application.versionLabel,
-                        status = ComponentStatus.UNLISTED,
-                        errorReason = "unlisted",
-                    )
-                }
-            }
         val components = declaredById.values.toList()
         val availableComponents = declaredSource
             .map { component -> component.toBaselineComponent() }
@@ -186,8 +168,8 @@ internal object MaintenanceBaselineProjector {
             .withVerifiedInstallations(verifiedCurrentBatch)
             .toDurableMaintenanceBaseline()
         // A durable maintenance entry is normally a verified device identity.
-        // The completed initial-inventory route is a navigation checkpoint
-        // only and grants no APK reuse privilege.
+        // The one exception is the completed initial-inventory route: it is a
+        // navigation checkpoint only and grants no APK reuse privilege.
         val installedIds = maintenance.installedManifests.mapTo(mutableSetOf()) { it.componentId }
         if (maintenance.initialInstallationCompleted) {
             // A verified manifest upgrades only that component's reusable APK
@@ -230,7 +212,7 @@ internal object MaintenanceBaselineProjector {
         snapshot.state == InstallationSessionState.MAINTENANCE &&
             snapshot.maintenance.managedApplicationsState == MaintenanceInventoryState.READY &&
             snapshot.maintenance.installedManifests.isEmpty() &&
-            snapshot.maintenance.managedApplications.none { it.installed }
+            snapshot.maintenance.toDurableMaintenanceBaseline().managedApplications.none { it.installed }
 
     private fun ComponentDescriptor.toBaselineComponent(): ComponentDescriptor = copy(
         status = when (status) {
@@ -527,8 +509,32 @@ private data class StoredMaintenanceState(
             applications,
             effectiveInstalledManifests,
         )
-        val effectiveInstalledIds = installed + effectiveInstalledManifests.map { it.componentId }
-        val unlistedComponents = effectiveApplications
+        val effectiveAvailableComponents = parsedAvailableComponents.ifEmpty {
+            parsedComponents.filter {
+                !InstallerSelfIdentity.isSelfComponentId(it.id) && it.status != ComponentStatus.UNLISTED
+            }
+        }
+        val durableMaintenance = MaintenanceSnapshot(
+            managedApplicationsState = effectiveInventoryState,
+            managedApplications = effectiveApplications,
+            initialInstallationCompleted = initialInstallationCompleted,
+            installedManifests = effectiveInstalledManifests,
+            availableComponents = effectiveAvailableComponents,
+            availableManifests = parsedAvailableManifests,
+            availableCatalogVersion = availableCatalogVersion,
+            availableCatalogRevision = availableCatalogRevision,
+            availableCatalogKeyId = availableCatalogKeyId,
+            availableCatalogSignatureAlgorithm = availableCatalogSignatureAlgorithm,
+            catalogControlPlaneOnly = catalogControlPlaneOnly,
+        ).toDurableMaintenanceBaseline()
+        val durableComponentIds = buildSet {
+            addAll(durableMaintenance.availableComponents.map { it.id })
+            addAll(durableMaintenance.installedManifests.map { it.componentId })
+            addAll(durableMaintenance.managedApplications.map { it.componentId })
+        }
+        val effectiveInstalledIds = (installed + effectiveInstalledManifests.map { it.componentId })
+            .filterTo(linkedSetOf()) { it in durableComponentIds }
+        val unlistedComponents = durableMaintenance.managedApplications
             .filter { it.installed && it.componentId !in componentIds }
             .map { it.componentId }
             .distinct()
@@ -550,7 +556,7 @@ private data class StoredMaintenanceState(
                 androidSdk = device.androidSdk,
                 capabilities = parsedCapabilities,
             ),
-            components = parsedComponents + unlistedComponents.filter { unlisted ->
+            components = parsedComponents.filter { it.id in durableComponentIds } + unlistedComponents.filter { unlisted ->
                 parsedComponents.none { component -> component.id == unlisted.id }
             },
             selectedOptionalComponentIds = emptySet(),
@@ -565,29 +571,14 @@ private data class StoredMaintenanceState(
                 configured = configured intersect effectiveInstalledIds,
                 available = available intersect configured intersect effectiveInstalledIds,
             ),
-            maintenance = MaintenanceSnapshot(
+            maintenance = durableMaintenance.copy(
                 // Route fields from older records remain strictly parsed above
                 // for schema validation, but are never restored without the
                 // matching page wire model. The durable entry point is home.
                 routeAction = null,
                 lastAction = null,
-                managedApplicationsState = effectiveInventoryState,
                 managedApplicationsFailureReason = null,
                 managedApplicationsFailureRetryable = false,
-                managedApplications = effectiveApplications,
-                initialInstallationCompleted = initialInstallationCompleted,
-                installedManifests = effectiveInstalledManifests,
-                availableComponents = parsedAvailableComponents.ifEmpty {
-                    parsedComponents.filter {
-                        !InstallerSelfIdentity.isSelfComponentId(it.id) && it.status != ComponentStatus.UNLISTED
-                    }
-                },
-                availableManifests = parsedAvailableManifests,
-                availableCatalogVersion = availableCatalogVersion,
-                availableCatalogRevision = availableCatalogRevision,
-                availableCatalogKeyId = availableCatalogKeyId,
-                availableCatalogSignatureAlgorithm = availableCatalogSignatureAlgorithm,
-                catalogControlPlaneOnly = catalogControlPlaneOnly,
             ),
         )
     }
@@ -914,6 +905,7 @@ private data class StoredApplication(
     val componentId: String,
     val packageName: String,
     val installed: Boolean,
+    val displayName: String? = null,
     val versionLabel: String? = null,
     val versionCode: Long? = null,
     val fileSizeBytes: Long? = null,
@@ -921,12 +913,15 @@ private data class StoredApplication(
     val updateTimeEpochMillis: Long? = null,
     val filePath: String? = null,
     val uid: Int? = null,
+    val iconBase64: String? = null,
+    val launchComponent: String? = null,
 ) {
         companion object {
         fun from(application: ManagedApplicationStatus): StoredApplication = StoredApplication(
             componentId = application.componentId,
             packageName = application.packageName,
             installed = application.installed,
+            displayName = application.displayName,
             versionLabel = application.versionLabel,
             versionCode = application.versionCode,
             fileSizeBytes = application.fileSizeBytes,
@@ -934,16 +929,24 @@ private data class StoredApplication(
             updateTimeEpochMillis = application.updateTimeEpochMillis,
             filePath = application.filePath,
             uid = application.uid,
+            iconBase64 = application.iconBase64,
+            launchComponent = application.launchComponent,
         )
     }
 
     fun toDomainOrNull(): ManagedApplicationStatus? {
         val packagePattern = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$")
-        return if (componentId.matches(Regex("^[a-z][a-z0-9-]{0,63}$")) && packageName.matches(packagePattern)) {
+        val componentPattern = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)*/[A-Za-z0-9_.$]+$")
+        val validLaunchComponent = launchComponent == null ||
+            componentPattern.matches(launchComponent) && launchComponent.substringBefore('/') == packageName
+        return if (componentId.matches(Regex("^[a-z][a-z0-9-]{0,63}$")) &&
+            packageName.matches(packagePattern) && validLaunchComponent
+        ) {
             ManagedApplicationStatus(
                 componentId = componentId,
                 packageName = packageName,
                 installed = installed,
+                displayName = displayName,
                 versionLabel = versionLabel,
                 versionCode = versionCode,
                 fileSizeBytes = fileSizeBytes,
@@ -951,6 +954,8 @@ private data class StoredApplication(
                 updateTimeEpochMillis = updateTimeEpochMillis,
                 filePath = filePath,
                 uid = uid,
+                iconBase64 = iconBase64,
+                launchComponent = launchComponent,
             )
         } else {
             null

@@ -1575,7 +1575,7 @@ class InstallationSession(
                 current.copy(
                     maintenance = current.maintenance.copy(
                         applicationAction = MaintenanceApplicationActionRecord(
-                            componentId = command.componentId,
+                            packageName = command.packageName,
                             actionId = command.actionId,
                             status = MaintenanceActionStatus.FAILED,
                             reasonCode = "maintenance_route_invalid",
@@ -1593,7 +1593,7 @@ class InstallationSession(
                     maintenance = current.maintenance.copy(
                         applicationDetails = null,
                         applicationAction = MaintenanceApplicationActionRecord(
-                            componentId = command.componentId,
+                            packageName = command.packageName,
                             actionId = command.actionId,
                             status = MaintenanceActionStatus.FAILED,
                             reasonCode = "device_disconnected",
@@ -1604,16 +1604,15 @@ class InstallationSession(
             )
             return
         }
-        val known = current.components.any { it.id == command.componentId } ||
-            current.artifactManifests.any { it.componentId == command.componentId } ||
-            current.maintenance.availableManifests.any { it.componentId == command.componentId } ||
-            current.maintenance.managedApplications.any { it.componentId == command.componentId }
+        val known = current.maintenance.managedApplications.any {
+            it.installed && it.packageName == command.packageName
+        }
         if (!known) {
             startNewGeneration(
                 current.copy(
                     maintenance = current.maintenance.copy(
                         applicationAction = MaintenanceApplicationActionRecord(
-                            componentId = command.componentId,
+                            packageName = command.packageName,
                             actionId = command.actionId,
                             status = MaintenanceActionStatus.FAILED,
                             reasonCode = "maintenance_component_unavailable",
@@ -1632,8 +1631,15 @@ class InstallationSession(
             current.copy(
                 maintenance = current.maintenance.copy(
                     applicationDetails = null,
+                    applicationAuthorizationRequirements = if (
+                        command.actionId == MaintenanceApplicationActionId.AUTHORIZE
+                    ) {
+                        current.maintenance.applicationAuthorizationRequirements
+                    } else {
+                        emptyList()
+                    },
                     applicationAction = MaintenanceApplicationActionRecord(
-                        componentId = command.componentId,
+                        packageName = command.packageName,
                         actionId = command.actionId,
                         status = MaintenanceActionStatus.RUNNING,
                     ),
@@ -2044,12 +2050,18 @@ class InstallationSession(
             is InstallationSessionEvent.MaintenanceActionFailed -> handleMaintenanceActionFailed(event)
             is InstallationSessionEvent.MaintenanceApplicationsResolved ->
                 handleMaintenanceApplicationsResolved(event)
+            is InstallationSessionEvent.MaintenanceApplicationIconResolved ->
+                handleMaintenanceApplicationIconResolved(event)
             is InstallationSessionEvent.MaintenanceApplicationActionCompleted ->
                 handleMaintenanceApplicationActionCompleted(event)
             is InstallationSessionEvent.MaintenanceApplicationActionFailed ->
                 handleMaintenanceApplicationActionFailed(event)
             is InstallationSessionEvent.MaintenanceApplicationDetailsResolved ->
                 handleMaintenanceApplicationDetailsResolved(event)
+            is InstallationSessionEvent.MaintenanceApplicationAuthorizationResolved ->
+                handleMaintenanceApplicationAuthorizationResolved(event)
+            is InstallationSessionEvent.MaintenanceApplicationAuthorizationProgress ->
+                handleMaintenanceApplicationAuthorizationProgress(event)
             is InstallationSessionEvent.MaintenanceAuthorizationCheckStarted ->
                 handleMaintenanceAuthorizationCheckStarted(event)
             is InstallationSessionEvent.MaintenanceAuthorizationCheckProgress ->
@@ -3125,7 +3137,7 @@ class InstallationSession(
         val current = _snapshot.value
         val active = current.maintenance.applicationAction
         if (current.state != InstallationSessionState.MAINTENANCE ||
-            active?.componentId != event.componentId ||
+            active?.packageName != event.packageName ||
             active.actionId != event.actionId ||
             event.resultCode.isBlank()
         ) {
@@ -3142,12 +3154,12 @@ class InstallationSession(
                     ),
                     managedApplications = event.refreshedApplications?.filter { it.installed }
                         ?: if (event.actionId == MaintenanceApplicationActionId.UNINSTALL) {
-                            current.maintenance.managedApplications.filterNot { it.componentId == event.componentId }
+                            current.maintenance.managedApplications.filterNot { it.packageName == event.packageName }
                         } else {
                             current.maintenance.managedApplications
                         },
                     installedManifests = if (event.actionId == MaintenanceApplicationActionId.UNINSTALL) {
-                        current.maintenance.installedManifests.filterNot { it.componentId == event.componentId }
+                        current.maintenance.installedManifests.filterNot { it.packageName == event.packageName }
                     } else {
                         current.maintenance.installedManifests
                     },
@@ -3178,7 +3190,7 @@ class InstallationSession(
         val current = _snapshot.value
         val active = current.maintenance.applicationAction
         if (current.state != InstallationSessionState.MAINTENANCE ||
-            active?.componentId != event.componentId ||
+            active?.packageName != event.packageName ||
             active.actionId != event.actionId ||
             event.reasonCode.isBlank()
         ) {
@@ -3205,7 +3217,7 @@ class InstallationSession(
         val current = _snapshot.value
         val active = current.maintenance.applicationAction
         if (current.state != InstallationSessionState.MAINTENANCE ||
-            active?.componentId != event.details.componentId ||
+            active?.packageName != event.details.packageName ||
             active.actionId != MaintenanceApplicationActionId.DETAILS
         ) {
             return
@@ -3220,6 +3232,74 @@ class InstallationSession(
                         reasonCode = null,
                         retryable = false,
                     ),
+                ),
+            ),
+            acceptedEventSequence,
+        )
+    }
+
+    private fun handleMaintenanceApplicationAuthorizationResolved(
+        event: InstallationSessionEvent.MaintenanceApplicationAuthorizationResolved,
+    ) {
+        val current = _snapshot.value
+        val active = current.maintenance.applicationAction
+        if (current.state != InstallationSessionState.MAINTENANCE ||
+            active?.packageName != event.result.packageName ||
+            active.actionId != event.actionId ||
+            event.actionId !in setOf(
+                MaintenanceApplicationActionId.INSPECT_AUTHORIZATION,
+                MaintenanceApplicationActionId.AUTHORIZE,
+            ) ||
+            current.maintenance.managedApplications.none {
+                it.packageName == event.result.packageName
+            }
+        ) return
+        val actionable = event.result.requirements.filter { it.automaticallyActionable }
+        val granted = actionable.count { it.grantedAfter == true }
+        val total = actionable.size
+        val resultCode = when {
+            event.actionId == MaintenanceApplicationActionId.INSPECT_AUTHORIZATION -> "authorization_ready"
+            total == 0 || granted == total -> "authorization_succeeded"
+            granted > 0 -> "authorization_partially_succeeded"
+            else -> "authorization_failed"
+        }
+        publish(
+            current.copy(
+                maintenance = current.maintenance.copy(
+                    applicationAuthorizationRequirements = event.result.requirements,
+                    applicationAction = active.copy(
+                        status = if (event.actionId == MaintenanceApplicationActionId.INSPECT_AUTHORIZATION || granted > 0 || total == 0) {
+                            MaintenanceActionStatus.SUCCEEDED
+                        } else {
+                            MaintenanceActionStatus.FAILED
+                        },
+                        resultCode = resultCode,
+                        reasonCode = actionable.firstOrNull { it.grantedAfter != true }?.reasonCode,
+                        retryable = event.actionId == MaintenanceApplicationActionId.AUTHORIZE && granted < total,
+                    ),
+                ),
+            ),
+            acceptedEventSequence,
+        )
+    }
+
+    private fun handleMaintenanceApplicationAuthorizationProgress(
+        event: InstallationSessionEvent.MaintenanceApplicationAuthorizationProgress,
+    ) {
+        val current = _snapshot.value
+        val active = current.maintenance.applicationAction
+        if (current.state != InstallationSessionState.MAINTENANCE ||
+            active?.packageName != event.result.packageName ||
+            active.actionId != MaintenanceApplicationActionId.AUTHORIZE ||
+            active.status != MaintenanceActionStatus.RUNNING ||
+            current.maintenance.managedApplications.none {
+                it.packageName == event.result.packageName
+            }
+        ) return
+        publish(
+            current.copy(
+                maintenance = current.maintenance.copy(
+                    applicationAuthorizationRequirements = event.result.requirements,
                 ),
             ),
             acceptedEventSequence,
@@ -3321,22 +3401,23 @@ class InstallationSession(
             action.status == MaintenanceActionStatus.RUNNING &&
                 action.actionId == MaintenanceApplicationActionId.UNINSTALL
         } == true
-        val knownIds = buildSet {
-            addAll(current.components.map { it.id })
-            addAll(current.artifactManifests.map { it.componentId })
-            addAll(current.maintenance.installedManifests.map { it.componentId })
-            addAll(current.maintenance.availableManifests.map { it.componentId })
-            addAll(current.maintenance.managedApplications.map { it.componentId })
-            addAll(com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry.ids())
-        }
         val packagePattern = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$")
+        val componentPattern = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)*/[A-Za-z0-9_.$]+$")
         val normalizedApplications = event.applications
             .filter { it.installed }
-            .distinctBy { it.componentId }
+            .distinctBy { it.packageName }
+            .sortedWith(compareByDescending<ManagedApplicationStatus> { it.installTimeEpochMillis ?: Long.MIN_VALUE }
+                .thenByDescending { it.updateTimeEpochMillis ?: Long.MIN_VALUE }
+                .thenBy { it.packageName })
         val invalid = normalizedApplications.any { application ->
-            application.componentId !in knownIds ||
+            application.componentId.isBlank() ||
+                !Regex("^[a-z][a-z0-9-]{0,63}$").matches(application.componentId) ||
                 !packagePattern.matches(application.packageName) ||
-                !isKnownManagedPackage(current, application.componentId, application.packageName)
+                application.displayName?.length?.let { it > 256 } == true ||
+                application.iconBase64?.length?.let { it > 512 * 1024 } == true ||
+                application.launchComponent?.let { component ->
+                    !componentPattern.matches(component) || component.substringBefore('/') != application.packageName
+                } == true
         }
         if (current.state != InstallationSessionState.MAINTENANCE ||
             (activeAction !in acceptedActions && !applicationRefreshInFlight) ||
@@ -3356,7 +3437,9 @@ class InstallationSession(
                 maintenance = current.maintenance.copy(
                     managedApplications = normalizedApplications,
                     installedManifests = current.maintenance.installedManifests.filter { baseline ->
-                        normalizedApplications.any { it.componentId == baseline.componentId }
+                        normalizedApplications.any {
+                            it.componentId == baseline.componentId || it.packageName == baseline.packageName
+                        }
                     },
                     managedApplicationsState = MaintenanceInventoryState.READY,
                     managedApplicationsFailureReason = null,
@@ -3368,6 +3451,32 @@ class InstallationSession(
         if (activeAction?.isApplicationInstallation == true) {
             beginMaintenanceInstallationSelection(activeAction)
         }
+    }
+
+    private fun handleMaintenanceApplicationIconResolved(
+        event: InstallationSessionEvent.MaintenanceApplicationIconResolved,
+    ) {
+        val current = _snapshot.value
+        if (current.state != InstallationSessionState.MAINTENANCE ||
+            current.maintenance.routeAction != MaintenanceActionId.MANAGE_APPS ||
+            current.maintenance.managedApplicationsState != MaintenanceInventoryState.READY ||
+            event.iconBase64?.length?.let { it > 512 * 1024 } == true ||
+            current.maintenance.managedApplications.none { it.packageName == event.packageName }
+        ) return
+        publish(
+            current.copy(
+                maintenance = current.maintenance.copy(
+                    managedApplications = current.maintenance.managedApplications.map { application ->
+                        if (application.packageName == event.packageName) {
+                            application.copy(iconBase64 = event.iconBase64)
+                        } else {
+                            application
+                        }
+                    },
+                ),
+            ),
+            acceptedEventSequence,
+        )
     }
 
     private fun isKnownManagedPackage(

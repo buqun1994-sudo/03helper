@@ -47,6 +47,8 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -183,6 +185,8 @@ class InstallerRuntime(
     private var initialInventoryJob: Job? = null
     private var artifactJob: Job? = null
     private var maintenanceJob: Job? = null
+    /** Best-effort icon hydration never owns the foreground maintenance action. */
+    private var maintenanceIconJob: Job? = null
     private var eventDispatcherSessionId: Long? = null
     private var eventDispatcher: InstallationSessionBoundary? = null
     private var automaticReconnectSessionId: Long? = null
@@ -255,6 +259,7 @@ class InstallerRuntime(
             manualMaintenanceDisconnect = true
             maintenanceReconnectGeneration = foregroundGeneration
             knownReconnectAttemptSessionId = null
+            cancelMaintenanceIconHydration()
             maintenanceJob?.cancel()
         }
         val before = session.currentSnapshot()
@@ -391,14 +396,16 @@ class InstallerRuntime(
 
             InstallationSessionCommand.DisconnectDevice -> {
                 knownReconnectAttemptSessionId = null
+                cancelMaintenanceIconHydration()
                 maintenanceJob?.cancel()
                 closeDeviceConnection()
             }
 
             InstallationSessionCommand.LeaveMaintenanceAction -> {
                 // Leaving a secondary route is a hard task boundary. Cancel
-                // every page-owned adapter job so the next page cannot wait
-                // behind a stale operation holding the shared device lease.
+                // every page-owned adapter job, not only the visible action;
+                // an older inventory/catalog job may still hold the shared
+                // ADB lease and otherwise leave the next page in LOADING.
                 cancelTransferWork()
             }
 
@@ -432,7 +439,7 @@ class InstallerRuntime(
             is InstallationSessionCommand.MaintenanceApplicationAction -> {
                 if (
                     before.state == InstallationSessionState.MAINTENANCE &&
-                    after.maintenance.applicationAction?.componentId == effectiveCommand.componentId &&
+                    after.maintenance.applicationAction?.packageName == effectiveCommand.packageName &&
                     after.maintenance.applicationAction?.actionId == effectiveCommand.actionId &&
                     after.maintenance.applicationAction?.status == MaintenanceActionStatus.RUNNING
                 ) {
@@ -455,6 +462,7 @@ class InstallerRuntime(
 
             is InstallationSessionCommand.AdapterEvent -> {
                 if (effectiveCommand.event is InstallationSessionEvent.DeviceDisconnected) {
+                    cancelMaintenanceIconHydration()
                     maintenanceJob?.cancel()
                     maintenanceJob = null
                     closeDeviceConnection()
@@ -1216,6 +1224,7 @@ class InstallerRuntime(
         actionId: com.ninepointnine.helper.domain.session.MaintenanceActionId,
         snapshot: InstallationSessionSnapshot,
     ) {
+        cancelMaintenanceIconHydration()
         maintenanceJob?.cancel()
         val port = eventPortFor(snapshot)
         val controller = maintenanceController
@@ -1233,6 +1242,25 @@ class InstallerRuntime(
         maintenanceJob = deviceWorkOwner.replace {
             try {
                 controller.execute(actionId, snapshot, connection, port)
+                currentCoroutineContext().ensureActive()
+                if (actionId == com.ninepointnine.helper.domain.session.MaintenanceActionId.MANAGE_APPS) {
+                    val current = session.currentSnapshot()
+                    val completedInventory = current.sessionId == snapshot.sessionId &&
+                        current.state == InstallationSessionState.MAINTENANCE &&
+                        current.maintenance.routeAction == actionId &&
+                        current.maintenance.lastAction?.actionId == actionId &&
+                        current.maintenance.lastAction?.status == MaintenanceActionStatus.SUCCEEDED &&
+                        current.maintenance.managedApplicationsState ==
+                        com.ninepointnine.helper.domain.session.MaintenanceInventoryState.READY
+                    if (completedInventory) {
+                        launchMaintenanceIconHydration(
+                            controller = controller,
+                            packageNames = current.maintenance.managedApplications.map { it.packageName },
+                            connection = connection,
+                            port = port,
+                        )
+                    }
+                }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
@@ -1251,13 +1279,14 @@ class InstallerRuntime(
         command: InstallationSessionCommand.MaintenanceApplicationAction,
         snapshot: InstallationSessionSnapshot,
     ) {
+        cancelMaintenanceIconHydration()
         maintenanceJob?.cancel()
         val port = eventPortFor(snapshot)
         val controller = maintenanceController
         if (controller == null) {
             port.emit(
                 InstallationSessionEvent.MaintenanceApplicationActionFailed(
-                    componentId = command.componentId,
+                    packageName = command.packageName,
                     actionId = command.actionId,
                     reasonCode = "maintenance_controller_unavailable",
                     retryable = false,
@@ -1269,7 +1298,7 @@ class InstallerRuntime(
         maintenanceJob = deviceWorkOwner.replace {
             try {
                 controller.executeApplicationAction(
-                    componentId = command.componentId,
+                    packageName = command.packageName,
                     actionId = command.actionId,
                     snapshot = snapshot,
                     connection = connection,
@@ -1280,7 +1309,7 @@ class InstallerRuntime(
             } catch (_: Exception) {
                 port.emit(
                     InstallationSessionEvent.MaintenanceApplicationActionFailed(
-                        componentId = command.componentId,
+                        packageName = command.packageName,
                         actionId = command.actionId,
                         reasonCode = "maintenance_application_action_failed",
                         retryable = true,
@@ -1288,6 +1317,32 @@ class InstallerRuntime(
                 )
             }
         }
+    }
+
+    private fun launchMaintenanceIconHydration(
+        controller: MaintenanceController,
+        packageNames: List<String>,
+        connection: DeviceConnectionLease?,
+        port: InstallationSessionEventPort,
+    ) {
+        cancelMaintenanceIconHydration()
+        if (packageNames.isEmpty()) return
+        maintenanceIconJob = scope.launch {
+            try {
+                controller.hydrateApplicationIcons(packageNames, connection, port)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (exception: Exception) {
+                // Icons are progressive decoration. A failed bridge read must
+                // not replace a complete, actionable metadata inventory.
+                Log.w("03helper-runtime", "maintenance_icon_hydration_failed", exception)
+            }
+        }
+    }
+
+    private fun cancelMaintenanceIconHydration() {
+        maintenanceIconJob?.cancel()
+        maintenanceIconJob = null
     }
 
     private fun eventPortFor(snapshot: InstallationSessionSnapshot): InstallationSessionBoundary {
@@ -1318,6 +1373,7 @@ class InstallerRuntime(
         connectionHealthJob?.cancel()
         initialInventoryJob?.cancel()
         artifactJob?.cancel()
+        cancelMaintenanceIconHydration()
         maintenanceJob?.cancel()
         deviceWorkOwner.cancel()
         catalogJob = null

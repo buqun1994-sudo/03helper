@@ -52,6 +52,38 @@ interface MaintenanceCommandGateway {
         components: List<ManagedComponent>,
     ): ManagedApplicationsResult
 
+    /** Reads every third-party application installed for the active car user. */
+    suspend fun inspectAllInstalledApplications(): ManagedApplicationsResult =
+        inspectManagedApplications(emptyList())
+
+    /** Reads one icon after the metadata inventory has already been published. */
+    suspend fun inspectInstalledApplicationIcon(packageName: String): InstalledApplicationIconResult =
+        InstalledApplicationIconResult.Failed(
+            DeviceActionFailure("maintenance_app_icon_unavailable", retryable = false),
+        )
+
+    /** Scans one installed APK declaration set, applies fixed grants, and reads it back. */
+    suspend fun inspectApplicationAuthorization(
+        component: ManagedComponent,
+    ): ApplicationAuthorizationResult = ApplicationAuthorizationResult.Failed(
+        DeviceActionFailure("maintenance_authorization_unavailable", component.componentId, retryable = false),
+    )
+
+    /** Scans one installed APK declaration set, applies supported grants, and reads it back. */
+    suspend fun authorizeApplication(
+        component: ManagedComponent,
+    ): ApplicationAuthorizationResult = ApplicationAuthorizationResult.Failed(
+        DeviceActionFailure("maintenance_authorization_unavailable", component.componentId, retryable = false),
+    )
+
+    /** Reports the complete per-requirement snapshot after each authorization step. */
+    suspend fun authorizeApplication(
+        component: ManagedComponent,
+        onProgress: (ApplicationAuthorizationResultValue) -> Unit,
+    ): ApplicationAuthorizationResult = authorizeApplication(component).also { result ->
+        if (result is ApplicationAuthorizationResult.Completed) onProgress(result.value)
+    }
+
     /** Launches a verified component using its typed catalog identity and setup. */
     suspend fun launchManagedComponent(component: ManagedComponent): MaintenanceDeviceResult
 
@@ -61,7 +93,11 @@ interface MaintenanceCommandGateway {
         installedApplications: List<ManagedApplicationProbe>,
     ): MaintenanceAuthorizationResult
 
-    /** Uses declarations from the verified APK when available. */
+    /**
+     * Inspects authorization using declarations read from the exact APKs when
+     * available. The two-argument form remains the compatibility entry point
+     * for adapters that do not have declaration evidence yet.
+     */
     suspend fun inspectComponentAuthorization(
         components: List<ManagedComponent>,
         installedApplications: List<ManagedApplicationProbe>,
@@ -89,6 +125,7 @@ data class ManagedApplicationProbe(
     val componentId: String,
     val packageName: String,
     val installed: Boolean,
+    val displayName: String? = null,
     val versionLabel: String? = null,
     val versionCode: Long? = null,
     val fileSizeBytes: Long? = null,
@@ -96,6 +133,10 @@ data class ManagedApplicationProbe(
     val updateTimeEpochMillis: Long? = null,
     val filePath: String? = null,
     val uid: Int? = null,
+    /** Optional PNG encoded by the on-car 03desktop catalog bridge. */
+    val iconBase64: String? = null,
+    /** Explicit MAIN/LAUNCHER component resolved by PackageManager. */
+    val launchComponent: String? = null,
 )
 
 data class ManagedApplicationDetailsProbe(
@@ -109,6 +150,8 @@ data class ManagedApplicationDetailsProbe(
     val updateTimeEpochMillis: Long? = null,
     val filePath: String? = null,
     val uid: Int? = null,
+    val displayName: String? = null,
+    val iconBase64: String? = null,
 )
 
 sealed interface ManagedApplicationDetailsProbeResult {
@@ -151,9 +194,51 @@ sealed interface ManagedApplicationsResult {
     data class Failed(val failure: DeviceActionFailure) : ManagedApplicationsResult
 }
 
+sealed interface InstalledApplicationIconResult {
+    data class Completed(
+        val packageName: String,
+        val iconBase64: String?,
+    ) : InstalledApplicationIconResult
+
+    data class Failed(val failure: DeviceActionFailure) : InstalledApplicationIconResult
+}
+
+data class ApplicationAuthorizationRequirement(
+    val permission: String,
+    val grantedBefore: Boolean?,
+    val grantedAfter: Boolean?,
+    val reasonCode: String? = null,
+    val kind: ApplicationAuthorizationRequirementKind = ApplicationAuthorizationRequirementKind.RUNTIME_PERMISSION,
+    /** False for declarations that are informational or cannot be changed by ADB shell. */
+    val automaticallyActionable: Boolean = true,
+    /** True after this item has completed its one authorization attempt. */
+    val authorizationAttempted: Boolean = false,
+)
+
+enum class ApplicationAuthorizationRequirementKind {
+    RUNTIME_PERMISSION,
+    APP_OP,
+    ACCESSIBILITY_SERVICE,
+    NOTIFICATION_LISTENER_SERVICE,
+    DECLARED_PERMISSION,
+}
+
+data class ApplicationAuthorizationResultValue(
+    val componentId: String,
+    val packageName: String,
+    val requirements: List<ApplicationAuthorizationRequirement>,
+)
+
+sealed interface ApplicationAuthorizationResult {
+    data class Completed(val value: ApplicationAuthorizationResultValue) : ApplicationAuthorizationResult
+    data class Failed(val failure: DeviceActionFailure) : ApplicationAuthorizationResult
+}
+
 /** Capabilities read from an APK Manifest before any device-side write. */
 data class ApkDeclarationMetadata(
     val requestedPermissions: Set<String> = emptySet(),
+    /** Explicit protection metadata; null keeps compatibility with older fixtures. */
+    val runtimeGrantPermissions: Set<String>? = null,
     val services: Set<ApkServiceDeclaration> = emptySet(),
 )
 
@@ -161,6 +246,165 @@ data class ApkServiceDeclaration(
     val componentName: String,
     val permission: String?,
 )
+
+data class DeclaredApplicationAuthorizationRequirement(
+    val declaration: String,
+    val kind: ApplicationAuthorizationRequirementKind,
+    val actions: List<DeclaredApplicationAuthorizationAction>,
+    val automaticallyActionable: Boolean = true,
+)
+
+sealed interface DeclaredApplicationAuthorizationAction {
+    data class InspectPermission(val permission: String) : DeclaredApplicationAuthorizationAction
+
+    data class GrantRuntimePermission(val permission: String) : DeclaredApplicationAuthorizationAction
+
+    data class AllowAppOp(val operation: ManagedAppOp) : DeclaredApplicationAuthorizationAction
+
+    data class EnableSecureFlag(val setting: ManagedSecureFlag) : DeclaredApplicationAuthorizationAction
+
+    data class AppendSecureComponent(
+        val setting: ManagedSecureComponentList,
+        val componentName: String,
+    ) : DeclaredApplicationAuthorizationAction
+}
+
+/** Compiles installed APK declarations into the finite operations supported by maintenance. */
+object DeclaredApplicationAuthorizationPlanFactory {
+    fun create(
+        packageName: String,
+        declarations: ApkDeclarationMetadata,
+    ): List<DeclaredApplicationAuthorizationRequirement> {
+        val permissionRequirements = declarations.requestedPermissions
+            .filter(PERMISSION_PATTERN::matches)
+            .distinct()
+            .sorted()
+            .map { permission ->
+                val appOp = APP_OP_BY_PERMISSION[permission]
+                val runtimeGrant = permission in runtimeGrantPermissions(declarations)
+                val actions = buildList {
+                    if (permission in RUNTIME_PERMISSION_WITH_APP_OP && runtimeGrant) {
+                        add(DeclaredApplicationAuthorizationAction.GrantRuntimePermission(permission))
+                    }
+                    if (appOp != null) {
+                        add(DeclaredApplicationAuthorizationAction.AllowAppOp(appOp))
+                    } else if (runtimeGrant) {
+                        add(DeclaredApplicationAuthorizationAction.GrantRuntimePermission(permission))
+                    } else {
+                        add(DeclaredApplicationAuthorizationAction.InspectPermission(permission))
+                    }
+                }
+                DeclaredApplicationAuthorizationRequirement(
+                    declaration = permission,
+                    kind = if (appOp == null && runtimeGrant) {
+                        ApplicationAuthorizationRequirementKind.RUNTIME_PERMISSION
+                    } else if (appOp != null) {
+                        ApplicationAuthorizationRequirementKind.APP_OP
+                    } else {
+                        ApplicationAuthorizationRequirementKind.DECLARED_PERMISSION
+                    },
+                    actions = actions,
+                    automaticallyActionable = appOp != null || runtimeGrant,
+                )
+            }
+        val serviceRequirements = declarations.services
+            .filter { serviceBelongsToPackage(it.componentName, packageName) }
+            .sortedBy { it.componentName }
+            .mapNotNull { service ->
+                when (service.permission) {
+                    BIND_ACCESSIBILITY_SERVICE -> DeclaredApplicationAuthorizationRequirement(
+                        declaration = service.componentName,
+                        kind = ApplicationAuthorizationRequirementKind.ACCESSIBILITY_SERVICE,
+                        actions = listOf(
+                            DeclaredApplicationAuthorizationAction.AppendSecureComponent(
+                                ManagedSecureComponentList.ENABLED_ACCESSIBILITY_SERVICES,
+                                service.componentName,
+                            ),
+                            DeclaredApplicationAuthorizationAction.EnableSecureFlag(
+                                ManagedSecureFlag.ACCESSIBILITY_ENABLED,
+                            ),
+                        ),
+                    )
+
+                    BIND_NOTIFICATION_LISTENER_SERVICE -> DeclaredApplicationAuthorizationRequirement(
+                        declaration = service.componentName,
+                        kind = ApplicationAuthorizationRequirementKind.NOTIFICATION_LISTENER_SERVICE,
+                        actions = listOf(
+                            DeclaredApplicationAuthorizationAction.AppendSecureComponent(
+                                ManagedSecureComponentList.ENABLED_NOTIFICATION_LISTENERS,
+                                service.componentName,
+                            ),
+                        ),
+                    )
+
+                    else -> null
+                }
+            }
+        return permissionRequirements + serviceRequirements
+    }
+
+    private fun serviceBelongsToPackage(componentName: String, packageName: String): Boolean =
+        componentName.substringBefore('/', missingDelimiterValue = "") == packageName &&
+            COMPONENT_PATTERN.matches(componentName)
+
+    private fun runtimeGrantPermissions(declarations: ApkDeclarationMetadata): Set<String> =
+        declarations.runtimeGrantPermissions ?: declarations.requestedPermissions.filter { permission ->
+            permission in DEFAULT_DANGEROUS_PERMISSIONS
+        }.toSet()
+
+    private val APP_OP_BY_PERMISSION = mapOf(
+        "android.permission.SYSTEM_ALERT_WINDOW" to ManagedAppOp.SYSTEM_ALERT_WINDOW,
+        "android.permission.REQUEST_INSTALL_PACKAGES" to ManagedAppOp.REQUEST_INSTALL_PACKAGES,
+        "android.permission.READ_EXTERNAL_STORAGE" to ManagedAppOp.READ_EXTERNAL_STORAGE,
+        "android.permission.WRITE_EXTERNAL_STORAGE" to ManagedAppOp.WRITE_EXTERNAL_STORAGE,
+        "android.permission.PACKAGE_USAGE_STATS" to ManagedAppOp.GET_USAGE_STATS,
+        "android.permission.WRITE_SETTINGS" to ManagedAppOp.WRITE_SETTINGS,
+    )
+    private val RUNTIME_PERMISSION_WITH_APP_OP = setOf(
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+    )
+    private val DEFAULT_DANGEROUS_PERMISSIONS = setOf(
+        "android.permission.READ_CALENDAR",
+        "android.permission.WRITE_CALENDAR",
+        "android.permission.CAMERA",
+        "android.permission.READ_CONTACTS",
+        "android.permission.WRITE_CONTACTS",
+        "android.permission.GET_ACCOUNTS",
+        "android.permission.ACCESS_FINE_LOCATION",
+        "android.permission.ACCESS_COARSE_LOCATION",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.READ_PHONE_STATE",
+        "android.permission.READ_PHONE_NUMBERS",
+        "android.permission.CALL_PHONE",
+        "android.permission.ANSWER_PHONE_CALLS",
+        "android.permission.ADD_VOICEMAIL",
+        "android.permission.USE_SIP",
+        "android.permission.PROCESS_OUTGOING_CALLS",
+        "android.permission.BODY_SENSORS",
+        "android.permission.BODY_SENSORS_BACKGROUND",
+        "android.permission.SEND_SMS",
+        "android.permission.RECEIVE_SMS",
+        "android.permission.READ_SMS",
+        "android.permission.RECEIVE_WAP_PUSH",
+        "android.permission.RECEIVE_MMS",
+        "android.permission.READ_EXTERNAL_STORAGE",
+        "android.permission.WRITE_EXTERNAL_STORAGE",
+        "android.permission.ACTIVITY_RECOGNITION",
+        "android.permission.READ_MEDIA_IMAGES",
+        "android.permission.READ_MEDIA_VIDEO",
+        "android.permission.READ_MEDIA_AUDIO",
+    )
+    private val PERMISSION_PATTERN = Regex(
+        "^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$",
+    )
+    private val COMPONENT_PATTERN = Regex(
+        "^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)*/[A-Za-z0-9_.$]+$",
+    )
+    private const val BIND_ACCESSIBILITY_SERVICE = "android.permission.BIND_ACCESSIBILITY_SERVICE"
+    private const val BIND_NOTIFICATION_LISTENER_SERVICE =
+        "android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
+}
 
 data class InstallableArtifact(
     val manifest: ArtifactManifest,
@@ -353,7 +597,7 @@ data class AuthorizationPlan(
     val version: Int,
     val components: List<ManagedComponent>,
     val actions: List<AuthorizationAction>,
-    /** APK-derived service identities frozen for this authorization transaction. */
+    /** APK-derived service identities used for this one authorization transaction. */
     val runtimeServiceOverrides: Map<String, List<String>> = emptyMap(),
 )
 
@@ -362,6 +606,8 @@ data class ManagedComponent(
     val packageName: String,
     val setup: AuthorizationSetupDeclaration? = null,
     val order: Int = Int.MAX_VALUE,
+    /** Runtime-resolved launcher identity for applications outside the catalog. */
+    val launchComponent: String? = null,
 )
 
 sealed interface AuthorizationAction {
@@ -401,6 +647,8 @@ enum class ManagedAppOp(val wireName: String) {
     REQUEST_INSTALL_PACKAGES("REQUEST_INSTALL_PACKAGES"),
     READ_EXTERNAL_STORAGE("READ_EXTERNAL_STORAGE"),
     WRITE_EXTERNAL_STORAGE("WRITE_EXTERNAL_STORAGE"),
+    GET_USAGE_STATS("GET_USAGE_STATS"),
+    WRITE_SETTINGS("WRITE_SETTINGS"),
 }
 
 enum class ManagedRuntimePermission(val wireName: String) {
@@ -620,22 +868,21 @@ object AuthorizationPlanFactory {
             return AuthorizationPlanBuildResult.Rejected("authorization_component_unapproved")
         }
         if (declaredServicesByComponent.any { (componentId, services) ->
-                val component = components.firstOrNull { it.componentId == componentId } ?: return@any true
+                val requiredComponent = components.firstOrNull { it.componentId == componentId } ?: return@any true
                 val accessibilityCount = services.count {
                     it.permission == "android.permission.BIND_ACCESSIBILITY_SERVICE" &&
-                        serviceBelongsToPackage(it.componentName, component.packageName)
+                        serviceBelongsToPackage(it.componentName, requiredComponent.packageName)
                 }
                 val notificationCount = services.count {
                     it.permission == "android.permission.BIND_NOTIFICATION_LISTENER_SERVICE" &&
-                        serviceBelongsToPackage(it.componentName, component.packageName)
+                        serviceBelongsToPackage(it.componentName, requiredComponent.packageName)
                 }
                 when (componentId) {
                     DESKTOP_COMPONENT_ID -> accessibilityCount > 1
                     LYRICS_COMPONENT_ID -> notificationCount > 1 || accessibilityCount > 1
                     else -> false
                 }
-            }
-        ) {
+            }) {
             return AuthorizationPlanBuildResult.Rejected("authorization_service_ambiguous")
         }
         if (requireDesktop && components.none { it.componentId == DESKTOP_COMPONENT_ID }) {
@@ -668,19 +915,23 @@ object AuthorizationPlanFactory {
         if (plan.runtimeServiceOverrides.any { (componentId, services) ->
                 val component = plan.components.firstOrNull { it.componentId == componentId } ?: return@any true
                 services.isEmpty() || services.distinct().size != services.size ||
-                    services.any { !serviceBelongsToPackage(it, component.packageName) }
-            }
-        ) return false
+                    services.any { service -> !serviceBelongsToPackage(service, component.packageName) }
+            }) return false
         return plan.actions == expectedComponents.flatMap { component ->
-            actionsFor(component, runtimeServiceOverride = plan.runtimeServiceOverrides[component.componentId])
+            actionsFor(
+                component,
+                runtimeServiceOverride = plan.runtimeServiceOverrides[component.componentId],
+            )
         }
     }
 
     fun requiredRuntimeService(component: ManagedComponent): String? =
         requiredRuntimeServices(component).firstOrNull()
 
+    /** Runtime verification must consume the same service frozen into the plan. */
     fun requiredRuntimeService(plan: AuthorizationPlan, component: ManagedComponent): String? =
-        plan.runtimeServiceOverrides[component.componentId]?.singleOrNull()
+        plan.runtimeServiceOverrides[component.componentId]
+            ?.singleOrNull()
             ?: requiredRuntimeService(component)
 
     fun requiredRuntimeServices(component: ManagedComponent): List<String> =
@@ -689,7 +940,7 @@ object AuthorizationPlanFactory {
             ?: managedComponent(component)?.requiredRuntimeServices.orEmpty()
 
     fun fixedLaunchComponent(component: ManagedComponent): String? =
-        component.setup?.launchComponent ?: managedComponent(component)?.fixedLaunchComponent
+        component.launchComponent ?: component.setup?.launchComponent ?: managedComponent(component)?.fixedLaunchComponent
 
     private fun actionsFor(
         component: ManagedComponent,
@@ -787,25 +1038,33 @@ object AuthorizationPlanFactory {
         return fixed + declared.filter { it.id !in fixedIds }
     }
 
+    /** Prefer the APK's actual declared service names; suffix compatibility is the fallback. */
     private fun runtimeServicesFor(
         component: ManagedComponent,
         contract: ManagedComponentContract,
         declaredServices: Set<ApkServiceDeclaration>,
     ): List<String> {
         if (declaredServices.isEmpty()) return contract.requiredRuntimeServices
-        val accessibility = declaredServices.filter {
-            it.permission == "android.permission.BIND_ACCESSIBILITY_SERVICE" &&
-                serviceBelongsToPackage(it.componentName, component.packageName)
-        }.map { it.componentName }.sorted()
-        val notification = declaredServices.filter {
-            it.permission == "android.permission.BIND_NOTIFICATION_LISTENER_SERVICE" &&
-                serviceBelongsToPackage(it.componentName, component.packageName)
-        }.map { it.componentName }.sorted()
+        val accessibility = declaredServices
+            .filter {
+                it.permission == "android.permission.BIND_ACCESSIBILITY_SERVICE" &&
+                    serviceBelongsToPackage(it.componentName, component.packageName)
+            }
+            .map { it.componentName }
+            .sorted()
+        val notification = declaredServices
+            .filter {
+                it.permission == "android.permission.BIND_NOTIFICATION_LISTENER_SERVICE" &&
+                    serviceBelongsToPackage(it.componentName, component.packageName)
+            }
+            .map { it.componentName }
+            .sorted()
         return when (component.componentId) {
-            DESKTOP_COMPONENT_ID -> accessibility.singleOrNull()?.let(::listOf)
-                ?: contract.requiredRuntimeServices
-            LYRICS_COMPONENT_ID -> listOfNotNull(notification.singleOrNull(), accessibility.singleOrNull())
-                .takeIf { it.size == 2 } ?: contract.requiredRuntimeServices
+            DESKTOP_COMPONENT_ID -> accessibility.take(1).ifEmpty { contract.requiredRuntimeServices }
+            LYRICS_COMPONENT_ID -> buildList {
+                notification.firstOrNull()?.let(::add)
+                accessibility.firstOrNull()?.let(::add)
+            }.takeIf { it.size == 2 } ?: contract.requiredRuntimeServices
             else -> contract.requiredRuntimeServices
         }
     }
@@ -857,15 +1116,18 @@ object AuthorizationPlanFactory {
         return validateSetup(component)
     }
 
+    /** Gradle applicationId suffixes do not change the Kotlin namespace. */
     private fun runtimeNamespace(packageName: String): String = packageName
         .removeSuffix(".test")
         .removeSuffix(".staging")
         .removeSuffix(".release")
 
-    private fun serviceBelongsToPackage(service: String, packageName: String): Boolean =
-        service.substringBefore('/', missingDelimiterValue = "") == packageName &&
+    private fun serviceBelongsToPackage(service: String, packageName: String): Boolean {
+        val owner = service.substringBefore('/', missingDelimiterValue = "")
+        return owner == packageName &&
             service.length <= MAX_COMPONENT_NAME_LENGTH &&
             COMPONENT_NAME_PATTERN.matches(service)
+    }
 
     private fun validateSetup(component: ManagedComponent): Boolean {
         val setup = component.setup ?: return true
@@ -1039,6 +1301,8 @@ object AuthorizationDeclarationValidator {
                         ManagedAppOp.REQUEST_INSTALL_PACKAGES -> PERMISSION_REQUEST_INSTALL_PACKAGES
                         ManagedAppOp.READ_EXTERNAL_STORAGE -> PERMISSION_READ_EXTERNAL_STORAGE
                         ManagedAppOp.WRITE_EXTERNAL_STORAGE -> PERMISSION_WRITE_EXTERNAL_STORAGE
+                        ManagedAppOp.GET_USAGE_STATS -> PERMISSION_PACKAGE_USAGE_STATS
+                        ManagedAppOp.WRITE_SETTINGS -> PERMISSION_WRITE_SETTINGS
                     }
                     if (permission !in declarations.requestedPermissions) {
                         return DeviceActionFailure(
@@ -1101,6 +1365,8 @@ object AuthorizationDeclarationValidator {
     private const val PERMISSION_REQUEST_INSTALL_PACKAGES = "android.permission.REQUEST_INSTALL_PACKAGES"
     private const val PERMISSION_READ_EXTERNAL_STORAGE = "android.permission.READ_EXTERNAL_STORAGE"
     private const val PERMISSION_WRITE_EXTERNAL_STORAGE = "android.permission.WRITE_EXTERNAL_STORAGE"
+    private const val PERMISSION_PACKAGE_USAGE_STATS = "android.permission.PACKAGE_USAGE_STATS"
+    private const val PERMISSION_WRITE_SETTINGS = "android.permission.WRITE_SETTINGS"
     private const val PERMISSION_BIND_NOTIFICATION_LISTENER_SERVICE =
         "android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
     private const val PERMISSION_BIND_ACCESSIBILITY_SERVICE = "android.permission.BIND_ACCESSIBILITY_SERVICE"

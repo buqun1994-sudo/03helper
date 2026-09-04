@@ -1,18 +1,42 @@
-# 2026-09-04 单项维护批次边界收口与 1.0.9 staging 收尾（已安装手机，待合并主测）
+# 2026-09-04 单项维护批次边界收口与 ce2777c 合入复包（已覆盖安装测试手机）
 
 1. 本轮将“用户点击更新的目标”和“已安装运行前置”拆成独立批次语义。单独更新 03投屏时，03桌面只能作为已验证前置保留，不能进入制品准备、设备安装、授权、启动或结果收据；这修复的是批次边界缺陷，桌面悬浮条闪烁只是旧链路重装桌面的可观察后果。
 2. 初始化库存、制品准备、维护检查和设备执行现由同一串行 owner 管理；替换操作会取消并等待旧任务退出。维护终态清除旧收据，初始化完成库存独立持久化，单项更新不会抹掉完整库存，因此“完成”后冷启动应稳定进入维护态。
 3. 授权计划、维护检查和运行验证均优先使用已验证 APK 的实际 `applicationId` 与 Manifest Service；不按 debug / staging / release 包名写死。同用途多个 Service 或跨包 Service 会 fail closed，不会猜测目标。实际 staging 03桌面 APK 已核对包含对应声明，旧“授权未完成”归属助手的静态身份裁决，不归属 03桌面缺少声明。
 4. 已通过 `:app:testDebugUnitTest`（334 项，0 failures / 0 errors / 0 skipped）、`compileDebugAndroidTestKotlin`、`lintDebug`、`assembleDebug`、`assembleDebugAndroidTest`、本地环境与文档 / Skill / diff 检查。新增时序回归覆盖“投屏失败 -> 返回维护 -> 再检查更新 -> 再次只更新投屏”，第二次设备执行集合与结果收据都只含投屏。
-5. Cloud 统一 staging 入口已生成桌面产物 `03车机助手-staging-v1.0.9-test.apk` 与对应 ZIP：包名 `com.ninepointnine.helper.test`、版本 `1.0.9-test (10)`；APK SHA-256 为 `c0a856a73d53105ac9e70c54a2e54b770c3108079626084464ec61060c1e1455`，ZIP SHA-256 为 `eabe04cd380f2028d0c363a3097977f0417a44929c09205a467a01041e1540ba`。单 signer、staging 证书 SHA-256 `aca4f178fea11ccc97a1373c8aa5345b274a3a783398929a9340a79ee83663af`、APK v2 和 ZIP 单 APK 完整性均已核对。
-6. 显式测试手机 RMX1901 已保留数据覆盖安装该 staging APK，并回读包名、版本和 Launcher；启动后 `MainActivity` 为前台 Activity。AndroidTest 两次都在 ColorOS 安装测试包阶段返回 `-99`，显示 `Starting 0 tests`，因此未将 instrumentation 记为通过。未清数据、未卸载、未降级、未重启，未对车机执行任何写入。
-7. 合并后仅需人工验证四项：全装状态点击“完成”后冷启动直接进维护页；单独更新 03投屏时桌面不闪烁且结果只含投屏；投屏失败返回后再次检查更新不再停在“正在准备”；更新桌面后“重新授权”能按实际 APK Service 改变状态。
+5. Cloud 统一 staging 入口已生成桌面产物 `03车机助手-staging-v1.0.10-test.apk` 与对应 ZIP：包名 `com.ninepointnine.helper.test`、版本 `1.0.10-test (11)`；本次合入复包 APK SHA-256 为 `75bc6137adccf2ac2dd7feda2da12f54034ca801b544f8606171582cef1a151e`，ZIP SHA-256 为 `d4b1ba56165df75dd4f6750d0dace529a33a87259f69f7c3a780809c5dacf7d7`。单 signer、staging 证书 SHA-256 `aca4f178fea11ccc97a1373c8aa5345b274a3a783398929a9340a79ee83663af`、APK v2 和 ZIP 单 APK 完整性均已核对。
+6. 显式测试手机 RMX1901 已使用该 staging APK 保留数据覆盖安装，回读包名 `com.ninepointnine.helper.test`、版本 `1.0.10-test (11)` 和 Launcher 入口；`MainActivity` 已进入 `ResumedActivity`。未清数据、未卸载、未降级、未重启，未对车机执行任何写入。
+7. `ce2777c` 已快进合入当前 `main`；合入时保留了工作树维护 / UI 改动，并将持久化基线冲突解析为“保留受控初始库存、过滤第三方行”。完整 JVM 测试、AndroidTest Kotlin 编译、Lint、Debug 主包和 AndroidTest 包构建均通过。
+8. Cloud 共享登记库仍记录旧的 `d977477` HEAD，因此 `node scripts/check-03app-repository.mjs` 当前仅报告登记快照落后，不影响本次本地 staging 打包；未修改 Cloud 仓库登记或推送。
 
 # 2026-09-04 初始化与授权生命周期修复收尾（staging 已生成，设备 smoke 阻断）
 
-1. 本轮隔离提交为 `c3078ae`（初始化完成持久化、动态 Manifest 授权计划、维护任务取消与授权状态收口）、`2ad193b`（1.0.7 版本递增）和 `a0c325a`（1.0.8 / versionCode 9 版本递增）；主工作区另一对话的未提交改动未进入这些提交。
-2. 通过 Cloud 统一 staging 入口生成 `03车机助手-staging-v1.0.8-test.apk` 与对应 ZIP。APK 为 `com.ninepointnine.helper.test`、`1.0.8-test (9)`，大小 `21,096,048` 字节，SHA-256 `8a075e8fdb292c96578b5116697548b995bf3992fd628e85cc87d83d67986582`；staging 证书 SHA-256 为 `aca4f178fea11ccc97a1373c8aa5345b274a3a783398929a9340a79ee83663af`，单 signer、APK Signature Scheme v2 通过。ZIP 大小 `20,160,268` 字节，SHA-256 `c53d75e3bcdb9abefc61279df0cc54eac5c80ff377d27f6a189a8dc4918b755b`，只含同一 APK 且解压后摘要一致。
-3. 当前隔离分支 `:app:testDebugUnitTest` 为 `328` 项全部通过；项目文档、Skills、版本检查和 `git diff --check` 通过。显式测试手机 ADB 设备列表为空，本轮未执行覆盖安装与运行级 smoke；未安装 release、未操作车机、未推送、未发布。
+1. 版本源 `release-version.properties` 已升级为 `1.0.10` / `versionCode=11`；通过 Cloud 统一入口生成 `03车机助手-staging-v1.0.10-test.apk` 与对应 ZIP，输出目录为桌面目录 `03系列测试包-新`。
+2. APK 包名为 `com.ninepointnine.helper.test`，版本为 `1.0.10-test (11)`，staging 证书 SHA-256 为 `aca4f178fea11ccc97a1373c8aa5345b274a3a783398929a9340a79ee83663af`，APK Signature Scheme v2 校验通过。
+3. APK 大小 `21,172,412` 字节，SHA-256 为 `219cfe4107d32b453516b1ce86a1e008d78c7f16d15d7ead93c4cdb57693e755`；ZIP 大小 `20,218,014` 字节，SHA-256 为 `06c889b20f31a1f87a850a998781b58df10d0ef0df8d8409d2357ab917421bdb`。ZIP 单 APK 条目与完整性校验通过；未安装、未部署、未上传、未提交或推送。
+
+# 2026-09-04 管理应用全量库存、展开操作与动态授权（代码完成，待车机主测）
+
+1. 管理页已沿 `InstallationSession` 唯一主链改为消费 03桌面桥接的完整第三方库存，按首次安装时间倒序；应用包名是行身份，正式 / 测试 / 历史包不会因组件别名合并。桥接协议 v2 的 summary、连续行号和 SHA-256 收据不通过时整批失败，禁止静默展示部分列表。
+2. 应用卡片支持单一展开态和收起态；收起态显示桥接图标、真实显示名、版本、包名，展开态按启动、强行停止、清除数据、一键授权、卸载、应用详情排列。动作统一复用蓝色弹窗或底部反馈，所有动作运行期间全局禁用应用卡片。
+3. 清除数据使用 `cmd package clear --user 0` 并回读包仍存在；授权按 APK 声明扫描、类型化执行、逐项回读和最终聚合，普通 / 签名权限只展示为系统管理，不计入可自动授权成功率。授权逐项失败不阻断后续项并保留原因。
+4. 持久化投影已与管理页实时库存隔离：只保存受控组件或已验证 manifest 对应的维护基线，第三方行、桥接图标、详情、启动入口和授权临时状态均不落盘；全局 APK 图标链不再消费第三方库存，第三方图标只走 03桌面按包名桥接。应用详情统一按包名匹配，卸载成功显示独立完成反馈。
+5. 03helper 的 `353` 项 Debug JVM 单测（0 failures / 0 errors / 0 skipped）、Debug Lint、主包与 AndroidTest 包构建、项目文档、Skills 和 `git diff --check` 已通过；主包为 `com.ninepointnine.helper.test`、`1.0.7-test (8)`、v2 签名有效，SHA-256 为 `a07973673633c4461e10ad6a689a8cd389b7b5f8f347a106b1ff61f73a50e46f`。03desktop 的 `46` 项 Debug JVM 单测、Debug Lint、构建、Android 配置和项目检查已通过。目标车机上的桥接 `content query` 返回 6 个完整非系统应用，并已只读验证中文名称、版本、安装时间倒序及单包 PNG 图标。
+6. 测试手机现有 `com.ninepointnine.helper.test` 为 `1.0.8-test (9)`，而并行施工尚未提交且工作树版本文件暂为 `1.0.7 (8)`；为避免降级，本轮没有覆盖安装助手或运行 instrumentation。尚未执行真实管理页 UI、清数据或一键授权写入，不能将这些行为标记为已通过。
+
+# 2026-09-03 初始化闭环、动态授权与维护任务取消（施工完成，待手机 / 车机主测）
+
+1. 初始化库存发现已增加独立的 `initialInstallationCompleted` 持久化事实；全部受控应用已安装且包含 03 桌面时点击“完成”后可在冷启动直接恢复维护入口，不伪造 APK manifest，也不授予旧 APK 复用权限。
+2. 授权根因确认在 03helper：变体 `applicationId` 与 Kotlin namespace 被错误拼接，导致实际声明的 Service 被判定为未声明；现已由 APK 实际包名与 Manifest Service 声明生成动态计划，安装 / 更新 / 维护检查 / 修复统一消费，维护检查缓存缺失时按受控 APK 路径读取声明，跨包 Service、未声明能力和同用途多 Service 在设备写入前拒绝。用户提供的 03桌面 APK 已确认声明 `BIND_ACCESSIBILITY_SERVICE`，不是应用漏声明。
+3. 维护二级页离开时统一取消库存、清单、制品和维护任务，释放旧任务引用，避免返回后共享 ADB 租约被旧协程占用并长期停在“正在准备”。
+4. 新增变体 namespace / applicationId、跨包 Service、同用途多 Service 回归；定向授权、维护控制器和全量工程验证待本轮 JDK 17 构建后复跑。当前未对车机执行写入。
+
+# 2026-09-03 03 APP staging 测试包升级（完成，待用户主测）
+
+1. 核对蓝奏链接 `https://wwatl.lanzouw.com/b0fqm09oh`：页面 HTTP 200，标题为 `03test-staing1`，根目录包含当前旧版本的 03车机助手、03桌面、03投屏、03歌词和文件管理器 APK / ZIP；当前 03helper 测试配置和 Cloud 文档仍指向 `https://wwatl.lanzouw.com/b0fqlrcyb`，本轮未修改线上配置或上传文件。
+2. 按各客户端唯一 `release-version.properties` 递增版本：03车机助手 `1.0.7 / 8`、03桌面 `1.0.2-icar03 / 3`、03投屏 `1.0.3-icar03 / 4`；Cloud 共享登记与产品身份文档已同步，旧正式产物标记为历史快照以保持登记校验闭环。
+3. 通过 Cloud 统一 staging 入口生成到桌面目录 `03系列测试包-新`：03车机助手 APK / ZIP SHA-256 分别为 `ab603d4174158848c6493f4bb4399b9d482e2c459b7ffdf7828c809c07251e54` / `52d63531fcf6b3f9213b20c02be1237b15863af843dfaa10b4388db00d35a14d`；03桌面分别为 `23a1a541f58777b076cc1c4d272ccdac3c469944a369349594bc485cfc6e3ecc` / `fb09f2c3dc6ad51e34ed05cce17f60d36b27d5d87ea8268b375d228f0c2f8767`；03投屏分别为 `f0bf1714bd6857bbb888ff0e7107fdd409fb9d82120ea43eff9e5fc629976298` / `65b3fe9ba2919db0200c463b97d18b1af7d97b968a5599422d42fb78f005e10d`。
+4. 统一打包器已完成包名、版本、staging 证书、APK v2 签名和 ZIP 单 APK 校验；未执行蓝奏上传、Cloud 部署、车机安装或提交 / 推送。
 
 # 2026-09-03 测试机 Debug 覆盖安装与 instrumentation smoke（完成，车机业务链待主测）
 
@@ -44,7 +68,7 @@
 5. 正式产物已覆盖桌面目录 `03系列正式发布包-中文名称-20260830`：`03车机助手-v1.0.6.apk`（14,261,467 字节，SHA-256 `ee4df5607351959411cdb043956a10ca3d982a94e60e5622a81ac555152d8d00`）及对应 ZIP（13,458,596 字节，SHA-256 `48d08ac7404d6e3acecf259421cdcb8334a27c1a58c3325a9dad0a1327b89ccc`）。两 ZIP 均只含对应 APK，UTF-8 文件名标志和归档内外字节一致；APK 包名、版本、单 signer 与 v2 签名已核对。
 6. `check-project-docs.mjs`、`check-skills.mjs`、`check-local-environment.mjs` 和 `git diff --check` 均通过。`check-03app-repository.mjs` 仅因共享登记仍记录 `1.0.5 (6)` 且登记快照为 clean 而 fail closed；未修改共享 Cloud 登记库、未上传、未发布、未安装到手机或车机。
 
-# 2026-09-02 管理已安装应用目标模式恢复与双环境产物（完成，待用户手动测试）
+# 2026-09-02 管理已安装应用目标模式恢复与双环境产物（历史方案，已由 2026-09-04 全量库存主链取代）
 
 1. 已撤销全量第三方应用库存、第三方详情资产缓存和第三方四项动作路由；管理页恢复为只展示签名配置 / 已验证 manifest 中声明的受控组件。
 2. 受控库存通过 `MaintenanceController.inspectApplications` 按允许包名读取，未知包和第三方包不会进入会话或 UI；不执行 `pm list packages --user 0 -3`，不为列表自动传输或解析 APK。
@@ -827,9 +851,3 @@ F2 Debug APK 已按用户授权安装到指定手机。该段记录的是 F2 交
 3. 最终手机交付使用显式 serial `adb-RFCX412AN1X-gWfMRD._adb-tls-connect._tcp` 保留数据覆盖安装，安装返回 `Success`，包身份、版本和启动入口核对一致；`.codex/local-context.properties` 已同步为该 serial。历史进度中的旧 serial 文本保留作审计，不再作为当前设备配置。
 4. 当前样本车机 `S56_HQX`（Android 9，`192.168.0.203:5555`）只读回读已确认 03桌面、03歌词和 03投屏库存，授权状态为正常；Android 9 缩写 Service 证据为 `requested=true`、`received=true`、`hasBound=true`。本轮没有对车机执行安装、授权写入、清数据、卸载、降级或重启。
 5. 文档长期总纲、验证矩阵和代码规则已同步当时边界；`check-project-docs.mjs`、`check-skills.mjs` 和 `git diff --check` 通过。该段交接时要求的完整“安装应用”主链及连续批次结果已由本文件顶部 2026-08-28 真实车机复测覆盖；维护基线保存警告仍是独立待测项。本轮不提交、不推送、不发布。
-# 2026-09-03 初始化闭环、动态授权与维护任务取消（完成）
-
-1. 初始化库存已增加独立的 `initialInstallationCompleted` 持久化事实；全部受控应用已安装且包含 03桌面时，点击“完成”后冷启动直接恢复维护入口，不伪造 APK manifest 或安装收据。
-2. 授权失败根因在 03helper：旧逻辑把 APK 的实际 `applicationId` 同时当成 Kotlin namespace，错误拼接 Service。现改为由已校验 APK Manifest 的实际声明生成授权计划，安装、更新、维护检查、修复和运行验证复用同一计划；跨包 Service 和同用途多 Service 均在写入前拒绝。
-3. 离开维护二级页时统一取消库存、清单、制品和维护任务，避免旧任务继续持有共享设备租约，使再次进入“管理已安装应用”或“检查更新”长期停在“正在准备”。
-4. JVM 全量单测已通过；手机 Debug 覆盖安装与车机授权写入未在隔离分支执行，设备实测仍按收尾记录为准。

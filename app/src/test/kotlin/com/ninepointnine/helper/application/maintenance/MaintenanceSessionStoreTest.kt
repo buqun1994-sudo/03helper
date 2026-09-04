@@ -6,11 +6,13 @@ import com.ninepointnine.helper.domain.artifact.ArtifactSourceKind
 import com.ninepointnine.helper.domain.artifact.ArtifactVersion
 import com.ninepointnine.helper.domain.artifact.AppIconAsset
 import com.ninepointnine.helper.domain.artifact.CompatibilityRange
-import com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
 import com.ninepointnine.helper.domain.artifact.toComponentDescriptor
 import com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
 import com.ninepointnine.helper.domain.device.AuthorizationSetupDeclaration
+import com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
+import com.ninepointnine.helper.domain.device.ApplicationAuthorizationRequirement
 import com.ninepointnine.helper.domain.device.DeviceCapability
+import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationState
 import com.ninepointnine.helper.domain.device.ManagedAppOp
 import com.ninepointnine.helper.domain.device.ManagedSecureComponentList
 import com.ninepointnine.helper.domain.session.DeviceConnectionStatus
@@ -22,8 +24,11 @@ import com.ninepointnine.helper.domain.session.InstallationSessionState
 import com.ninepointnine.helper.domain.session.MaintenanceActionId
 import com.ninepointnine.helper.domain.session.MaintenanceActionRecord
 import com.ninepointnine.helper.domain.session.MaintenanceActionStatus
+import com.ninepointnine.helper.domain.session.MaintenanceApplicationActionId
+import com.ninepointnine.helper.domain.session.MaintenanceApplicationActionRecord
 import com.ninepointnine.helper.domain.session.MaintenanceInventoryState
 import com.ninepointnine.helper.domain.session.ManagedApplicationStatus
+import com.ninepointnine.helper.domain.session.ManagedApplicationDetails
 import com.ninepointnine.helper.domain.session.MaintenanceSnapshot
 import com.ninepointnine.helper.domain.session.SessionEvidence
 import com.ninepointnine.helper.domain.session.ArtifactCatalogStage
@@ -265,8 +270,17 @@ class MaintenanceSessionStoreTest {
         val file = Files.createTempDirectory("maintenance-store-initial-complete")
             .resolve("session.json")
             .toFile()
-        val base = maintenanceSnapshot(manifests(1L), emptyList()).copy(artifactManifests = emptyList())
+        val base = maintenanceSnapshot(manifests(1L), emptyList()).copy(
+            artifactManifests = emptyList(),
+        )
         val snapshot = base.copy(
+            components = base.components + ComponentDescriptor(
+                id = "app-third-party",
+                displayName = "Third party",
+                required = false,
+                status = ComponentStatus.UNLISTED,
+                errorReason = "unlisted",
+            ),
             evidence = SessionEvidence(
                 installed = setOf("desktop", "lyrics"),
                 configured = setOf("desktop", "lyrics"),
@@ -276,30 +290,159 @@ class MaintenanceSessionStoreTest {
                 managedApplicationsState = MaintenanceInventoryState.READY,
                 managedApplications = listOf(
                     ManagedApplicationStatus(
-                        "desktop",
-                        InstallerComponentTrustRegistry.CURRENT_DESKTOP_TEST_PACKAGE_NAME,
+                        componentId = "app-desktop-observed",
+                        packageName = InstallerComponentTrustRegistry.CURRENT_DESKTOP_TEST_PACKAGE_NAME,
                         installed = true,
                         versionCode = 2L,
                     ),
                     ManagedApplicationStatus(
-                        "lyrics",
-                        InstallerComponentTrustRegistry.CURRENT_LYRICS_TEST_PACKAGE_NAME,
+                        componentId = "app-lyrics-observed",
+                        packageName = InstallerComponentTrustRegistry.CURRENT_LYRICS_TEST_PACKAGE_NAME,
                         installed = true,
                         versionCode = 2L,
+                    ),
+                    ManagedApplicationStatus(
+                        componentId = "app-third-party",
+                        packageName = "com.example.thirdparty",
+                        installed = true,
+                        displayName = "Third party",
+                        versionCode = 7L,
+                        iconBase64 = "third-party-icon",
+                        launchComponent = "com.example.thirdparty/.MainActivity",
+                        authorizationState = MaintenanceAuthorizationState.AUTHORIZED,
                     ),
                 ),
                 availableComponents = base.components,
                 initialInstallationCompleted = true,
+                applicationAction = MaintenanceApplicationActionRecord(
+                    packageName = "com.example.thirdparty",
+                    actionId = MaintenanceApplicationActionId.AUTHORIZE,
+                    status = MaintenanceActionStatus.RUNNING,
+                ),
+                applicationDetails = ManagedApplicationDetails(
+                    componentId = "app-third-party",
+                    displayName = "Third party",
+                    packageName = "com.example.thirdparty",
+                ),
+                applicationAuthorizationRequirements = listOf(
+                    ApplicationAuthorizationRequirement(
+                        permission = "android.permission.CAMERA",
+                        grantedBefore = false,
+                        grantedAfter = true,
+                    ),
+                ),
             ),
         )
         val store = MaintenanceSessionStore(file)
 
         assertTrue(store.save(snapshot))
         val restored = store.load() ?: error("initial_completion_not_restored")
+
         assertTrue(restored.maintenance.initialInstallationCompleted)
         assertTrue(restored.maintenance.installedManifests.isEmpty())
         assertEquals(MaintenanceInventoryState.READY, restored.maintenance.managedApplicationsState)
         assertEquals(setOf("desktop", "lyrics"), restored.evidence.installed)
+        assertEquals(
+            setOf("desktop", "lyrics"),
+            restored.maintenance.managedApplications.map { it.componentId }.toSet(),
+        )
+        assertTrue(restored.maintenance.managedApplications.all {
+            it.iconBase64 == null && it.authorizationState == null && it.launchComponent == null
+        })
+        assertTrue(restored.components.none { it.id == "app-third-party" })
+        assertNull(restored.maintenance.applicationAction)
+        assertNull(restored.maintenance.applicationDetails)
+        assertTrue(restored.maintenance.applicationAuthorizationRequirements.isEmpty())
+    }
+
+    @Test
+    fun `full third party inventory cannot enter a verified maintenance baseline`() {
+        val file = Files.createTempDirectory("maintenance-store-third-party")
+            .resolve("session.json")
+            .toFile()
+        val desktop = manifest("desktop", 1L, required = true)
+        val base = maintenanceSnapshot(listOf(desktop), listOf(desktop))
+        val snapshot = base.copy(
+            components = base.components,
+            evidence = SessionEvidence(installed = setOf("desktop", "app-third-party")),
+            maintenance = base.maintenance.copy(
+                installedManifests = listOf(desktop),
+                availableComponents = base.components,
+                managedApplicationsState = MaintenanceInventoryState.READY,
+                managedApplications = listOf(
+                    ManagedApplicationStatus(
+                        componentId = "app-desktop-observed",
+                        packageName = desktop.packageName,
+                        installed = true,
+                        versionCode = desktop.apkVersion.code,
+                    ),
+                    ManagedApplicationStatus(
+                        componentId = "app-third-party",
+                        packageName = "com.example.thirdparty",
+                        installed = true,
+                        versionCode = 7L,
+                        authorizationState = MaintenanceAuthorizationState.NOT_AUTHORIZED,
+                    ),
+                ),
+            ),
+        )
+        val store = MaintenanceSessionStore(file)
+
+        assertTrue(store.save(snapshot))
+        val restored = store.load() ?: error("snapshot_not_restored")
+
+        assertEquals(listOf("desktop"), restored.components.map { it.id })
+        assertEquals(listOf("desktop"), restored.maintenance.managedApplications.map { it.componentId })
+        assertEquals(setOf("desktop"), restored.evidence.installed)
+        assertTrue(file.readText().contains("com.example.thirdparty").not())
+    }
+
+    @Test
+    fun `initial completion keeps a configured dynamic component without inventing a manifest`() {
+        val file = Files.createTempDirectory("maintenance-store-initial-dynamic")
+            .resolve("session.json")
+            .toFile()
+        val desktop = manifest("desktop", 1L, required = true)
+        val base = maintenanceSnapshot(listOf(desktop), emptyList())
+        val notes = ComponentDescriptor(
+            id = "notes",
+            displayName = "Notes",
+            required = false,
+        )
+        val snapshot = base.copy(
+            components = base.components + notes,
+            artifactManifests = emptyList(),
+            evidence = SessionEvidence(installed = setOf("desktop", "notes")),
+            maintenance = base.maintenance.copy(
+                initialInstallationCompleted = true,
+                installedManifests = emptyList(),
+                availableComponents = base.components + notes,
+                managedApplicationsState = MaintenanceInventoryState.READY,
+                managedApplications = listOf(
+                    ManagedApplicationStatus(
+                        componentId = "desktop",
+                        packageName = desktop.packageName,
+                        installed = true,
+                    ),
+                    ManagedApplicationStatus(
+                        componentId = "notes",
+                        packageName = "com.example.notes",
+                        installed = true,
+                    ),
+                ),
+            ),
+        )
+        val store = MaintenanceSessionStore(file)
+
+        assertTrue(store.save(snapshot))
+        val restored = store.load() ?: error("snapshot_not_restored")
+
+        assertEquals(setOf("desktop", "notes"), restored.evidence.installed)
+        assertEquals(
+            setOf("desktop", "notes"),
+            restored.maintenance.managedApplications.map { it.componentId }.toSet(),
+        )
+        assertTrue(restored.maintenance.installedManifests.isEmpty())
     }
 
     @Test
@@ -493,7 +636,7 @@ class MaintenanceSessionStoreTest {
     }
 
     @Test
-    fun `installed unlisted component is restored only once`() {
+    fun `unverified unlisted component is removed from the durable baseline`() {
         val file = Files.createTempDirectory("maintenance-store-unlisted").resolve("session.json").toFile()
         val desktop = manifest("desktop", 1L, required = true)
         val base = maintenanceSnapshot(listOf(desktop), listOf(desktop)).copy(
@@ -520,7 +663,9 @@ class MaintenanceSessionStoreTest {
 
         assertTrue(store.save(snapshot))
         val restored = store.load() ?: error("snapshot_not_restored")
-        assertEquals(1, restored.components.count { it.id == "legacy" })
+        assertEquals(0, restored.components.count { it.id == "legacy" })
+        assertTrue("legacy" !in restored.evidence.installed)
+        assertTrue(restored.maintenance.managedApplications.none { it.componentId == "legacy" })
     }
 
     private fun maintenanceSnapshot(

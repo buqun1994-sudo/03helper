@@ -8,6 +8,7 @@ import com.ninepointnine.helper.domain.artifact.ArtifactManifest
 import com.ninepointnine.helper.domain.artifact.ArtifactVerification
 import com.ninepointnine.helper.domain.artifact.SourceSelectionEvidence
 import com.ninepointnine.helper.domain.device.ManagedApplicationAuthorizationStatus
+import com.ninepointnine.helper.domain.device.ApplicationAuthorizationResultValue
 
 /** Commands accepted by the single installation-session owner. */
 sealed interface InstallationSessionCommand {
@@ -47,7 +48,7 @@ sealed interface InstallationSessionCommand {
     data object LeaveMaintenanceAction : InstallationSessionCommand
     data class MaintenanceAction(val actionId: MaintenanceActionId) : InstallationSessionCommand
     data class MaintenanceApplicationAction(
-        val componentId: String,
+        val packageName: String,
         val actionId: MaintenanceApplicationActionId,
     ) : InstallationSessionCommand
     data class ToggleMaintenanceInstallationComponent(
@@ -167,8 +168,13 @@ sealed interface InstallationSessionEvent {
         val applications: List<ManagedApplicationStatus>,
     ) : InstallationSessionEvent
 
+    data class MaintenanceApplicationIconResolved(
+        val packageName: String,
+        val iconBase64: String?,
+    ) : InstallationSessionEvent
+
     data class MaintenanceApplicationActionCompleted(
-        val componentId: String,
+        val packageName: String,
         val actionId: MaintenanceApplicationActionId,
         val resultCode: String = "completed",
         /** Fresh car inventory read after a destructive application action. */
@@ -179,7 +185,7 @@ sealed interface InstallationSessionEvent {
     ) : InstallationSessionEvent
 
     data class MaintenanceApplicationActionFailed(
-        val componentId: String,
+        val packageName: String,
         val actionId: MaintenanceApplicationActionId,
         val reasonCode: String,
         val retryable: Boolean = true,
@@ -187,6 +193,15 @@ sealed interface InstallationSessionEvent {
 
     data class MaintenanceApplicationDetailsResolved(
         val details: ManagedApplicationDetails,
+    ) : InstallationSessionEvent
+
+    data class MaintenanceApplicationAuthorizationResolved(
+        val actionId: MaintenanceApplicationActionId,
+        val result: ApplicationAuthorizationResultValue,
+    ) : InstallationSessionEvent
+
+    data class MaintenanceApplicationAuthorizationProgress(
+        val result: ApplicationAuthorizationResultValue,
     ) : InstallationSessionEvent
 
     data class MaintenanceAuthorizationCheckStarted(

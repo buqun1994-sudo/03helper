@@ -12,6 +12,7 @@ import com.ninepointnine.helper.domain.session.MaintenanceUpdateState
 import com.ninepointnine.helper.domain.session.MaintenanceAuthorizationFlowState
 import com.ninepointnine.helper.domain.session.MaintenanceInventoryState
 import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationState
+import com.ninepointnine.helper.domain.device.ApplicationAuthorizationRequirement
 import com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
 import com.ninepointnine.helper.domain.session.InstallationFlow
 import com.ninepointnine.helper.domain.session.InstallationResultFailureStage
@@ -93,6 +94,7 @@ sealed interface InstallUiState {
         val authorization: MaintenanceAuthorizationUi = MaintenanceAuthorizationUi(),
         val applicationAction: MaintenanceApplicationFeedback? = null,
         val applicationDetails: MaintenanceApplicationDetailsRow? = null,
+        val applicationAuthorizationRequirements: List<ApplicationAuthorizationRequirement> = emptyList(),
         val installationSelection: MaintenanceInstallationSelectionUi? = null,
         val groups: List<MaintenanceGroupId> = listOf(
             MaintenanceGroupId.COMMON,
@@ -199,6 +201,8 @@ data class MaintenanceApplicationRow(
     val filePath: String? = null,
     val uid: Int? = null,
     val iconKey: String = componentId,
+    val iconBase64: String? = null,
+    val launchComponent: String? = null,
 )
 
 data class MaintenanceUpdateRow(
@@ -227,7 +231,7 @@ data class MaintenanceAuthorizationRow(
 )
 
 data class MaintenanceApplicationFeedback(
-    val componentId: String,
+    val packageName: String,
     val actionId: MaintenanceApplicationActionId,
     val status: MaintenanceActionStatus,
     val resultCode: String? = null,
@@ -289,7 +293,7 @@ sealed interface InstallUiIntent {
     data object LeaveMaintenanceAction : InstallUiIntent
     data class MaintenanceAction(val actionId: MaintenanceActionId) : InstallUiIntent
     data class MaintenanceApplicationAction(
-        val componentId: String,
+        val packageName: String,
         val actionId: MaintenanceApplicationActionId,
     ) : InstallUiIntent
     data class ToggleMaintenanceInstallationComponent(

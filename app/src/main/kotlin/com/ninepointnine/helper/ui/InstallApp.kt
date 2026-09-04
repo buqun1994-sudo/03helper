@@ -264,12 +264,11 @@ internal fun maintenanceResultBackIntent(
     }
 }
 
-private fun buildIconRequests(snapshot: InstallationSessionSnapshot): List<ApkIconRequest> {
+internal fun buildIconRequests(snapshot: InstallationSessionSnapshot): List<ApkIconRequest> {
     val manifests = iconManifests(snapshot).associateBy { it.componentId }
     val installedApplications = snapshot.maintenance.managedApplications.associateBy { it.componentId }
     val ids = buildSet {
         addAll(snapshot.components.map { it.id })
-        addAll(snapshot.maintenance.managedApplications.map { it.componentId })
         addAll(snapshot.maintenance.installedManifests.map { it.componentId })
         addAll(snapshot.maintenance.availableManifests.map { it.componentId })
         addAll(snapshot.maintenance.installationSelection?.options.orEmpty().map { it.componentId })

@@ -2,6 +2,8 @@ package com.ninepointnine.helper.application
 
 import com.ninepointnine.helper.application.maintenance.MaintenanceController
 import com.ninepointnine.helper.application.maintenance.MaintenanceDiagnosticStore
+import com.ninepointnine.helper.application.device.DeviceConnectionSessionAdapter
+import com.ninepointnine.helper.application.device.DeviceDiscoverySessionAdapter
 import com.ninepointnine.helper.data.download.ArtifactCache
 import com.ninepointnine.helper.domain.artifact.ArtifactManifest
 import com.ninepointnine.helper.domain.artifact.ArtifactSource
@@ -9,6 +11,31 @@ import com.ninepointnine.helper.domain.artifact.ArtifactSourceKind
 import com.ninepointnine.helper.domain.artifact.ArtifactVersion
 import com.ninepointnine.helper.domain.artifact.CompatibilityRange
 import com.ninepointnine.helper.domain.device.DeviceCapability
+import com.ninepointnine.helper.domain.device.AdbCommandGateway
+import com.ninepointnine.helper.domain.device.ApkDeclarationMetadata
+import com.ninepointnine.helper.domain.device.AuthorizationPlan
+import com.ninepointnine.helper.domain.device.ConnectedDevice
+import com.ninepointnine.helper.domain.device.DeviceActionConnectionLease
+import com.ninepointnine.helper.domain.device.DeviceActionFailure
+import com.ninepointnine.helper.domain.device.DeviceConnectionAttempt
+import com.ninepointnine.helper.domain.device.DeviceConnectionCheck
+import com.ninepointnine.helper.domain.device.DeviceConnectionFactory
+import com.ninepointnine.helper.domain.device.DeviceDiscovery
+import com.ninepointnine.helper.domain.device.DeviceDiscoveryResult
+import com.ninepointnine.helper.domain.device.DeviceEndpoint
+import com.ninepointnine.helper.domain.device.DeviceIdentity
+import com.ninepointnine.helper.domain.device.DeviceInstallResult
+import com.ninepointnine.helper.domain.device.DeviceShortcut
+import com.ninepointnine.helper.domain.device.DeviceShortcutResult
+import com.ninepointnine.helper.domain.device.InstallableArtifact
+import com.ninepointnine.helper.domain.device.InstalledApplicationIconResult
+import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationResult
+import com.ninepointnine.helper.domain.device.MaintenanceCommandGateway
+import com.ninepointnine.helper.domain.device.MaintenanceDeviceResult
+import com.ninepointnine.helper.domain.device.ManagedApplicationDetailsProbeResult
+import com.ninepointnine.helper.domain.device.ManagedApplicationProbe
+import com.ninepointnine.helper.domain.device.ManagedApplicationsResult
+import com.ninepointnine.helper.domain.device.ManagedComponent
 import com.ninepointnine.helper.domain.session.ComponentDescriptor
 import com.ninepointnine.helper.domain.session.DeviceConnectionStatus
 import com.ninepointnine.helper.domain.session.DeviceSummary
@@ -17,13 +44,23 @@ import com.ninepointnine.helper.domain.session.InstallationSessionCommand
 import com.ninepointnine.helper.domain.session.InstallationSessionSnapshot
 import com.ninepointnine.helper.domain.session.InstallationSessionState
 import com.ninepointnine.helper.domain.session.MaintenanceActionId
+import com.ninepointnine.helper.domain.session.MaintenanceActionStatus
+import com.ninepointnine.helper.domain.session.MaintenanceApplicationActionId
+import com.ninepointnine.helper.domain.session.MaintenanceInventoryState
+import com.ninepointnine.helper.domain.session.MaintenanceSnapshot
 import com.ninepointnine.helper.domain.session.ManagedApplicationStatus
 import com.ninepointnine.helper.domain.session.InstallationSessionEvent
+import com.ninepointnine.helper.domain.session.InstallationStrategy
 import com.ninepointnine.helper.domain.session.SessionEvidence
 import java.nio.file.Files
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -32,6 +69,161 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class MaintenanceRuntimeTest {
+    @Test
+    fun `foreground application action cancels the remaining icon hydration queue`() = runTest {
+        val device = ConnectedDevice(
+            endpoint = DeviceEndpoint("192.0.2.1"),
+            identity = DeviceIdentity("vehicle-1", "S56_HQX", 28),
+            capabilities = setOf(DeviceCapability.ADB_TCP, DeviceCapability.IDENTITY_READ),
+        )
+        val applications = listOf(
+            ManagedApplicationProbe("app-player", "com.example.player", installed = true),
+            ManagedApplicationProbe("app-radio", "com.example.radio", installed = true),
+        )
+        val sharedAdbLock = Mutex()
+        val firstIconStarted = CompletableDeferred<Unit>()
+        val firstIconCancelled = CompletableDeferred<Unit>()
+        val foregroundActionCompleted = CompletableDeferred<Unit>()
+        val iconRequests = mutableListOf<String>()
+        val gateway = object : AdbCommandGateway, MaintenanceCommandGateway {
+            override suspend fun installBatch(
+                artifacts: List<InstallableArtifact>,
+                strategy: InstallationStrategy,
+            ): DeviceInstallResult = error("installation is outside this test")
+
+            override suspend fun runShortcut(
+                shortcut: DeviceShortcut,
+                selectedComponentIds: Set<String>,
+                authorizationPlan: AuthorizationPlan,
+            ): DeviceShortcutResult = error("shortcut is outside this test")
+
+            override suspend fun repairAuthorization(
+                manifests: List<ArtifactManifest>,
+                declarationsByComponent: Map<String, ApkDeclarationMetadata>,
+            ): MaintenanceDeviceResult = error("authorization repair is outside this test")
+
+            override suspend fun inspectManagedApplications(
+                components: List<ManagedComponent>,
+            ): ManagedApplicationsResult = ManagedApplicationsResult.Completed(applications)
+
+            override suspend fun inspectInstalledApplicationInventory(
+                components: List<ManagedComponent>,
+            ): ManagedApplicationsResult = ManagedApplicationsResult.Completed(applications)
+
+            override suspend fun inspectAllInstalledApplications(): ManagedApplicationsResult =
+                ManagedApplicationsResult.Completed(applications)
+
+            override suspend fun inspectInstalledApplicationIcon(
+                packageName: String,
+            ): InstalledApplicationIconResult = sharedAdbLock.withLock {
+                iconRequests += packageName
+                firstIconStarted.complete(Unit)
+                try {
+                    awaitCancellation()
+                } finally {
+                    firstIconCancelled.complete(Unit)
+                }
+            }
+
+            override suspend fun launchManagedComponent(component: ManagedComponent): MaintenanceDeviceResult =
+                error("managed launch is outside this test")
+
+            override suspend fun inspectComponentAuthorization(
+                components: List<ManagedComponent>,
+                installedApplications: List<ManagedApplicationProbe>,
+            ): MaintenanceAuthorizationResult = MaintenanceAuthorizationResult.Completed(emptyList())
+
+            override suspend fun performApplicationAction(
+                component: ManagedComponent,
+                actionId: MaintenanceApplicationActionId,
+            ): MaintenanceDeviceResult = sharedAdbLock.withLock {
+                foregroundActionCompleted.complete(Unit)
+                MaintenanceDeviceResult.Completed("component_stopped")
+            }
+
+            override suspend fun inspectManagedApplicationDetails(
+                component: ManagedComponent,
+            ): ManagedApplicationDetailsProbeResult = ManagedApplicationDetailsProbeResult.Failed(
+                DeviceActionFailure("details_are_outside_this_test", retryable = false),
+            )
+        }
+        val lease = object : DeviceActionConnectionLease {
+            override val device: ConnectedDevice = device
+            override val commandGateway: AdbCommandGateway = gateway
+            override suspend fun check(): DeviceConnectionCheck = DeviceConnectionCheck(true)
+            override fun close() = Unit
+        }
+        val controller = MaintenanceController(
+            artifactCache = ArtifactCache(Files.createTempDirectory("maintenance-icon-hydration").toFile()),
+            diagnosticStore = MaintenanceDiagnosticStore(
+                Files.createTempDirectory("maintenance-icon-diagnostics").toFile(),
+            ),
+        )
+        val runtime = InstallerRuntime(
+            session = InstallationSession(
+                initialSnapshot = maintenanceSnapshot().copy(
+                    device = maintenanceSnapshot().device?.copy(
+                        connectionStatus = DeviceConnectionStatus.DISCONNECTED,
+                    ),
+                ),
+            ),
+            createDiscoveryAdapter = { port ->
+                DeviceDiscoverySessionAdapter(
+                    discovery = object : DeviceDiscovery {
+                        override suspend fun discover(
+                            onDevice: suspend (ConnectedDevice) -> Unit,
+                        ): DeviceDiscoveryResult {
+                            onDevice(device)
+                            return DeviceDiscoveryResult(scannedCount = 1, confirmedCount = 1)
+                        }
+
+                        override fun cancel() = Unit
+                    },
+                    eventPort = port,
+                )
+            },
+            createConnectionAdapter = { port ->
+                DeviceConnectionSessionAdapter(
+                    connectionFactory = DeviceConnectionFactory {
+                        DeviceConnectionAttempt.Connected(lease)
+                    },
+                    eventPort = port,
+                )
+            },
+            loadCatalog = {},
+            maintenanceController = controller,
+            coroutineContext = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        runtime.dispatch(InstallationSessionCommand.Reconnect)
+        advanceUntilIdle()
+        runtime.dispatch(InstallationSessionCommand.MaintenanceAction(MaintenanceActionId.MANAGE_APPS))
+        runCurrent()
+
+        val inventory = runtime.session.currentSnapshot()
+        assertEquals(MaintenanceInventoryState.READY, inventory.maintenance.managedApplicationsState)
+        assertEquals(MaintenanceActionStatus.SUCCEEDED, inventory.maintenance.lastAction?.status)
+        assertTrue(firstIconStarted.isCompleted)
+        assertEquals(listOf("com.example.player"), iconRequests)
+
+        runtime.dispatch(
+            InstallationSessionCommand.MaintenanceApplicationAction(
+                packageName = "com.example.player",
+                actionId = MaintenanceApplicationActionId.FORCE_STOP,
+            ),
+        )
+        runCurrent()
+
+        assertTrue(firstIconCancelled.isCompleted)
+        assertTrue(foregroundActionCompleted.isCompleted)
+        assertEquals(listOf("com.example.player"), iconRequests)
+        assertEquals(
+            MaintenanceActionStatus.SUCCEEDED,
+            runtime.session.currentSnapshot().maintenance.applicationAction?.status,
+        )
+        runtime.close()
+    }
+
     @Test
     fun `runtime drives a local maintenance action through structured completion`() = runTest {
         val root = Files.createTempDirectory("maintenance-runtime").toFile()

@@ -7,6 +7,7 @@ import com.ninepointnine.helper.domain.artifact.ArtifactManifest
 import com.ninepointnine.helper.domain.artifact.AppIconAsset
 import com.ninepointnine.helper.domain.artifact.ArtifactSourceKind
 import com.ninepointnine.helper.domain.artifact.ArtifactVerification
+import com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
 import com.ninepointnine.helper.domain.artifact.SourceFailureRecord
 import com.ninepointnine.helper.domain.device.DeviceCapability
 import com.ninepointnine.helper.domain.device.AuthorizationActionEvidence
@@ -14,6 +15,7 @@ import com.ninepointnine.helper.domain.device.DeviceAvailabilityEvidence
 import com.ninepointnine.helper.domain.device.InstalledArtifactEvidence
 import com.ninepointnine.helper.domain.device.DeviceInstallWarning
 import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationState
+import com.ninepointnine.helper.domain.device.ApplicationAuthorizationRequirement
 import com.ninepointnine.helper.domain.device.ManagedApplicationAuthorizationStatus
 import com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
 
@@ -511,6 +513,7 @@ data class MaintenanceSnapshot(
     val catalogControlPlaneOnly: Boolean = false,
     val applicationAction: MaintenanceApplicationActionRecord? = null,
     val applicationDetails: ManagedApplicationDetails? = null,
+    val applicationAuthorizationRequirements: List<ApplicationAuthorizationRequirement> = emptyList(),
     val updateStatuses: List<MaintenanceUpdateStatus> = emptyList(),
     val diagnostic: MaintenanceDiagnosticSnapshot? = null,
     val authorization: MaintenanceAuthorizationSnapshot = MaintenanceAuthorizationSnapshot(),
@@ -536,6 +539,7 @@ data class ManagedApplicationStatus(
     val componentId: String,
     val packageName: String,
     val installed: Boolean,
+    val displayName: String? = null,
     val versionLabel: String? = null,
     val versionCode: Long? = null,
     val fileSizeBytes: Long? = null,
@@ -543,6 +547,8 @@ data class ManagedApplicationStatus(
     val updateTimeEpochMillis: Long? = null,
     val filePath: String? = null,
     val uid: Int? = null,
+    val iconBase64: String? = null,
+    val launchComponent: String? = null,
     val authorizationState: MaintenanceAuthorizationState? = null,
 )
 
@@ -626,9 +632,41 @@ internal fun MaintenanceSnapshot.withVerifiedInstallations(
 internal fun MaintenanceSnapshot.toDurableMaintenanceBaseline(): MaintenanceSnapshot {
     val normalized = withVerifiedInstallations(installedManifests)
     val verifiedIds = normalized.installedManifests.map { it.componentId }.toSet()
-    val verifiedApplications = normalized.managedApplications.filter { application ->
-        application.installed && application.componentId in verifiedIds
+    val controlledIds = buildSet {
+        addAll(normalized.availableComponents.map { it.id })
+        addAll(normalized.availableManifests.map { it.componentId })
+        addAll(verifiedIds)
     }
+    val manifestComponentByPackage = (
+        normalized.installedManifests + normalized.availableManifests
+        ).associate { it.packageName to it.componentId }
+    val durableApplications = normalized.managedApplications
+        .asSequence()
+        .filter { it.installed }
+        .mapNotNull { application ->
+            val componentId = manifestComponentByPackage[application.packageName]
+                ?: application.componentId.takeIf { it in controlledIds }
+                ?: controlledIds.firstOrNull { candidateId ->
+                    InstallerComponentTrustRegistry.isAllowedPackageName(candidateId, application.packageName)
+                }
+            componentId?.let {
+                application.copy(
+                    componentId = it,
+                    displayName = null,
+                    fileSizeBytes = null,
+                    installTimeEpochMillis = null,
+                    updateTimeEpochMillis = null,
+                    filePath = null,
+                    uid = null,
+                    iconBase64 = null,
+                    launchComponent = null,
+                    authorizationState = null,
+                )
+            }
+        }
+        .distinctBy { it.componentId }
+        .toList()
+    val verifiedApplications = durableApplications.filter { it.componentId in verifiedIds }
     return MaintenanceSnapshot(
         managedApplicationsState = if (normalized.initialInstallationCompleted || verifiedIds.isNotEmpty()) {
             MaintenanceInventoryState.READY
@@ -638,10 +676,9 @@ internal fun MaintenanceSnapshot.toDurableMaintenanceBaseline(): MaintenanceSnap
         managedApplications = if (normalized.initialInstallationCompleted) {
             // Initial inventory is durable installation evidence, but not an
             // APK identity that may be reused for a future device write. Keep
-            // every installed row when a later single-component batch adds its
-            // first verified manifest; otherwise that one target would erase
-            // the rest of the completed initial inventory on disk.
-            normalized.managedApplications.filter { it.installed }
+            // every trusted installed row when a later single-component batch
+            // adds its first verified manifest; never persist third-party rows.
+            durableApplications
         } else {
             verifiedApplications
         },
@@ -709,7 +746,7 @@ data class ManagedApplicationDetails(
 )
 
 data class MaintenanceApplicationActionRecord(
-    val componentId: String,
+    val packageName: String,
     val actionId: MaintenanceApplicationActionId,
     val status: MaintenanceActionStatus,
     val resultCode: String? = null,

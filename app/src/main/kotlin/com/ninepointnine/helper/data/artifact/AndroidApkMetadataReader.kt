@@ -2,6 +2,7 @@ package com.ninepointnine.helper.data.artifact
 
 import android.content.Context
 import android.content.pm.PackageManager
+import android.content.pm.PermissionInfo
 import android.os.Build
 import com.ninepointnine.helper.domain.artifact.ArtifactVersion
 import com.ninepointnine.helper.domain.device.ApkDeclarationMetadata
@@ -50,6 +51,18 @@ class AndroidApkMetadataReader(
             certificateSha256s = certificateDigests,
             declarations = ApkDeclarationMetadata(
                 requestedPermissions = packageInfo.requestedPermissions?.toSet().orEmpty(),
+                runtimeGrantPermissions = packageInfo.requestedPermissions.orEmpty()
+                    .filter { permission ->
+                        val declaredPermission = packageInfo.permissions.orEmpty()
+                            .firstOrNull { it.name == permission }
+                        val permissionInfo = declaredPermission ?: runCatching {
+                            packageManager.getPermissionInfo(permission, 0)
+                        }.getOrNull()
+                        permissionInfo != null &&
+                            permissionInfo.protectionLevel and PermissionInfo.PROTECTION_MASK_BASE ==
+                            PermissionInfo.PROTECTION_DANGEROUS
+                    }
+                    .toSet(),
                 services = packageInfo.services.orEmpty().map { service ->
                     ApkServiceDeclaration(
                         componentName = serviceComponentName(packageInfo.packageName, service.name),

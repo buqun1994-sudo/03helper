@@ -158,7 +158,7 @@ private fun DebugScenarioRoot(scenario: String) {
 
                 is InstallationSessionCommand.MaintenanceApplicationAction -> {
                     val application = session.currentSnapshot().maintenance.managedApplications
-                        .firstOrNull { it.componentId == command.componentId }
+                        .firstOrNull { it.packageName == command.packageName }
                     if (application != null) {
                         if (command.actionId == MaintenanceApplicationActionId.DETAILS) {
                             session.dispatchEvent(
@@ -182,7 +182,7 @@ private fun DebugScenarioRoot(scenario: String) {
                         } else {
                             session.dispatchEvent(
                                 InstallationSessionEvent.MaintenanceApplicationActionCompleted(
-                                    componentId = command.componentId,
+                                    packageName = command.packageName,
                                     actionId = command.actionId,
                                     resultCode = "debug_completed",
                                 ),

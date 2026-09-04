@@ -22,6 +22,9 @@ import com.ninepointnine.helper.domain.device.DeviceAvailabilityEvidence
 import com.ninepointnine.helper.domain.device.DeviceCapability
 import com.ninepointnine.helper.domain.device.InstalledArtifactEvidence
 import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationState
+import com.ninepointnine.helper.domain.device.ApplicationAuthorizationRequirement
+import com.ninepointnine.helper.domain.device.ApplicationAuthorizationRequirementKind
+import com.ninepointnine.helper.domain.device.ApplicationAuthorizationResultValue
 import com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -1301,7 +1304,7 @@ class InstallationSessionTest {
 
         session.dispatch(
             InstallationSessionCommand.MaintenanceApplicationAction(
-                componentId = "desktop",
+                packageName = AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME,
                 actionId = MaintenanceApplicationActionId.START,
             ),
         )
@@ -1323,7 +1326,7 @@ class InstallationSessionTest {
 
         session.dispatch(
             InstallationSessionCommand.MaintenanceApplicationAction(
-                componentId = "desktop",
+                packageName = AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME,
                 actionId = MaintenanceApplicationActionId.START,
             ),
         )
@@ -1354,7 +1357,7 @@ class InstallationSessionTest {
 
         session.dispatch(
             InstallationSessionCommand.MaintenanceApplicationAction(
-                componentId = "desktop",
+                packageName = AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME,
                 actionId = MaintenanceApplicationActionId.START,
             ),
         )
@@ -1367,6 +1370,158 @@ class InstallationSessionTest {
     }
 
     @Test
+    fun `single application authorization progress updates requirements without completing action`() {
+        val packageName = "com.example.player"
+        val base = maintenanceSession().currentSnapshot()
+        val session = InstallationSession(
+            initialSnapshot = base.copy(
+                maintenance = base.maintenance.copy(
+                    routeAction = MaintenanceActionId.MANAGE_APPS,
+                    managedApplications = listOf(
+                        ManagedApplicationStatus(
+                            componentId = "app-player",
+                            packageName = packageName,
+                            installed = true,
+                        ),
+                    ),
+                    applicationAuthorizationRequirements = listOf(
+                        ApplicationAuthorizationRequirement(
+                            permission = "android.permission.CAMERA",
+                            grantedBefore = false,
+                            grantedAfter = false,
+                        ),
+                    ),
+                ),
+            ),
+        )
+        session.dispatch(
+            InstallationSessionCommand.MaintenanceApplicationAction(
+                packageName = packageName,
+                actionId = MaintenanceApplicationActionId.AUTHORIZE,
+            ),
+        )
+        assertEquals(
+            listOf("android.permission.CAMERA"),
+            session.currentSnapshot().maintenance.applicationAuthorizationRequirements.map { it.permission },
+        )
+
+        session.dispatchEvent(
+            InstallationSessionEvent.MaintenanceApplicationAuthorizationProgress(
+                ApplicationAuthorizationResultValue(
+                    componentId = "app-player",
+                    packageName = packageName,
+                    requirements = listOf(
+                        ApplicationAuthorizationRequirement(
+                            permission = "android.permission.CAMERA",
+                            grantedBefore = false,
+                            grantedAfter = true,
+                        ),
+                        ApplicationAuthorizationRequirement(
+                            permission = "android.permission.RECORD_AUDIO",
+                            grantedBefore = false,
+                            grantedAfter = false,
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        val maintenance = session.currentSnapshot().maintenance
+        assertEquals(MaintenanceActionStatus.RUNNING, maintenance.applicationAction?.status)
+        assertEquals(listOf(true, false), maintenance.applicationAuthorizationRequirements.map { it.grantedAfter })
+    }
+
+    @Test
+    fun `all actionable application permissions produce authorization success`() {
+        val result = settleApplicationAuthorization(
+            listOf(
+                ApplicationAuthorizationRequirement(
+                    permission = "android.permission.CAMERA",
+                    grantedBefore = false,
+                    grantedAfter = true,
+                    authorizationAttempted = true,
+                ),
+            ),
+        )
+
+        assertEquals(MaintenanceActionStatus.SUCCEEDED, result.status)
+        assertEquals("authorization_succeeded", result.resultCode)
+        assertEquals(null, result.reasonCode)
+    }
+
+    @Test
+    fun `mixed actionable application permissions produce partial authorization success`() {
+        val result = settleApplicationAuthorization(
+            listOf(
+                ApplicationAuthorizationRequirement(
+                    permission = "android.permission.CAMERA",
+                    grantedBefore = false,
+                    grantedAfter = true,
+                    authorizationAttempted = true,
+                ),
+                ApplicationAuthorizationRequirement(
+                    permission = "android.permission.RECORD_AUDIO",
+                    grantedBefore = false,
+                    grantedAfter = false,
+                    reasonCode = "authorization_runtime_permission_write_failed",
+                    authorizationAttempted = true,
+                ),
+            ),
+        )
+
+        assertEquals(MaintenanceActionStatus.SUCCEEDED, result.status)
+        assertEquals("authorization_partially_succeeded", result.resultCode)
+        assertEquals("authorization_runtime_permission_write_failed", result.reasonCode)
+    }
+
+    @Test
+    fun `all actionable application permissions failing produces authorization failure`() {
+        val result = settleApplicationAuthorization(
+            listOf(
+                ApplicationAuthorizationRequirement(
+                    permission = "android.permission.CAMERA",
+                    grantedBefore = false,
+                    grantedAfter = false,
+                    reasonCode = "authorization_runtime_permission_write_failed",
+                    authorizationAttempted = true,
+                ),
+            ),
+        )
+
+        assertEquals(MaintenanceActionStatus.FAILED, result.status)
+        assertEquals("authorization_failed", result.resultCode)
+        assertEquals("authorization_runtime_permission_write_failed", result.reasonCode)
+        assertTrue(result.retryable)
+    }
+
+    @Test
+    fun `informational permissions do not reduce application authorization success rate`() {
+        val result = settleApplicationAuthorization(
+            listOf(
+                ApplicationAuthorizationRequirement(
+                    permission = "android.permission.CAMERA",
+                    grantedBefore = false,
+                    grantedAfter = true,
+                    authorizationAttempted = true,
+                ),
+                ApplicationAuthorizationRequirement(
+                    permission = "android.permission.INTERNET",
+                    grantedBefore = false,
+                    grantedAfter = false,
+                    reasonCode = "authorization_not_automatically_grantable",
+                    kind = ApplicationAuthorizationRequirementKind.DECLARED_PERMISSION,
+                    automaticallyActionable = false,
+                    authorizationAttempted = true,
+                ),
+            ),
+        )
+
+        assertEquals(MaintenanceActionStatus.SUCCEEDED, result.status)
+        assertEquals("authorization_succeeded", result.resultCode)
+        assertEquals(null, result.reasonCode)
+    }
+
+    @Test
     fun `new maintenance action clears stale application payload and selection`() {
         val base = maintenanceSession().currentSnapshot()
         val session = InstallationSession(
@@ -1374,7 +1529,7 @@ class InstallationSessionTest {
                 maintenance = base.maintenance.copy(
                     routeAction = MaintenanceActionId.MANAGE_APPS,
                     applicationAction = MaintenanceApplicationActionRecord(
-                        componentId = "desktop",
+                        packageName = AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME,
                         actionId = MaintenanceApplicationActionId.DETAILS,
                         status = MaintenanceActionStatus.SUCCEEDED,
                         resultCode = "application_details_ready",
@@ -1484,14 +1639,14 @@ class InstallationSessionTest {
 
         session.dispatch(
             InstallationSessionCommand.MaintenanceApplicationAction(
-                componentId = "desktop",
+                packageName = AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME,
                 actionId = MaintenanceApplicationActionId.START,
             ),
         )
         val firstGeneration = session.currentSnapshot()
         session.dispatchEvent(
             InstallationSessionEvent.MaintenanceApplicationActionCompleted(
-                componentId = "desktop",
+                packageName = AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME,
                 actionId = MaintenanceApplicationActionId.START,
                 resultCode = "component_launched",
             ),
@@ -1501,7 +1656,7 @@ class InstallationSessionTest {
 
         session.dispatch(
             InstallationSessionCommand.MaintenanceApplicationAction(
-                componentId = "desktop",
+                packageName = AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME,
                 actionId = MaintenanceApplicationActionId.FORCE_STOP,
             ),
         )
@@ -1513,7 +1668,7 @@ class InstallationSessionTest {
         session.dispatch(
             InstallationSessionCommand.AdapterEvent(
                 event = InstallationSessionEvent.MaintenanceApplicationActionCompleted(
-                    componentId = "desktop",
+                    packageName = AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME,
                     actionId = MaintenanceApplicationActionId.START,
                     resultCode = "late_start",
                 ),
@@ -1988,13 +2143,13 @@ class InstallationSessionTest {
 
         session.dispatch(
             InstallationSessionCommand.MaintenanceApplicationAction(
-                componentId = "desktop",
+                packageName = AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME,
                 actionId = MaintenanceApplicationActionId.UNINSTALL,
             ),
         )
         session.dispatchEvent(
             InstallationSessionEvent.MaintenanceApplicationActionCompleted(
-                componentId = "desktop",
+                packageName = AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME,
                 actionId = MaintenanceApplicationActionId.UNINSTALL,
                 resultCode = "component_uninstalled",
             ),
@@ -2044,13 +2199,13 @@ class InstallationSessionTest {
         val session = InstallationSession(initialSnapshot = base)
         session.dispatch(
             InstallationSessionCommand.MaintenanceApplicationAction(
-                componentId = "desktop",
+                packageName = AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME,
                 actionId = MaintenanceApplicationActionId.UNINSTALL,
             ),
         )
         session.dispatchEvent(
             InstallationSessionEvent.MaintenanceApplicationActionCompleted(
-                componentId = "desktop",
+                packageName = AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME,
                 actionId = MaintenanceApplicationActionId.UNINSTALL,
                 resultCode = "component_uninstalled",
                 refreshedApplications = listOf(
@@ -2179,7 +2334,7 @@ class InstallationSessionTest {
                 applications = listOf(
                     ManagedApplicationStatus(
                         componentId = AuthorizationPlanFactory.DESKTOP_COMPONENT_ID,
-                        packageName = "com.attacker.app",
+                        packageName = "invalid-package",
                         installed = true,
                     ),
                 ),
@@ -2206,7 +2361,7 @@ class InstallationSessionTest {
                 applications = listOf(
                     ManagedApplicationStatus(
                         componentId = AuthorizationPlanFactory.DESKTOP_COMPONENT_ID,
-                        packageName = "com.attacker.app",
+                        packageName = "invalid-package",
                         installed = true,
                     ),
                 ),
@@ -3452,6 +3607,44 @@ class InstallationSessionTest {
                 preservedEntryCount = 0,
             )
         }
+    }
+
+    private fun settleApplicationAuthorization(
+        requirements: List<ApplicationAuthorizationRequirement>,
+    ): MaintenanceApplicationActionRecord {
+        val packageName = "com.example.player"
+        val base = maintenanceSession().currentSnapshot()
+        val session = InstallationSession(
+            initialSnapshot = base.copy(
+                maintenance = base.maintenance.copy(
+                    routeAction = MaintenanceActionId.MANAGE_APPS,
+                    managedApplications = listOf(
+                        ManagedApplicationStatus(
+                            componentId = "app-player",
+                            packageName = packageName,
+                            installed = true,
+                        ),
+                    ),
+                ),
+            ),
+        )
+        session.dispatch(
+            InstallationSessionCommand.MaintenanceApplicationAction(
+                packageName = packageName,
+                actionId = MaintenanceApplicationActionId.AUTHORIZE,
+            ),
+        )
+        session.dispatchEvent(
+            InstallationSessionEvent.MaintenanceApplicationAuthorizationResolved(
+                actionId = MaintenanceApplicationActionId.AUTHORIZE,
+                result = ApplicationAuthorizationResultValue(
+                    componentId = "app-player",
+                    packageName = packageName,
+                    requirements = requirements,
+                ),
+            ),
+        )
+        return requireNotNull(session.currentSnapshot().maintenance.applicationAction)
     }
 
     private fun evidenceManifest(

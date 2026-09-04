@@ -13,8 +13,11 @@ import com.ninepointnine.helper.domain.artifact.CompatibilityRange
 import com.ninepointnine.helper.domain.device.AdbCommandGateway
 import com.ninepointnine.helper.domain.device.ApkDeclarationMetadata
 import com.ninepointnine.helper.domain.device.ApkServiceDeclaration
+import com.ninepointnine.helper.domain.device.ApplicationAuthorizationResult
+import com.ninepointnine.helper.domain.device.ApplicationAuthorizationRequirementKind
 import com.ninepointnine.helper.domain.device.AuthorizationAction
 import com.ninepointnine.helper.domain.device.AuthorizationActionEvidence
+import com.ninepointnine.helper.domain.device.AuthorizationDeclarationValidator
 import com.ninepointnine.helper.domain.device.AuthorizationPlan
 import com.ninepointnine.helper.domain.device.AuthorizationPlanBuildResult
 import com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
@@ -40,10 +43,14 @@ import com.ninepointnine.helper.domain.session.AvailabilityStageReceiptStatus
 import com.ninepointnine.helper.domain.session.InstallationStageReceiptStatus
 import com.ninepointnine.helper.domain.session.InstallationFlow
 import com.ninepointnine.helper.domain.session.InstallationStrategy
+import com.ninepointnine.helper.domain.session.MaintenanceApplicationActionId
 import dadb.AdbShellResponse
 import dadb.Dadb
+import java.io.File
 import java.lang.reflect.Proxy
 import java.nio.file.Files
+import java.security.MessageDigest
+import java.util.Base64
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
@@ -411,6 +418,49 @@ class DeviceActionsTest {
     }
 
     @Test
+    fun `test application id suffix keeps the published desktop namespace for authorization`() {
+        val result = AuthorizationPlanFactory.createForComponents(
+            listOf(
+                ManagedComponent(
+                    componentId = AuthorizationPlanFactory.DESKTOP_COMPONENT_ID,
+                    packageName = "com.ninepointnine.desktop.test",
+                    order = 0,
+                ),
+            ),
+        ) as AuthorizationPlanBuildResult.Ready
+
+        assertEquals(
+            "com.ninepointnine.desktop.test/com.ninepointnine.desktop.debug.NavigationDemoAccessibilityService",
+            AuthorizationPlanFactory.requiredRuntimeService(result.plan.components.single()),
+        )
+    }
+
+    @Test
+    fun `desktop test apk declaration matches its base namespace despite application id suffix`() {
+        val component = ManagedComponent(
+            componentId = AuthorizationPlanFactory.DESKTOP_COMPONENT_ID,
+            packageName = "com.ninepointnine.desktop.test",
+            order = 0,
+        )
+        val plan = (AuthorizationPlanFactory.createForComponents(listOf(component))
+            as AuthorizationPlanBuildResult.Ready).plan
+        val declarations = ApkDeclarationMetadata(
+            requestedPermissions = setOf(
+                "android.permission.SYSTEM_ALERT_WINDOW",
+                "android.permission.REQUEST_INSTALL_PACKAGES",
+            ),
+            services = setOf(
+                ApkServiceDeclaration(
+                    "com.ninepointnine.desktop.test/com.ninepointnine.desktop.debug.NavigationDemoAccessibilityService",
+                    "android.permission.BIND_ACCESSIBILITY_SERVICE",
+                ),
+            ),
+        )
+
+        assertEquals(null, AuthorizationDeclarationValidator.validateDeclarations(plan, mapOf("desktop" to declarations)))
+    }
+
+    @Test
     fun `authorization plan result is keyed by structured markers rather than stderr`() {
         val gatewaySource = java.io.File(
             "src/main/kotlin/com/ninepointnine/helper/data/device/DadbCommandGateway.kt",
@@ -580,6 +630,136 @@ class DeviceActionsTest {
             setOf("com.ninepointnine.desktop", "org.fossify.filemanager.debug"),
             PackageInventoryParser.parse(output),
         )
+    }
+
+    @Test
+    fun `desktop bridge parser validates complete batch and sorts newest installs first`() {
+        fun encoded(value: String): String = Base64.getUrlEncoder().withoutPadding()
+            .encodeToString(value.toByteArray(Charsets.UTF_8))
+        val rows = listOf(
+            listOf("com.example.older", encoded("旧应用"), encoded("1.0"), "10", "100", "400", "10001", "com.example.older/com.example.older.MainActivity"),
+            listOf("com.example.newer", encoded("新应用"), encoded("2.0"), "20", "300", "350", "10002", "com.example.newer/com.example.newer.LauncherActivity"),
+        )
+        val output = bridgeCatalogOutput(rows)
+
+        val parsed = DesktopAppCatalogBridgeParser.parse(output) as BridgeCatalogParseResult.Valid
+
+        assertEquals(listOf("com.example.newer", "com.example.older"), parsed.entries.map { it.packageName })
+        assertEquals("新应用", parsed.entries.first().displayName)
+        assertEquals("2.0", parsed.entries.first().versionName)
+        assertEquals("com.example.newer/com.example.newer.LauncherActivity", parsed.entries.first().launcherComponent)
+        assertEquals(null, parsed.entries.first().iconBase64)
+    }
+
+    @Test
+    fun `desktop bridge parser rejects the whole batch when one row is incompatible or missing`() {
+        val label = Base64.getUrlEncoder().withoutPadding()
+            .encodeToString("示例".toByteArray(Charsets.UTF_8))
+        val rows = listOf(
+            listOf("com.example.valid", label, "", "1", "2", "2", "10002", "com.example.valid/com.example.valid.MainActivity"),
+            listOf("com.example.second", label, "", "1", "1", "1", "10003", "com.example.second/com.example.second.MainActivity"),
+        )
+        val valid = bridgeCatalogOutput(rows)
+        val corrupt = valid.replace(
+            "launcherComponent=com.example.valid/com.example.valid.MainActivity",
+            "launcherComponent=com.example.other/com.example.other.MainActivity",
+        )
+        val truncated = valid.lines().dropLast(1).joinToString("\n")
+
+        assertEquals(BridgeCatalogParseResult.Invalid, DesktopAppCatalogBridgeParser.parse(corrupt))
+        assertEquals(BridgeCatalogParseResult.Invalid, DesktopAppCatalogBridgeParser.parse(truncated))
+        assertEquals(BridgeCatalogParseResult.Invalid, DesktopAppCatalogBridgeParser.parse("No result found."))
+    }
+
+    @Test
+    fun `desktop bridge parser accepts an explicit zero count batch and validates icon identity`() {
+        val empty = bridgeCatalogOutput(emptyList())
+        val icon = "Row: 0 protocolVersion=2, rowType=icon, packageName=com.example.valid, iconBase64=AQID"
+
+        assertEquals(emptyList<BridgeApplicationEntry>(), (DesktopAppCatalogBridgeParser.parse(empty) as BridgeCatalogParseResult.Valid).entries)
+        assertEquals(
+            BridgeIconParseResult.Valid("AQID"),
+            DesktopAppCatalogBridgeParser.parseIcon(icon, "com.example.valid"),
+        )
+        assertEquals(
+            BridgeIconParseResult.Invalid,
+            DesktopAppCatalogBridgeParser.parseIcon(icon, "com.example.other"),
+        )
+    }
+
+    @Test
+    fun `generic application starts with the launcher identity resolved by the bridge`() {
+        val packageName = "com.example.music"
+        val launcher = "$packageName/$packageName.LauncherActivity"
+        val commands = mutableListOf<String>()
+        val fakeDadb = Proxy.newProxyInstance(
+            Dadb::class.java.classLoader,
+            arrayOf(Dadb::class.java),
+        ) { _, method, args ->
+            when (method.name) {
+                "shell" -> {
+                    val command = args?.firstOrNull()?.toString().orEmpty()
+                    commands += command
+                    when {
+                        command.startsWith("pm path ") -> AdbShellResponse(
+                            "package:/data/app/$packageName/base.apk",
+                            "",
+                            0,
+                        )
+                        command.startsWith("dumpsys package ") -> AdbShellResponse(
+                            "versionCode=10 versionName=1.2\nuserId=10123\n",
+                            "",
+                            0,
+                        )
+                        command.startsWith("stat -c %s ") -> AdbShellResponse("4096", "", 0)
+                        command.startsWith("am start -n ") -> AdbShellResponse("Starting: Intent", "", 0)
+                        command.startsWith("pidof ") -> AdbShellResponse("1234", "", 0)
+                        else -> AdbShellResponse("", "", 0)
+                    }
+                }
+                "supportsFeature" -> false
+                "close" -> null
+                else -> null
+            }
+        } as Dadb
+        val gateway = DadbCommandGateway(
+            adb = fakeDadb,
+            closed = AtomicBoolean(false),
+            ioMutex = Mutex(),
+            installedApkCacheDirectory = null,
+            installedApkMetadataReader = null,
+        )
+
+        val result = runBlocking {
+            gateway.performApplicationAction(
+                ManagedComponent("app-0123456789abcdef01234567", packageName, launchComponent = launcher),
+                MaintenanceApplicationActionId.START,
+            )
+        }
+
+        assertEquals(
+            com.ninepointnine.helper.domain.device.MaintenanceDeviceResult.Completed("component_launched"),
+            result,
+        )
+        assertTrue(commands.any { it == "am start -n '$launcher'" })
+    }
+
+    private fun bridgeCatalogOutput(rows: List<List<String>>): String {
+        val canonical = rows.sortedBy { it[0] }.joinToString("\u001e") { it.joinToString("\u001f") }
+        val digest = MessageDigest.getInstance("SHA-256")
+            .digest(canonical.toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+        val outputRows = mutableListOf(
+            "Row: 0 protocolVersion=2, rowType=summary, batchCount=${rows.size}, batchDigest=$digest",
+        )
+        rows.forEachIndexed { index, fields ->
+            outputRows += "Row: ${index + 1} protocolVersion=2, rowType=application, " +
+                "batchCount=${rows.size}, batchDigest=$digest, packageName=${fields[0]}, " +
+                "displayName=${fields[1]}, versionName=${fields[2]}, versionCode=${fields[3]}, " +
+                "firstInstallTime=${fields[4]}, lastUpdateTime=${fields[5]}, uid=${fields[6]}, " +
+                "launcherComponent=${fields[7]}"
+        }
+        return outputRows.joinToString("\n")
     }
 
     @Test
@@ -2331,6 +2511,125 @@ class DeviceActionsTest {
         assertEquals(DeviceAuthorizationConfirmation.UNKNOWN, result.authorizationConfirmation)
         assertEquals(setOf("file-manager"), result.configuredComponentIds)
         assertEquals(5, result.authorizationEvidence.size)
+    }
+
+    @Test
+    fun `single application authorization continues after one failure and reports each readback`() {
+        val root = Files.createTempDirectory("application-authorization").toFile()
+        val packageName = "com.example.player"
+        val service = "$packageName/com.example.player.AccessibilityService"
+        val commands = mutableListOf<String>()
+        val progress = mutableListOf<com.ninepointnine.helper.domain.device.ApplicationAuthorizationResultValue>()
+        var overlayAllowed = false
+        var accessibilityEnabled = false
+        var enabledServices = "com.existing/com.existing.AccessibilityService"
+        val packageDump = {
+            """
+                Packages:
+                  Package [$packageName]
+                    versionCode=7
+                    versionName=1.2.3
+                    userId=10123
+                    firstInstallTime=2026-01-02 03:04:05
+                    lastUpdateTime=2026-01-02 03:04:05
+                    android.permission.CAMERA: granted=false
+            """.trimIndent()
+        }
+        val fakeDadb = Proxy.newProxyInstance(
+            Dadb::class.java.classLoader,
+            arrayOf(Dadb::class.java),
+        ) { _, method, args ->
+            when (method.name) {
+                "shell" -> {
+                    val command = args?.firstOrNull()?.toString().orEmpty()
+                    commands += command
+                    when {
+                        command == "pm path $packageName" ->
+                            AdbShellResponse("package:/data/app/$packageName/base.apk\n", "", 0)
+                        command == "dumpsys package '$packageName'" ->
+                            AdbShellResponse(packageDump(), "", 0)
+                        command == "stat -c %s '/data/app/$packageName/base.apk'" ->
+                            AdbShellResponse("42\n", "", 0)
+                        command == "pm grant '$packageName' 'android.permission.CAMERA'" ->
+                            AdbShellResponse("", "not a changeable permission", 1)
+                        command == "appops get '$packageName' 'SYSTEM_ALERT_WINDOW'" ->
+                            AdbShellResponse(
+                                "SYSTEM_ALERT_WINDOW: ${if (overlayAllowed) "allow" else "default"}\n",
+                                "",
+                                0,
+                            )
+                        command == "appops set '$packageName' 'SYSTEM_ALERT_WINDOW' allow" -> {
+                            overlayAllowed = true
+                            AdbShellResponse("", "", 0)
+                        }
+                        command == "settings get secure 'enabled_accessibility_services'" ->
+                            AdbShellResponse("$enabledServices\n", "", 0)
+                        command.startsWith("settings put secure 'enabled_accessibility_services' ") -> {
+                            enabledServices = command.substringAfterLast(' ').trim('\'')
+                            AdbShellResponse("", "", 0)
+                        }
+                        command == "settings get secure 'accessibility_enabled'" ->
+                            AdbShellResponse(if (accessibilityEnabled) "1\n" else "0\n", "", 0)
+                        command == "settings put secure 'accessibility_enabled' 1" -> {
+                            accessibilityEnabled = true
+                            AdbShellResponse("", "", 0)
+                        }
+                        else -> throw AssertionError("unexpected shell command: $command")
+                    }
+                }
+
+                "pull" -> {
+                    (args?.getOrNull(0) as File).writeBytes(ByteArray(42) { 1 })
+                    null
+                }
+                "supportsFeature" -> false
+                "close" -> null
+                else -> throw UnsupportedOperationException(method.name)
+            }
+        } as Dadb
+        val gateway = DadbCommandGateway(
+            adb = fakeDadb,
+            closed = AtomicBoolean(false),
+            ioMutex = Mutex(),
+            installedApkCacheDirectory = root,
+            installedApkMetadataReader = com.ninepointnine.helper.data.artifact.ApkMetadataReader {
+                ApkMetadata(
+                    packageName = packageName,
+                    version = ArtifactVersion("1.2.3", 7),
+                    certificateSha256s = setOf("fixture"),
+                    declarations = ApkDeclarationMetadata(
+                        requestedPermissions = setOf(
+                            "android.permission.CAMERA",
+                            "android.permission.SYSTEM_ALERT_WINDOW",
+                        ),
+                        services = setOf(
+                            ApkServiceDeclaration(service, "android.permission.BIND_ACCESSIBILITY_SERVICE"),
+                        ),
+                    ),
+                )
+            },
+        )
+
+        val result = runBlocking {
+            gateway.authorizeApplication(
+                ManagedComponent("app-player", packageName),
+                progress::add,
+            )
+        }
+
+        assertTrue(result is ApplicationAuthorizationResult.Completed)
+        val requirements = (result as ApplicationAuthorizationResult.Completed).value.requirements
+        assertEquals(3, progress.size)
+        assertEquals(3, requirements.size)
+        assertEquals(false, requirements[0].grantedAfter)
+        assertEquals("authorization_runtime_permission_write_failed", requirements[0].reasonCode)
+        assertEquals(true, requirements[1].grantedAfter)
+        assertEquals(ApplicationAuthorizationRequirementKind.APP_OP, requirements[1].kind)
+        assertEquals(true, requirements[2].grantedAfter)
+        assertEquals(ApplicationAuthorizationRequirementKind.ACCESSIBILITY_SERVICE, requirements[2].kind)
+        assertTrue(commands.any { it.startsWith("settings put secure 'enabled_accessibility_services'") })
+        assertTrue(enabledServices.contains("com.existing/com.existing.AccessibilityService"))
+        assertTrue(enabledServices.contains(service))
     }
 
     private fun activeBoundary(

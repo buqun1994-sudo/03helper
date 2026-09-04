@@ -102,6 +102,9 @@ enum class MaintenanceActionStatus {
 enum class MaintenanceApplicationActionId {
     START,
     FORCE_STOP,
+    CLEAR_DATA,
+    INSPECT_AUTHORIZATION,
+    AUTHORIZE,
     UNINSTALL,
     DETAILS,
 }

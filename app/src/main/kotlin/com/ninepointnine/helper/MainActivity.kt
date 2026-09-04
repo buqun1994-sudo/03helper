@@ -122,7 +122,7 @@ internal fun InstallUiIntent.toInstallationSessionCommand(): InstallationSession
     InstallUiIntent.LeaveMaintenanceAction -> InstallationSessionCommand.LeaveMaintenanceAction
     is InstallUiIntent.MaintenanceAction -> InstallationSessionCommand.MaintenanceAction(actionId)
     is InstallUiIntent.MaintenanceApplicationAction -> InstallationSessionCommand.MaintenanceApplicationAction(
-        componentId = componentId,
+        packageName = packageName,
         actionId = actionId,
     )
     is InstallUiIntent.ToggleMaintenanceInstallationComponent ->

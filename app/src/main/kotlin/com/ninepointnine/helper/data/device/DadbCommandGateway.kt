@@ -25,6 +25,13 @@ import com.ninepointnine.helper.domain.device.InstallableArtifact
 import com.ninepointnine.helper.domain.device.InstalledArtifactEvidence
 import com.ninepointnine.helper.domain.device.ManagedApplicationProbe
 import com.ninepointnine.helper.domain.device.ManagedApplicationsResult
+import com.ninepointnine.helper.domain.device.InstalledApplicationIconResult
+import com.ninepointnine.helper.domain.device.ApplicationAuthorizationRequirement
+import com.ninepointnine.helper.domain.device.ApplicationAuthorizationResult
+import com.ninepointnine.helper.domain.device.ApplicationAuthorizationResultValue
+import com.ninepointnine.helper.domain.device.DeclaredApplicationAuthorizationAction
+import com.ninepointnine.helper.domain.device.DeclaredApplicationAuthorizationPlanFactory
+import com.ninepointnine.helper.domain.device.DeclaredApplicationAuthorizationRequirement
 import com.ninepointnine.helper.domain.device.ManagedComponent
 import com.ninepointnine.helper.domain.device.ManagedApplicationDetailsProbe
 import com.ninepointnine.helper.domain.device.ManagedApplicationDetailsProbeResult
@@ -46,6 +53,8 @@ import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
+import java.util.Base64
+import java.security.MessageDigest
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -664,6 +673,381 @@ internal class DadbCommandGateway(
         inspectInstalledApplicationInventoryLocked(components)
     }
 
+    override suspend fun inspectAllInstalledApplications(): ManagedApplicationsResult = withLease(
+        whenClosed = ManagedApplicationsResult.Failed(
+            DeviceActionFailure("adb_connection_closed", retryable = true),
+        ),
+    ) {
+        val inventory = readDesktopBridgeInventory()
+        if (inventory == null) {
+            return@withLease ManagedApplicationsResult.Failed(
+                DeviceActionFailure("maintenance_app_catalog_bridge_unavailable", retryable = true),
+            )
+        }
+        ManagedApplicationsResult.Completed(
+            inventory.entries.map { entry ->
+                ManagedApplicationProbe(
+                    componentId = componentIdForPackage(entry.packageName),
+                    packageName = entry.packageName,
+                    installed = true,
+                    displayName = entry.displayName,
+                    versionLabel = entry.versionName,
+                    versionCode = entry.versionCode,
+                    installTimeEpochMillis = entry.firstInstallTime,
+                    updateTimeEpochMillis = entry.lastUpdateTime,
+                    uid = entry.uid,
+                    iconBase64 = entry.iconBase64,
+                    launchComponent = entry.launcherComponent,
+                )
+            },
+        )
+    }
+
+    override suspend fun inspectInstalledApplicationIcon(
+        packageName: String,
+    ): InstalledApplicationIconResult = withLease(
+        whenClosed = InstalledApplicationIconResult.Failed(
+            DeviceActionFailure("adb_connection_closed", retryable = true),
+        ),
+    ) {
+        if (!PACKAGE_NAME_PATTERN.matches(packageName)) {
+            return@withLease InstalledApplicationIconResult.Failed(
+                DeviceActionFailure("maintenance_component_identity_invalid", retryable = false),
+            )
+        }
+        DESKTOP_BRIDGE_AUTHORITIES.forEach { authority ->
+            val response = shell("content query --uri content://$authority/icons/$packageName")
+                ?: return@forEach
+            if (response.exitCode != 0) return@forEach
+            when (val parsed = DesktopAppCatalogBridgeParser.parseIcon(response.output, packageName)) {
+                is BridgeIconParseResult.Valid -> return@withLease InstalledApplicationIconResult.Completed(
+                    packageName = packageName,
+                    iconBase64 = parsed.iconBase64,
+                )
+                BridgeIconParseResult.Invalid -> Unit
+            }
+        }
+        InstalledApplicationIconResult.Failed(
+            DeviceActionFailure("maintenance_app_icon_unavailable", retryable = true),
+        )
+    }
+
+    override suspend fun authorizeApplication(
+        component: ManagedComponent,
+    ): ApplicationAuthorizationResult = authorizeApplication(component) {}
+
+    override suspend fun authorizeApplication(
+        component: ManagedComponent,
+        onProgress: (ApplicationAuthorizationResultValue) -> Unit,
+    ): ApplicationAuthorizationResult = withLease(
+        whenClosed = ApplicationAuthorizationResult.Failed(
+            DeviceActionFailure("adb_connection_closed", retryable = true),
+        ),
+    ) {
+        if (!PACKAGE_NAME_PATTERN.matches(component.packageName)) {
+            return@withLease ApplicationAuthorizationResult.Failed(
+                DeviceActionFailure("maintenance_component_identity_invalid", component.componentId, retryable = false),
+            )
+        }
+        when (val installed = inspectInstalledPackage(component.componentId, component.packageName)) {
+            is PackageInspection.Failed -> return@withLease ApplicationAuthorizationResult.Failed(installed.failure)
+            is PackageInspection.Completed -> if (!installed.installed) {
+                return@withLease ApplicationAuthorizationResult.Failed(
+                    DeviceActionFailure("maintenance_component_not_installed", component.componentId, retryable = false),
+                )
+            }
+        }
+        authorizeApplicationLocked(component, write = true, onProgress = onProgress)
+    }
+
+    override suspend fun inspectApplicationAuthorization(
+        component: ManagedComponent,
+    ): ApplicationAuthorizationResult = withLease(
+        whenClosed = ApplicationAuthorizationResult.Failed(
+            DeviceActionFailure("adb_connection_closed", retryable = true),
+        ),
+    ) {
+        authorizeApplicationLocked(component, write = false)
+    }
+
+    private fun authorizeApplicationLocked(
+        component: ManagedComponent,
+        write: Boolean,
+        onProgress: (ApplicationAuthorizationResultValue) -> Unit = {},
+    ): ApplicationAuthorizationResult {
+        if (!PACKAGE_NAME_PATTERN.matches(component.packageName)) {
+            return ApplicationAuthorizationResult.Failed(
+                DeviceActionFailure("maintenance_component_identity_invalid", component.componentId, retryable = false),
+            )
+        }
+        when (val installed = inspectInstalledPackage(component.componentId, component.packageName)) {
+            is PackageInspection.Failed -> return ApplicationAuthorizationResult.Failed(installed.failure)
+            is PackageInspection.Completed -> if (!installed.installed) {
+                return ApplicationAuthorizationResult.Failed(
+                    DeviceActionFailure("maintenance_component_not_installed", component.componentId, retryable = false),
+                )
+            }
+        }
+        val declarations = readInstalledApkDeclarations(component, component.packageName)
+            ?: return ApplicationAuthorizationResult.Failed(
+                DeviceActionFailure("authorization_capability_metadata_missing", component.componentId, retryable = true),
+            )
+        val declaredRequirements = DeclaredApplicationAuthorizationPlanFactory.create(
+            component.packageName,
+            declarations,
+        )
+        val initialPermissionDump = readPackageDetails(component.packageName)
+        val initialRequirements = declaredRequirements.map { requirement ->
+            inspectDeclaredAuthorizationRequirement(
+                packageName = component.packageName,
+                requirement = requirement,
+                packageDetails = initialPermissionDump,
+            )
+        }
+        if (!write) {
+            return ApplicationAuthorizationResult.Completed(
+                ApplicationAuthorizationResultValue(
+                    component.componentId,
+                    component.packageName,
+                    initialRequirements,
+                ),
+            )
+        }
+        val requirements = initialRequirements.toMutableList()
+        declaredRequirements.forEachIndexed { index, requirement ->
+            requirements[index] = applyDeclaredAuthorizationRequirement(
+                packageName = component.packageName,
+                requirement = requirement,
+                before = initialRequirements[index].grantedBefore,
+            )
+            onProgress(
+                ApplicationAuthorizationResultValue(
+                    component.componentId,
+                    component.packageName,
+                    requirements.toList(),
+                ),
+            )
+        }
+        return ApplicationAuthorizationResult.Completed(
+            ApplicationAuthorizationResultValue(component.componentId, component.packageName, requirements),
+        )
+    }
+
+    private fun inspectDeclaredAuthorizationRequirement(
+        packageName: String,
+        requirement: DeclaredApplicationAuthorizationRequirement,
+        packageDetails: String?,
+    ): ApplicationAuthorizationRequirement {
+        val probes = requirement.actions.map { action ->
+            readDeclaredAuthorizationAction(packageName, action, packageDetails)
+        }
+        val granted = aggregateAuthorizationProbes(probes)
+        return ApplicationAuthorizationRequirement(
+            permission = requirement.declaration,
+            grantedBefore = granted,
+            grantedAfter = granted,
+            reasonCode = authorizationFailureReason(probes),
+            kind = requirement.kind,
+            automaticallyActionable = requirement.automaticallyActionable,
+            authorizationAttempted = false,
+        )
+    }
+
+    private fun applyDeclaredAuthorizationRequirement(
+        packageName: String,
+        requirement: DeclaredApplicationAuthorizationRequirement,
+        before: Boolean?,
+    ): ApplicationAuthorizationRequirement {
+        val probes = requirement.actions.map { action ->
+            applyDeclaredAuthorizationAction(packageName, action)
+        }
+        return ApplicationAuthorizationRequirement(
+            permission = requirement.declaration,
+            grantedBefore = before,
+            grantedAfter = aggregateAuthorizationProbes(probes),
+            reasonCode = authorizationFailureReason(probes),
+            kind = requirement.kind,
+            automaticallyActionable = requirement.automaticallyActionable,
+            authorizationAttempted = true,
+        )
+    }
+
+    private fun authorizationFailureReason(probes: List<AuthorizationProbe>): String? = probes
+        .filter { it.value != true && it.reasonCode != null }
+        .maxByOrNull { probe ->
+            when {
+                probe.reasonCode?.contains("write_failed") == true -> 4
+                probe.reasonCode == "authorization_confirmation_not_satisfied" -> 3
+                probe.value == false -> 2
+                else -> 1
+            }
+        }
+        ?.reasonCode
+
+    private fun aggregateAuthorizationProbes(probes: List<AuthorizationProbe>): Boolean? = when {
+        probes.all { it.value == true } -> true
+        probes.any { it.value == false } -> false
+        else -> null
+    }
+
+    private fun applyDeclaredAuthorizationAction(
+        packageName: String,
+        action: DeclaredApplicationAuthorizationAction,
+    ): AuthorizationProbe {
+        val before = readDeclaredAuthorizationAction(packageName, action)
+        if (before.value == true) return before
+        val writeFailure = when (action) {
+            is DeclaredApplicationAuthorizationAction.InspectPermission -> return before
+
+            is DeclaredApplicationAuthorizationAction.GrantRuntimePermission ->
+                "authorization_runtime_permission_write_failed".takeUnless {
+                    isSuccessful(
+                        shell("pm grant ${shellArgument(packageName)} ${shellArgument(action.permission)}"),
+                    )
+                }
+
+            is DeclaredApplicationAuthorizationAction.AllowAppOp ->
+                "authorization_appop_write_failed".takeUnless {
+                    isSuccessful(
+                        shell(
+                            "appops set ${shellArgument(packageName)} " +
+                                "${shellArgument(action.operation.wireName)} allow",
+                        ),
+                    )
+                }
+
+            is DeclaredApplicationAuthorizationAction.EnableSecureFlag ->
+                "authorization_secure_flag_write_failed".takeUnless {
+                    isSuccessful(
+                        shell("settings put secure ${shellArgument(action.setting.wireName)} 1"),
+                    )
+                }
+
+            is DeclaredApplicationAuthorizationAction.AppendSecureComponent ->
+                appendDeclaredSecureComponent(action)
+        }
+        if (writeFailure != null) return AuthorizationProbe(false, writeFailure)
+        return readDeclaredAuthorizationAction(packageName, action).let { after ->
+            if (after.value == false && after.reasonCode == null) {
+                after.copy(reasonCode = "authorization_confirmation_not_satisfied")
+            } else {
+                after
+            }
+        }
+    }
+
+    private fun appendDeclaredSecureComponent(
+        action: DeclaredApplicationAuthorizationAction.AppendSecureComponent,
+    ): String? {
+        val response = shell("settings get secure ${shellArgument(action.setting.wireName)}")
+            ?: return "authorization_component_list_read_failed"
+        if (response.exitCode != 0) return "authorization_component_list_read_failed"
+        val existing = parseAuthorizationComponentList(response.output)
+            ?: return "authorization_component_list_read_failed"
+        if (action.componentName in existing) return null
+        val next = (existing + action.componentName).distinct()
+        if (next.size > MAX_DECLARED_SECURE_LIST_ENTRIES) {
+            return "authorization_capacity_entries_exceeded"
+        }
+        val serialized = next.joinToString(":")
+        if (serialized.toByteArray(Charsets.UTF_8).size > MAX_DECLARED_SECURE_LIST_BYTES) {
+            return "authorization_capacity_bytes_exceeded"
+        }
+        val write = if (action.setting == ManagedSecureComponentList.ENABLED_NOTIFICATION_LISTENERS) {
+            shell("cmd notification allow_listener ${shellArgument(action.componentName)} 0")
+        } else {
+            shell(
+                "settings put secure ${shellArgument(action.setting.wireName)} " +
+                    shellArgument(serialized),
+            )
+        }
+        return "authorization_component_list_write_failed".takeUnless { isSuccessful(write) }
+    }
+
+    private fun readDeclaredAuthorizationAction(
+        packageName: String,
+        action: DeclaredApplicationAuthorizationAction,
+        packageDetails: String? = null,
+    ): AuthorizationProbe = when (action) {
+        is DeclaredApplicationAuthorizationAction.InspectPermission -> {
+            val output = packageDetails ?: readPackageDetails(packageName)
+            val granted = output?.let { parseDeclaredPermission(it, action.permission) }
+            when (granted) {
+                true -> AuthorizationProbe(true, null, AuthorizationValueState.GRANTED)
+                false -> AuthorizationProbe(
+                    false,
+                    "authorization_not_automatically_grantable",
+                    AuthorizationValueState.DENIED,
+                )
+                null -> AuthorizationProbe(null, "authorization_permission_state_unknown")
+            }
+        }
+
+        is DeclaredApplicationAuthorizationAction.GrantRuntimePermission -> {
+            val output = packageDetails ?: readPackageDetails(packageName)
+            val granted = output?.let { parseDeclaredPermission(it, action.permission) }
+            when (granted) {
+                true -> AuthorizationProbe(true, null, AuthorizationValueState.GRANTED)
+                false -> AuthorizationProbe(
+                    false,
+                    "authorization_runtime_permission_not_granted",
+                    AuthorizationValueState.DENIED,
+                )
+                null -> AuthorizationProbe(null, "authorization_runtime_permission_read_failed")
+            }
+        }
+
+        is DeclaredApplicationAuthorizationAction.AllowAppOp -> {
+            val response = shell(
+                "appops get ${shellArgument(packageName)} ${shellArgument(action.operation.wireName)}",
+            )
+            when (
+                val state = response?.takeIf { it.exitCode == 0 }
+                    ?.let { AppOpsResponseParser.parse(it.output, action.operation.wireName) }
+            ) {
+                AuthorizationValueState.ALLOWED -> AuthorizationProbe(true, null, state)
+                null -> AuthorizationProbe(null, "authorization_appop_read_failed")
+                else -> AuthorizationProbe(false, "authorization_appop_not_allowed", state)
+            }
+        }
+
+        is DeclaredApplicationAuthorizationAction.EnableSecureFlag -> {
+            val response = shell("settings get secure ${shellArgument(action.setting.wireName)}")
+            when {
+                response == null || response.exitCode != 0 ->
+                    AuthorizationProbe(null, "authorization_secure_setting_read_failed")
+                response.output.trim() == "1" -> AuthorizationProbe(true, null, AuthorizationValueState.ENABLED)
+                response.output.trim() == "0" -> AuthorizationProbe(
+                    false,
+                    "authorization_secure_setting_disabled",
+                    AuthorizationValueState.DISABLED,
+                )
+                else -> AuthorizationProbe(null, "authorization_secure_setting_read_failed")
+            }
+        }
+
+        is DeclaredApplicationAuthorizationAction.AppendSecureComponent -> {
+            val response = shell("settings get secure ${shellArgument(action.setting.wireName)}")
+            val entries = response?.takeIf { it.exitCode == 0 }
+                ?.let { parseAuthorizationComponentList(it.output) }
+            when {
+                entries == null -> AuthorizationProbe(null, "authorization_component_list_read_failed")
+                action.componentName in entries -> AuthorizationProbe(
+                    true,
+                    null,
+                    AuthorizationValueState.COMPONENT_PRESENT,
+                    entries.size,
+                )
+                else -> AuthorizationProbe(
+                    false,
+                    "authorization_component_not_present",
+                    AuthorizationValueState.COMPONENT_ABSENT,
+                    entries.size,
+                )
+            }
+        }
+    }
+
     override suspend fun inspectComponentAuthorization(
         components: List<ManagedComponent>,
         installedApplications: List<ManagedApplicationProbe>,
@@ -1106,7 +1490,10 @@ internal class DadbCommandGateway(
         when (actionId) {
             MaintenanceApplicationActionId.START -> {
                 val launchComponent = AuthorizationPlanFactory.fixedLaunchComponent(component)
-                if (launchComponent == null) {
+                if (launchComponent == null ||
+                    launchComponent.substringBefore('/', missingDelimiterValue = "") != component.packageName ||
+                    !COMPONENT_NAME_PATTERN.matches(launchComponent)
+                ) {
                     MaintenanceDeviceResult.Failed(
                         DeviceActionFailure("maintenance_launch_unavailable", component.componentId, retryable = false),
                     )
@@ -1135,6 +1522,26 @@ internal class DadbCommandGateway(
                     MaintenanceDeviceResult.Completed("component_force_stopped")
                 }
             }
+
+            MaintenanceApplicationActionId.CLEAR_DATA -> {
+                val response = shell("cmd package clear --user 0 ${shellArgument(component.packageName)}")
+                if (!isClearDataAccepted(response)) {
+                    MaintenanceDeviceResult.Failed(
+                        DeviceActionFailure("maintenance_clear_data_failed", component.componentId, retryable = true),
+                    )
+                } else if (probePackagePresence(component.packageName) != PackagePresence.PRESENT) {
+                    MaintenanceDeviceResult.Failed(
+                        DeviceActionFailure("maintenance_clear_data_postcondition_failed", component.componentId, retryable = true),
+                    )
+                } else {
+                    MaintenanceDeviceResult.Completed("component_data_cleared")
+                }
+            }
+
+            MaintenanceApplicationActionId.INSPECT_AUTHORIZATION,
+            MaintenanceApplicationActionId.AUTHORIZE -> MaintenanceDeviceResult.Failed(
+                DeviceActionFailure("maintenance_authorization_requires_scan", component.componentId, retryable = false),
+            )
 
             MaintenanceApplicationActionId.UNINSTALL -> {
                 val response = shell("pm uninstall ${shellArgument(component.packageName)}")
@@ -1307,37 +1714,6 @@ internal class DadbCommandGateway(
         return null
     }
 
-    /** Reads declarations only for an explicit authorization probe. */
-    private fun readInstalledApkDeclarations(
-        component: ManagedComponent,
-        packageName: String,
-    ): com.ninepointnine.helper.domain.device.ApkDeclarationMetadata? {
-        val verificationDirectory = installedApkCacheDirectory ?: return null
-        val metadataReader = installedApkMetadataReader ?: return null
-        if (!verificationDirectory.mkdirs() && !verificationDirectory.isDirectory) return null
-        val remotePath = readInstalledApkPath(packageName) ?: return null
-        val remoteSize = shell("stat -c %s ${shellArgument(remotePath)}")
-            ?.takeIf { it.exitCode == 0 }
-            ?.output
-            ?.trim()
-            ?.toLongOrNull()
-            ?: return null
-        if (remoteSize !in 1L..MAX_DECLARATION_READ_BYTES) return null
-        val pulledApk = verificationDirectory.resolve(
-            "authorization-${component.componentId}-${Integer.toHexString(packageName.hashCode())}.apk",
-        )
-        pulledApk.delete()
-        return try {
-            adb.pull(pulledApk, remotePath)
-            val metadata = metadataReader.read(pulledApk) ?: return null
-            metadata.declarations.takeIf { metadata.packageName == packageName }
-        } catch (_: Exception) {
-            null
-        } finally {
-            pulledApk.delete()
-        }
-    }
-
     private suspend fun verifyInstalledArtifactIdentity(
         artifact: InstallableArtifact,
         metadataReader: ApkMetadataReader,
@@ -1508,6 +1884,72 @@ internal class DadbCommandGateway(
         return null
     }
 
+    /**
+     * Resolve declarations from the APK currently installed on the vehicle.
+     * This is intentionally used only by an explicit authorization inspection;
+     * inventory listing remains metadata-only and never pulls APK bytes.
+     */
+    private fun readInstalledApkDeclarations(
+        component: ManagedComponent,
+        packageName: String,
+    ): com.ninepointnine.helper.domain.device.ApkDeclarationMetadata? {
+        val verificationDirectory = installedApkCacheDirectory ?: return null
+        val metadataReader = installedApkMetadataReader ?: return null
+        if (!verificationDirectory.mkdirs() && !verificationDirectory.isDirectory) return null
+        val remotePath = readInstalledApkPath(packageName) ?: return null
+        val remoteSize = shell("stat -c %s ${shellArgument(remotePath)}")
+            ?.takeIf { it.exitCode == 0 }
+            ?.output
+            ?.trim()
+            ?.toLongOrNull()
+            ?: return null
+        if (remoteSize !in 1L..MAX_DECLARATION_READ_BYTES) return null
+        val pulledApk = verificationDirectory.resolve(
+            "authorization-${component.componentId}-${Integer.toHexString(packageName.hashCode())}.apk",
+        )
+        pulledApk.delete()
+        return try {
+            adb.pull(pulledApk, remotePath)
+            val metadata = metadataReader.read(pulledApk) ?: return null
+            metadata.declarations.takeIf { metadata.packageName == packageName }
+        } catch (_: Exception) {
+            null
+        } finally {
+            pulledApk.delete()
+        }
+    }
+
+    private fun readDeclaredPermission(packageName: String, permission: String): Boolean? {
+        return readPackageDetails(packageName)?.let { parseDeclaredPermission(it, permission) }
+    }
+
+    private fun readPackageDetails(packageName: String): String? {
+        val response = shell("dumpsys package ${shellArgument(packageName)}") ?: return null
+        return response.output.takeIf { response.exitCode == 0 }
+    }
+
+    private fun parseDeclaredPermission(packageDetails: String, permission: String): Boolean? =
+        Regex(
+            "(?im)^\\s*${Regex.escape(permission)}\\s*:\\s*granted\\s*=\\s*(true|false)\\b",
+        ).find(packageDetails)?.groupValues?.getOrNull(1)?.equals("true", ignoreCase = true)
+
+    private fun readDesktopBridgeInventory(): DesktopBridgeInventory? {
+        DESKTOP_BRIDGE_AUTHORITIES.forEach { authority ->
+            val response = shell("content query --uri content://$authority/applications") ?: return@forEach
+            if (response.exitCode != 0) return@forEach
+            when (val parsed = DesktopAppCatalogBridgeParser.parse(response.output)) {
+                is BridgeCatalogParseResult.Valid -> return DesktopBridgeInventory(authority, parsed.entries)
+                BridgeCatalogParseResult.Invalid -> Unit
+            }
+        }
+        return null
+    }
+
+    private fun componentIdForPackage(packageName: String): String {
+        val digest = MessageDigest.getInstance("SHA-256").digest(packageName.toByteArray(Charsets.UTF_8))
+        return "app-" + digest.take(12).joinToString("") { "%02x".format(it.toInt() and 0xff) }
+    }
+
     private fun inspectInstalledPackage(componentId: String, packageName: String): PackageInspection {
         val response = shell("pm path $packageName")
             ?: return PackageInspection.Failed(
@@ -1648,6 +2090,9 @@ internal class DadbCommandGateway(
     private fun isSuccessful(response: AdbShellResponse?): Boolean =
         response != null && response.exitCode == 0
 
+    private fun isClearDataAccepted(response: AdbShellResponse?): Boolean =
+        isSuccessful(response) && response?.output.orEmpty().lineSequence().any { it.trim() == "Success" }
+
     private fun isPmInstallSuccessful(response: AdbShellResponse?): Boolean = isInstallAccepted(response)
 
     private fun isLaunchAccepted(response: AdbShellResponse?): Boolean {
@@ -1752,6 +2197,12 @@ internal class DadbCommandGateway(
         const val SERVICE_READBACK_ATTEMPTS = 10
         const val SERVICE_READBACK_DELAY_MILLIS = 1_000L
         const val AUTHORIZATION_CONFIRMATION_ATTEMPTS = 4
+        const val MAX_DECLARED_SECURE_LIST_ENTRIES = 32
+        const val MAX_DECLARED_SECURE_LIST_BYTES = 4 * 1024
+        val DESKTOP_BRIDGE_AUTHORITIES = listOf(
+            "com.ninepointnine.desktop.appcatalog",
+            "com.ninepointnine.desktop.test.appcatalog",
+        )
         const val MAX_DECLARATION_READ_BYTES = 128L * 1024L * 1024L
     }
 
@@ -2416,6 +2867,192 @@ internal data class PackageInventoryEntry(
     val packageName: String,
     val versionCode: Long?,
 )
+
+internal data class BridgeApplicationEntry(
+    val packageName: String,
+    val displayName: String,
+    val versionName: String?,
+    val versionCode: Long?,
+    val firstInstallTime: Long?,
+    val lastUpdateTime: Long?,
+    val uid: Int?,
+    val iconBase64: String?,
+    val launcherComponent: String? = null,
+)
+
+private data class DesktopBridgeInventory(
+    val authority: String,
+    val entries: List<BridgeApplicationEntry>,
+)
+
+internal sealed interface BridgeCatalogParseResult {
+    data class Valid(val entries: List<BridgeApplicationEntry>) : BridgeCatalogParseResult
+    data object Invalid : BridgeCatalogParseResult
+}
+
+internal sealed interface BridgeIconParseResult {
+    data class Valid(val iconBase64: String?) : BridgeIconParseResult
+    data object Invalid : BridgeIconParseResult
+}
+
+internal object DesktopAppCatalogBridgeParser {
+    private val rowPattern = Regex("^Row:\\s*(\\d+)\\s+(.*)$")
+    private val fieldPattern = Regex("([A-Za-z][A-Za-z0-9]*?)=([^,]*)(?:, |$)")
+    private val packagePattern = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$")
+    private val componentPattern = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)*/[A-Za-z0-9_.$]+$")
+    private val digestPattern = Regex("^[a-f0-9]{64}$")
+    private val iconPattern = Regex("^[A-Za-z0-9_-]*$")
+
+    fun parse(output: String): BridgeCatalogParseResult {
+        val rows = parseRows(output, MAX_METADATA_OUTPUT_LENGTH) ?: return BridgeCatalogParseResult.Invalid
+        val summary = rows.singleOrNull { it.fields["rowType"] == ROW_TYPE_SUMMARY }
+            ?: return BridgeCatalogParseResult.Invalid
+        if (summary.index != 0 || summary.fields["protocolVersion"]?.toIntOrNull() != SUPPORTED_PROTOCOL_VERSION) {
+            return BridgeCatalogParseResult.Invalid
+        }
+        val expectedCount = summary.fields["batchCount"]?.toIntOrNull()
+            ?.takeIf { it in 0..MAX_APPLICATION_COUNT }
+            ?: return BridgeCatalogParseResult.Invalid
+        val expectedDigest = summary.fields["batchDigest"]?.takeIf(digestPattern::matches)
+            ?: return BridgeCatalogParseResult.Invalid
+        val applicationRows = rows.filter { it.fields["rowType"] == ROW_TYPE_APPLICATION }
+        if (rows.size != expectedCount + 1 || applicationRows.size != expectedCount) {
+            return BridgeCatalogParseResult.Invalid
+        }
+        if (rows.map { it.index } != rows.indices.toList()) return BridgeCatalogParseResult.Invalid
+        val entries = applicationRows.map { row ->
+            parseApplication(row.fields, expectedCount, expectedDigest)
+                ?: return BridgeCatalogParseResult.Invalid
+        }
+        if (entries.distinctBy { it.packageName }.size != entries.size || batchDigest(entries) != expectedDigest) {
+            return BridgeCatalogParseResult.Invalid
+        }
+        return BridgeCatalogParseResult.Valid(
+            entries.sortedWith(
+                compareByDescending<BridgeApplicationEntry> { it.firstInstallTime ?: Long.MIN_VALUE }
+                    .thenByDescending { it.lastUpdateTime ?: Long.MIN_VALUE }
+                    .thenBy { it.packageName },
+            ),
+        )
+    }
+
+    fun parseIcon(output: String, expectedPackageName: String): BridgeIconParseResult {
+        if (!packagePattern.matches(expectedPackageName)) return BridgeIconParseResult.Invalid
+        val row = parseRows(output, MAX_ICON_OUTPUT_LENGTH)?.singleOrNull()
+            ?: return BridgeIconParseResult.Invalid
+        val fields = row.fields
+        if (row.index != 0 ||
+            fields["protocolVersion"]?.toIntOrNull() != SUPPORTED_PROTOCOL_VERSION ||
+            fields["rowType"] != ROW_TYPE_ICON ||
+            fields["packageName"] != expectedPackageName
+        ) return BridgeIconParseResult.Invalid
+        val icon = fields["iconBase64"] ?: return BridgeIconParseResult.Invalid
+        if (icon.length > MAX_ICON_BASE64_LENGTH || !iconPattern.matches(icon)) {
+            return BridgeIconParseResult.Invalid
+        }
+        return BridgeIconParseResult.Valid(icon.takeIf(String::isNotEmpty))
+    }
+
+    private fun parseApplication(
+        fields: Map<String, String>,
+        expectedCount: Int,
+        expectedDigest: String,
+    ): BridgeApplicationEntry? {
+        if (fields["protocolVersion"]?.toIntOrNull() != SUPPORTED_PROTOCOL_VERSION ||
+            fields["batchCount"]?.toIntOrNull() != expectedCount ||
+            fields["batchDigest"] != expectedDigest
+        ) return null
+        val packageName = fields["packageName"]?.takeIf(packagePattern::matches) ?: return null
+        val displayName = decode(fields["displayName"])?.takeIf(String::isNotBlank) ?: return null
+        val versionName = decode(fields["versionName"]) ?: return null
+        val versionCode = fields["versionCode"]?.toLongOrNull()?.takeIf { it >= 0 } ?: return null
+        val firstInstallTime = fields["firstInstallTime"]?.toLongOrNull()?.takeIf { it >= 0 } ?: return null
+        val lastUpdateTime = fields["lastUpdateTime"]?.toLongOrNull()?.takeIf { it >= 0 } ?: return null
+        val uid = fields["uid"]?.toIntOrNull()?.takeIf { it >= 0 } ?: return null
+        val launcher = fields["launcherComponent"] ?: return null
+        if (launcher.isNotEmpty() &&
+            (!componentPattern.matches(launcher) || launcher.substringBefore('/') != packageName)
+        ) return null
+        return BridgeApplicationEntry(
+            packageName = packageName,
+            displayName = displayName,
+            versionName = versionName.ifBlank { null },
+            versionCode = versionCode,
+            firstInstallTime = firstInstallTime,
+            lastUpdateTime = lastUpdateTime,
+            uid = uid,
+            iconBase64 = null,
+            launcherComponent = launcher.ifBlank { null },
+        )
+    }
+
+    private fun parseRows(output: String, maxLength: Int): List<BridgeRow>? {
+        if (output.isBlank() || output.length > maxLength) return null
+        val rows = mutableListOf<BridgeRow>()
+        try {
+            output.lineSequence().map(String::trim).filter(String::isNotEmpty).forEach { line ->
+                val match = rowPattern.matchEntire(line) ?: throw InvalidBridgeRow
+                val fieldsText = match.groupValues[2]
+                val fields = fieldPattern.findAll(fieldsText).associate { it.groupValues[1] to it.groupValues[2] }
+                if (fields.isEmpty() || fieldPattern.findAll(fieldsText).joinToString(", ") { it.value.removeSuffix(", ") } != fieldsText) {
+                    throw InvalidBridgeRow
+                }
+                rows += BridgeRow(match.groupValues[1].toIntOrNull() ?: throw InvalidBridgeRow, fields)
+            }
+        } catch (_: InvalidBridgeRow) {
+            return null
+        }
+        return rows
+    }
+
+    private object InvalidBridgeRow : RuntimeException()
+
+    private fun batchDigest(entries: List<BridgeApplicationEntry>): String {
+        val canonical = entries.sortedBy { it.packageName }.joinToString(RECORD_SEPARATOR) { entry ->
+            listOf(
+                entry.packageName,
+                encode(entry.displayName),
+                encode(entry.versionName.orEmpty()),
+                entry.versionCode.toString(),
+                entry.firstInstallTime.toString(),
+                entry.lastUpdateTime.toString(),
+                entry.uid.toString(),
+                entry.launcherComponent.orEmpty(),
+            ).joinToString(FIELD_SEPARATOR)
+        }
+        return MessageDigest.getInstance("SHA-256")
+            .digest(canonical.toByteArray(Charsets.UTF_8))
+            .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+    }
+
+    private fun decode(value: String?): String? {
+        val encoded = value?.takeIf { it.length <= MAX_TEXT_BASE64_LENGTH } ?: return null
+        return runCatching {
+            String(Base64.getUrlDecoder().decode(encoded), Charsets.UTF_8)
+        }.getOrNull()?.takeIf { it.length <= MAX_DECODED_TEXT_LENGTH }
+    }
+
+    private fun encode(value: String): String = Base64.getUrlEncoder().withoutPadding()
+        .encodeToString(value.toByteArray(Charsets.UTF_8))
+
+    private const val FIELD_SEPARATOR = "\u001f"
+    private const val RECORD_SEPARATOR = "\u001e"
+    private const val ROW_TYPE_SUMMARY = "summary"
+    private const val ROW_TYPE_APPLICATION = "application"
+    private const val ROW_TYPE_ICON = "icon"
+    private const val MAX_APPLICATION_COUNT = 1_000
+    private const val MAX_TEXT_BASE64_LENGTH = 1024
+    private const val MAX_DECODED_TEXT_LENGTH = 256
+    private const val MAX_ICON_BASE64_LENGTH = 512 * 1024
+    private const val MAX_METADATA_OUTPUT_LENGTH = 2 * 1024 * 1024
+    private const val MAX_ICON_OUTPUT_LENGTH = MAX_ICON_BASE64_LENGTH + 1024
+    private const val SUPPORTED_PROTOCOL_VERSION = 2
+
+    private data class BridgeRow(
+        val index: Int,
+        val fields: Map<String, String>,
+    )
+}
 
 /** Parses stable package-manager lines without depending on shell locale text. */
 internal object PackageInventoryParser {

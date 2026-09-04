@@ -9,6 +9,9 @@ import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import android.graphics.BitmapFactory
+import android.util.Base64
 import androidx.compose.ui.res.painterResource
 import androidx.compose.foundation.Image
 import androidx.compose.ui.layout.ContentScale
@@ -58,8 +61,17 @@ fun ComponentLogo(
     contentDescription: String?,
     modifier: Modifier = Modifier,
     size: Dp = 40.dp,
+    encodedPng: String? = null,
 ) {
-    val apkIcon = LocalApkIcons.current[iconKey]
+    val bridgedIcon = remember(encodedPng) {
+        encodedPng?.let { encoded ->
+            runCatching {
+                val bytes = Base64.decode(encoded, Base64.URL_SAFE or Base64.NO_WRAP or Base64.NO_PADDING)
+                BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
+            }.getOrNull()
+        }
+    }
+    val apkIcon = bridgedIcon ?: LocalApkIcons.current[iconKey]
     if (apkIcon != null) {
         Image(
             bitmap = apkIcon,
@@ -110,6 +122,7 @@ private fun lucideDrawable(name: String): Int = when (name) {
     "circle_pause" -> LucideR.drawable.lucide_ic_circle_pause
     "cloud_off" -> LucideR.drawable.lucide_ic_cloud_off
     "download" -> LucideR.drawable.lucide_ic_download
+    "eraser" -> LucideR.drawable.lucide_ic_eraser
     "file_down" -> LucideR.drawable.lucide_ic_file_down
     "folder_plus" -> LucideR.drawable.lucide_ic_folder_plus
     "layout_grid" -> LucideR.drawable.lucide_ic_layout_grid

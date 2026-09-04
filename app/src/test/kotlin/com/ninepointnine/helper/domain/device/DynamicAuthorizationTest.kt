@@ -13,6 +13,125 @@ import org.junit.Test
 
 class DynamicAuthorizationTest {
     @Test
+    fun `installed declarations compile runtime appop and service requirements`() {
+        val packageName = "com.example.player"
+
+        val requirements = DeclaredApplicationAuthorizationPlanFactory.create(
+            packageName,
+            ApkDeclarationMetadata(
+                requestedPermissions = setOf(
+                    "android.permission.CAMERA",
+                    "android.permission.READ_EXTERNAL_STORAGE",
+                    "android.permission.SYSTEM_ALERT_WINDOW",
+                    "android.permission.PACKAGE_USAGE_STATS",
+                    "android.permission.WRITE_SETTINGS",
+                ),
+                runtimeGrantPermissions = setOf(
+                    "android.permission.CAMERA",
+                    "android.permission.READ_EXTERNAL_STORAGE",
+                ),
+                services = setOf(
+                    ApkServiceDeclaration(
+                        "$packageName/com.example.player.AccessibilityService",
+                        "android.permission.BIND_ACCESSIBILITY_SERVICE",
+                    ),
+                    ApkServiceDeclaration(
+                        "$packageName/com.example.player.NotificationListener",
+                        "android.permission.BIND_NOTIFICATION_LISTENER_SERVICE",
+                    ),
+                ),
+            ),
+        ).associateBy { it.declaration }
+
+        assertEquals(
+            listOf(DeclaredApplicationAuthorizationAction.GrantRuntimePermission("android.permission.CAMERA")),
+            requirements.getValue("android.permission.CAMERA").actions,
+        )
+        assertEquals(
+            listOf(
+                DeclaredApplicationAuthorizationAction.GrantRuntimePermission(
+                    "android.permission.READ_EXTERNAL_STORAGE",
+                ),
+                DeclaredApplicationAuthorizationAction.AllowAppOp(ManagedAppOp.READ_EXTERNAL_STORAGE),
+            ),
+            requirements.getValue("android.permission.READ_EXTERNAL_STORAGE").actions,
+        )
+        assertEquals(
+            listOf(DeclaredApplicationAuthorizationAction.AllowAppOp(ManagedAppOp.SYSTEM_ALERT_WINDOW)),
+            requirements.getValue("android.permission.SYSTEM_ALERT_WINDOW").actions,
+        )
+        assertEquals(
+            listOf(DeclaredApplicationAuthorizationAction.AllowAppOp(ManagedAppOp.GET_USAGE_STATS)),
+            requirements.getValue("android.permission.PACKAGE_USAGE_STATS").actions,
+        )
+        assertEquals(
+            listOf(DeclaredApplicationAuthorizationAction.AllowAppOp(ManagedAppOp.WRITE_SETTINGS)),
+            requirements.getValue("android.permission.WRITE_SETTINGS").actions,
+        )
+        assertEquals(
+            listOf(
+                DeclaredApplicationAuthorizationAction.AppendSecureComponent(
+                    ManagedSecureComponentList.ENABLED_ACCESSIBILITY_SERVICES,
+                    "$packageName/com.example.player.AccessibilityService",
+                ),
+                DeclaredApplicationAuthorizationAction.EnableSecureFlag(ManagedSecureFlag.ACCESSIBILITY_ENABLED),
+            ),
+            requirements.getValue("$packageName/com.example.player.AccessibilityService").actions,
+        )
+    }
+
+    @Test
+    fun `normal and signature permissions remain visible without generating shell writes`() {
+        val requirements = DeclaredApplicationAuthorizationPlanFactory.create(
+            "com.example.player",
+            ApkDeclarationMetadata(
+                requestedPermissions = setOf(
+                    "android.permission.INTERNET",
+                    "android.permission.FOREGROUND_SERVICE",
+                    "com.example.signature.CONTROL",
+                    "android.permission.CAMERA",
+                ),
+                runtimeGrantPermissions = setOf("android.permission.CAMERA"),
+            ),
+        ).associateBy { it.declaration }
+
+        listOf(
+            "android.permission.INTERNET",
+            "android.permission.FOREGROUND_SERVICE",
+            "com.example.signature.CONTROL",
+        ).forEach { permission ->
+            val requirement = requirements.getValue(permission)
+            assertEquals(ApplicationAuthorizationRequirementKind.DECLARED_PERMISSION, requirement.kind)
+            assertEquals(false, requirement.automaticallyActionable)
+            assertEquals(
+                listOf(DeclaredApplicationAuthorizationAction.InspectPermission(permission)),
+                requirement.actions,
+            )
+        }
+        assertEquals(
+            listOf(DeclaredApplicationAuthorizationAction.GrantRuntimePermission("android.permission.CAMERA")),
+            requirements.getValue("android.permission.CAMERA").actions,
+        )
+    }
+
+    @Test
+    fun `installed declaration authorization ignores services owned by another package`() {
+        val requirements = DeclaredApplicationAuthorizationPlanFactory.create(
+            "com.example.player",
+            ApkDeclarationMetadata(
+                services = setOf(
+                    ApkServiceDeclaration(
+                        "com.attacker.player/com.attacker.player.AccessibilityService",
+                        "android.permission.BIND_ACCESSIBILITY_SERVICE",
+                    ),
+                ),
+            ),
+        )
+
+        assertTrue(requirements.isEmpty())
+    }
+
+    @Test
     fun `cloud setup compiles to typed actions and preserves sort order`() {
         val setup = AuthorizationSetupDeclaration(
             appOps = setOf(ManagedAppOp.SYSTEM_ALERT_WINDOW),
@@ -53,66 +172,77 @@ class DynamicAuthorizationTest {
     fun `declared service uses actual application id while retaining base namespace`() {
         val packageName = "com.ninepointnine.desktop.test"
         val declaredService = ApkServiceDeclaration(
-            "$packageName/com.ninepointnine.desktop.debug.NavigationDemoAccessibilityService",
-            "android.permission.BIND_ACCESSIBILITY_SERVICE",
+            componentName = "$packageName/com.ninepointnine.desktop.debug.NavigationDemoAccessibilityService",
+            permission = "android.permission.BIND_ACCESSIBILITY_SERVICE",
         )
+
         val ready = AuthorizationPlanFactory.createForComponents(
             components = listOf(
-                ManagedComponent(AuthorizationPlanFactory.DESKTOP_COMPONENT_ID, packageName, order = 0),
+                ManagedComponent(
+                    componentId = AuthorizationPlanFactory.DESKTOP_COMPONENT_ID,
+                    packageName = packageName,
+                    order = 0,
+                ),
             ),
             declaredServicesByComponent = mapOf(
                 AuthorizationPlanFactory.DESKTOP_COMPONENT_ID to setOf(declaredService),
             ),
         ) as AuthorizationPlanBuildResult.Ready
 
-        val action = ready.plan.actions.filterIsInstance<AuthorizationAction.AppendSecureComponent>().single()
+        val action = ready.plan.actions
+            .filterIsInstance<AuthorizationAction.AppendSecureComponent>()
+            .single()
         assertEquals(declaredService.componentName, action.targetComponent)
         assertEquals(
             declaredService.componentName,
             AuthorizationPlanFactory.requiredRuntimeService(ready.plan, ready.plan.components.single()),
         )
         assertTrue(AuthorizationPlanFactory.validate(ready.plan))
-    }
-
-    @Test
-    fun `test suffix fallback keeps the published kotlin namespace`() {
-        val component = ManagedComponent(
-            componentId = AuthorizationPlanFactory.DESKTOP_COMPONENT_ID,
-            packageName = "com.ninepointnine.desktop.test",
-            order = 0,
-        )
-
         assertEquals(
-            "com.ninepointnine.desktop.test/com.ninepointnine.desktop.debug.NavigationDemoAccessibilityService",
-            AuthorizationPlanFactory.requiredRuntimeService(component),
+            null,
+            AuthorizationDeclarationValidator.validateDeclarations(
+                ready.plan,
+                mapOf(
+                    AuthorizationPlanFactory.DESKTOP_COMPONENT_ID to ApkDeclarationMetadata(
+                        requestedPermissions = setOf(
+                            "android.permission.SYSTEM_ALERT_WINDOW",
+                            "android.permission.REQUEST_INSTALL_PACKAGES",
+                        ),
+                        services = setOf(declaredService),
+                    ),
+                ),
+            ),
         )
     }
 
     @Test
-    fun `cross package declared service is rejected before plan construction`() {
+    fun `cross package declared service is rejected before an authorization plan is built`() {
         val result = AuthorizationPlanFactory.createForComponents(
             components = listOf(
                 ManagedComponent(
-                    AuthorizationPlanFactory.DESKTOP_COMPONENT_ID,
-                    "com.ninepointnine.desktop.test",
+                    componentId = AuthorizationPlanFactory.DESKTOP_COMPONENT_ID,
+                    packageName = "com.ninepointnine.desktop.test",
                     order = 0,
                 ),
             ),
             declaredServicesByComponent = mapOf(
                 AuthorizationPlanFactory.DESKTOP_COMPONENT_ID to setOf(
                     ApkServiceDeclaration(
-                        "com.attacker.desktop/com.attacker.desktop.Service",
-                        "android.permission.BIND_ACCESSIBILITY_SERVICE",
+                        componentName = "com.attacker.desktop/com.attacker.desktop.Service",
+                        permission = "android.permission.BIND_ACCESSIBILITY_SERVICE",
                     ),
                 ),
             ),
         )
 
-        assertEquals(AuthorizationPlanBuildResult.Rejected("authorization_service_component_mismatch"), result)
+        assertEquals(
+            AuthorizationPlanBuildResult.Rejected("authorization_service_component_mismatch"),
+            result,
+        )
     }
 
     @Test
-    fun `multiple services for one authorization role are rejected`() {
+    fun `multiple same purpose services are rejected instead of selecting one by sort order`() {
         val packageName = "com.ninepointnine.desktop.test"
         val services = setOf(
             ApkServiceDeclaration(
@@ -127,12 +257,19 @@ class DynamicAuthorizationTest {
 
         val result = AuthorizationPlanFactory.createForComponents(
             components = listOf(
-                ManagedComponent(AuthorizationPlanFactory.DESKTOP_COMPONENT_ID, packageName, order = 0),
+                ManagedComponent(
+                    componentId = AuthorizationPlanFactory.DESKTOP_COMPONENT_ID,
+                    packageName = packageName,
+                    order = 0,
+                ),
             ),
-            declaredServicesByComponent = mapOf(AuthorizationPlanFactory.DESKTOP_COMPONENT_ID to services),
+            declaredServicesByComponent = mapOf("desktop" to services),
         )
 
-        assertEquals(AuthorizationPlanBuildResult.Rejected("authorization_service_ambiguous"), result)
+        assertEquals(
+            AuthorizationPlanBuildResult.Rejected("authorization_service_ambiguous"),
+            result,
+        )
     }
 
     @Test

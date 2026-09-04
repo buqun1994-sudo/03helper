@@ -92,8 +92,9 @@ object InstallUiStateMapper {
             applications = snapshot.maintenance.managedApplications.map { application ->
                 MaintenanceApplicationRow(
                     componentId = application.componentId,
-                    displayName = snapshot.components.firstOrNull { it.id == application.componentId }
-                        ?.displayName ?: application.componentId,
+                    displayName = application.displayName?.ifBlank { null }
+                        ?: snapshot.components.firstOrNull { it.id == application.componentId }?.displayName
+                        ?: application.packageName,
                     packageName = application.packageName,
                     installed = application.installed,
                     versionLabel = application.versionLabel,
@@ -104,6 +105,8 @@ object InstallUiStateMapper {
                     filePath = application.filePath,
                     uid = application.uid,
                     iconKey = application.componentId,
+                    iconBase64 = application.iconBase64,
+                    launchComponent = application.launchComponent,
                 )
             },
             applicationsState = snapshot.maintenance.managedApplicationsState,
@@ -139,7 +142,7 @@ object InstallUiStateMapper {
             ),
             applicationAction = snapshot.maintenance.applicationAction?.let { action ->
                 MaintenanceApplicationFeedback(
-                    componentId = action.componentId,
+                    packageName = action.packageName,
                     actionId = action.actionId,
                     status = action.status,
                     resultCode = action.resultCode,
@@ -162,6 +165,7 @@ object InstallUiStateMapper {
                     iconKey = details.iconKey,
                 )
             },
+            applicationAuthorizationRequirements = snapshot.maintenance.applicationAuthorizationRequirements,
             installationSelection = snapshot.maintenance.installationSelection?.let { selection ->
                 MaintenanceInstallationSelectionUi(
                     actionId = selection.actionId,
@@ -615,6 +619,10 @@ private fun String.toUserMessage(componentName: String? = null): String {
             reason == "authorization_secure_setting_disabled" ||
             reason == "authorization_component_not_present" ->
             "车机授权未完成：重新授权"
+        reason == "authorization_not_automatically_grantable" ->
+            "该授权由系统自动管理，助手无法直接修改"
+        reason == "authorization_permission_state_unknown" ->
+            "车机未返回该授权的当前状态"
         reason == "authorization_capacity_entries_exceeded" ||
             reason == "authorization_capacity_bytes_exceeded" ->
             "车机授权列表已满：移除无用授权后重试"
@@ -678,12 +686,17 @@ private fun String.toUserMessage(componentName: String? = null): String {
         reason == "maintenance_launch_unavailable" -> "车机没有可用的启动入口：重新安装该应用"
         reason == "maintenance_launch_failed" -> "车机拒绝启动该应用：重新连接车机"
         reason == "maintenance_force_stop_failed" -> "车机未能停止该应用：重新连接车机"
+        reason == "maintenance_clear_data_failed" -> "车机未能清除应用数据：重新连接后重试"
+        reason == "maintenance_clear_data_postcondition_failed" ->
+            "应用数据已处理，但车机未确认应用仍可用：重新读取应用列表"
         reason == "maintenance_uninstall_failed" -> "车机未能卸载该应用：重新连接车机"
         reason == "maintenance_application_details_unavailable" ||
             reason == "maintenance_package_details_failed" ->
             "车机应用详情读取失败：重新连接车机"
         reason == "maintenance_package_check_failed" ->
             "车机应用状态读取失败：重新连接车机"
+        reason == "maintenance_app_catalog_bridge_unavailable" ->
+            "03桌面版本过旧，更新后即可读取完整应用列表"
         reason == "maintenance_inventory_refresh_failed" || reason == "maintenance_package_inventory_failed" ||
             reason == "maintenance_applications_invalid" ->
             "车机应用列表读取失败：重新连接车机"
