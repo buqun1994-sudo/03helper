@@ -1,3 +1,9 @@
+# 2026-09-04 初始化与授权生命周期修复收尾（staging 已生成，设备 smoke 阻断）
+
+1. 本轮隔离提交为 `c3078ae`（初始化完成持久化、动态 Manifest 授权计划、维护任务取消与授权状态收口）、`2ad193b`（1.0.7 版本递增）和 `a0c325a`（1.0.8 / versionCode 9 版本递增）；主工作区另一对话的未提交改动未进入这些提交。
+2. 通过 Cloud 统一 staging 入口生成 `03车机助手-staging-v1.0.8-test.apk` 与对应 ZIP。APK 为 `com.ninepointnine.helper.test`、`1.0.8-test (9)`，大小 `21,096,048` 字节，SHA-256 `8a075e8fdb292c96578b5116697548b995bf3992fd628e85cc87d83d67986582`；staging 证书 SHA-256 为 `aca4f178fea11ccc97a1373c8aa5345b274a3a783398929a9340a79ee83663af`，单 signer、APK Signature Scheme v2 通过。ZIP 大小 `20,160,268` 字节，SHA-256 `c53d75e3bcdb9abefc61279df0cc54eac5c80ff377d27f6a189a8dc4918b755b`，只含同一 APK 且解压后摘要一致。
+3. 当前隔离分支 `:app:testDebugUnitTest` 为 `328` 项全部通过；项目文档、Skills、版本检查和 `git diff --check` 通过。显式测试手机 ADB 设备列表为空，本轮未执行覆盖安装与运行级 smoke；未安装 release、未操作车机、未推送、未发布。
+
 # 2026-09-03 测试机 Debug 覆盖安装与 instrumentation smoke（完成，车机业务链待主测）
 
 1. 使用当前在线测试手机 `adb-497aab37-bqF2pq._adb-tls-connect._tcp`（RMX1901）执行最新 Debug 主包 `com.ninepointnine.helper.test` `1.0.6-test (7)` 和 AndroidTest 包的保留数据覆盖安装；两个安装命令均返回 `Success`。主包 SHA-256 为 `194a12ba790075ea2433ac9c2de03a85edf1d7bc3f89dfd1a9c90da0f9aead6a`，测试包为 `1b4a9b45abe37f88de9f72cea09f4d21efc500195f3325cbab582cf5d763d114`，Debug signer 摘要为 `2990047fddf6d6ec1eb7f83731fcc1398616e5fb83aec97542a4f132c35a1a27`，APK Signature Scheme v2 通过。
