@@ -635,7 +635,12 @@ internal fun MaintenanceSnapshot.toDurableMaintenanceBaseline(): MaintenanceSnap
         } else {
             MaintenanceInventoryState.NOT_STARTED
         },
-        managedApplications = if (normalized.initialInstallationCompleted && verifiedIds.isEmpty()) {
+        managedApplications = if (normalized.initialInstallationCompleted) {
+            // Initial inventory is durable installation evidence, but not an
+            // APK identity that may be reused for a future device write. Keep
+            // every installed row when a later single-component batch adds its
+            // first verified manifest; otherwise that one target would erase
+            // the rest of the completed initial inventory on disk.
             normalized.managedApplications.filter { it.installed }
         } else {
             verifiedApplications

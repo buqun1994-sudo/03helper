@@ -145,10 +145,11 @@ class FolderArtifactCatalogAdapter(
             .filter { it.enabled }
             .filterNot { InstallerSelfIdentity.isSelfComponentId(it.componentId) }
             .associateBy { it.componentId }
-        if (!declared.containsKey(DESKTOP_APP_ID) || DESKTOP_APP_ID !in batch.selectedComponentIds) {
+        val batchContextIds = batch.selectedComponentIds + batch.preinstalledComponentIds
+        if (!declared.containsKey(DESKTOP_APP_ID) || DESKTOP_APP_ID !in batchContextIds) {
             return ArtifactPreparationPlanResult.Failure("distribution_desktop_unavailable", retryable = false)
         }
-        if (!batch.selectedComponentIds.all { it in declared }) {
+        if (!batchContextIds.all { it in declared }) {
             return ArtifactPreparationPlanResult.Failure("selected_catalog_component_set_mismatch", retryable = false)
         }
         val components = batch.preparationComponentIds

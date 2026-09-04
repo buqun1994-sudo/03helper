@@ -54,8 +54,9 @@ class MaintenanceComponentUpdateTest {
         val batch = session.currentSnapshot().installationBatch
         assertEquals(InstallationSessionState.SELECTION_CONFIRMED, session.currentSnapshot().state)
         assertEquals(InstallationFlow.MAINTENANCE_INSTALL, batch?.flow)
-        assertEquals(setOf("desktop", "lyrics"), batch?.selectedComponentIds)
-        assertEquals(setOf("desktop"), batch?.reusableComponentIds)
+        assertEquals(setOf("lyrics"), batch?.selectedComponentIds)
+        assertTrue(batch?.reusableComponentIds.isNullOrEmpty())
+        assertEquals(setOf("desktop"), batch?.preinstalledComponentIds)
         assertEquals(setOf("lyrics"), batch?.preparationComponentIds)
         assertEquals(setOf("lyrics"), batch?.resultComponentIds)
     }
@@ -283,8 +284,9 @@ class MaintenanceComponentUpdateTest {
 
         session.dispatch(InstallationSessionCommand.StartMaintenanceComponentUpdate("lyrics"))
         val batch = checkNotNull(session.currentSnapshot().installationBatch)
-        assertEquals(setOf("desktop", "lyrics"), batch.selectedComponentIds)
-        assertEquals(setOf("desktop"), batch.reusableComponentIds)
+        assertEquals(setOf("lyrics"), batch.selectedComponentIds)
+        assertTrue(batch.reusableComponentIds.isEmpty())
+        assertEquals(setOf("desktop"), batch.preinstalledComponentIds)
         assertEquals(setOf("lyrics"), batch.resultComponentIds)
 
         session.dispatch(InstallationSessionCommand.BeginPipeline)
@@ -316,29 +318,12 @@ class MaintenanceComponentUpdateTest {
                 ),
             ),
         )
-        session.dispatchEvent(InstallationSessionEvent.InstallationStarted(listOf("desktop", "lyrics")))
+        session.dispatchEvent(InstallationSessionEvent.InstallationStarted(listOf("lyrics")))
         session.dispatchEvent(
             InstallationSessionEvent.InstallationBatchCompleted(
                 InstallationBatchReceipt(
                     batchId = batch.batchId,
                     components = listOf(
-                        InstallationComponentReceipt(
-                            componentId = "desktop",
-                            installation = InstallationStageReceipt(
-                                status = InstallationStageReceiptStatus.VERIFIED,
-                                evidence = InstalledArtifactEvidence(
-                                    componentId = "desktop",
-                                    packageName = desktop.packageName,
-                                    version = desktop.apkVersion,
-                                    apkSizeBytes = desktop.apkSizeBytes,
-                                    apkSha256 = desktop.apkSha256,
-                                    certificateSha256 = desktop.certificateSha256,
-                                ),
-                                operationConfirmed = true,
-                            ),
-                            authorization = AuthorizationStageReceipt(AuthorizationStageReceiptStatus.PRESERVED),
-                            availability = AvailabilityStageReceipt(AvailabilityStageReceiptStatus.PRESERVED),
-                        ),
                         InstallationComponentReceipt(
                             componentId = "lyrics",
                             installation = InstallationStageReceipt(

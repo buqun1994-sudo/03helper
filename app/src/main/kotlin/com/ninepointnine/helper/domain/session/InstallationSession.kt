@@ -850,6 +850,7 @@ class InstallationSession(
                 ),
                 componentResults = emptyList(),
                 artifactManifests = emptyList(),
+                installationBatchReceipt = null,
                 artifactCatalogStage = ArtifactCatalogStage.NOT_LOADED,
                 installationBatch = null,
                 selectedSources = emptyMap(),
@@ -886,6 +887,7 @@ class InstallationSession(
                 failure = null,
                 checkpoint = null,
                 componentResults = emptyList(),
+                installationBatchReceipt = null,
                 evidence = current.evidence.copy(
                     writeConfirmed = emptySet(),
                     confirmationPending = emptySet(),
@@ -1745,11 +1747,12 @@ class InstallationSession(
         }
         val selectedOptional = requestedOptional + unverifiedInstalledOptionalIds
         val candidateWithSelection = candidateBase.copy(selectedOptionalComponentIds = selectedOptional)
-        val selectedIdsForCoverage = selectedComponents(candidateWithSelection).map { it.id }.toSet()
-        val reusableIdsForCoverage = if (targetComponentId != null) {
-            reusableMaintenancePrerequisiteIds(candidateWithSelection, setOf(targetComponentId))
-        } else {
+        val selectedIdsForCoverage = targetComponentId?.let(::setOf)
+            ?: selectedComponents(candidateWithSelection).map { it.id }.toSet()
+        val reusableIdsForCoverage = if (targetComponentId == null) {
             reusableInstalledComponentIds(candidateWithSelection)
+        } else {
+            emptySet()
         }
         val unresolvedManifestIds = (selectedIdsForCoverage - reusableIdsForCoverage) -
             effectiveCandidateManifests.map { it.componentId }.toSet()
@@ -1778,13 +1781,27 @@ class InstallationSession(
             )
             return
         }
-        val selected = selectedComponents(candidate)
-        val reusableIds = if (targetComponentId != null) {
-            reusableMaintenancePrerequisiteIds(candidate, setOf(targetComponentId))
+        val selected = if (targetComponentId == null) {
+            selectedComponents(candidate)
         } else {
-            reusableInstalledComponentIds(candidate)
+            candidate.components.filter { it.id == targetComponentId }
         }
+        val reusableIds = if (targetComponentId == null) reusableInstalledComponentIds(candidate) else emptySet()
         val selectedIds = selected.map { it.id }.toSet()
+        val preinstalledIds = if (
+            targetComponentId != null && targetComponentId != AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
+        ) {
+            preinstalledMaintenancePrerequisiteIds(candidate, targetComponentId)
+        } else {
+            emptySet()
+        }
+        if (targetComponentId != null &&
+            targetComponentId != AuthorizationPlanFactory.DESKTOP_COMPONENT_ID &&
+            AuthorizationPlanFactory.DESKTOP_COMPONENT_ID !in preinstalledIds
+        ) {
+            recordMaintenanceUpdateFailure(current, targetComponentId, "desktop_prerequisite_unverified")
+            return
+        }
         // Starting a maintenance install is a new device-work generation. The
         // batch id and the checkpoint token must be created from that same
         // next generation so events from the previous maintenance action
@@ -1796,25 +1813,27 @@ class InstallationSession(
             strategy = strategy,
             selectedComponentIds = selectedIds,
             reusableComponentIds = reusableIds intersect selectedIds,
+            preinstalledComponentIds = preinstalledIds,
             preparationComponentIds = selectedIds - reusableIds,
             resultComponentIds = selectedIds - reusableIds,
             catalogIdentity = catalogIdentity(candidate),
         )
+        val retainedBaselineIds = reusableIds + preinstalledIds
         val baselineEvidence = current.evidence.copy(
-            artifactsVerified = current.evidence.artifactsVerified intersect reusableIds,
-            artifactVerifications = current.evidence.artifactVerifications.filterKeys { it in reusableIds },
-            installed = current.evidence.installed intersect reusableIds,
+            artifactsVerified = current.evidence.artifactsVerified intersect retainedBaselineIds,
+            artifactVerifications = current.evidence.artifactVerifications.filterKeys { it in retainedBaselineIds },
+            installed = current.evidence.installed intersect retainedBaselineIds,
             // A write receipt proves only the previous attempt's device call;
             // it cannot be reused as identity proof for this new batch.
             writeConfirmed = emptySet(),
             confirmationPending = emptySet(),
-            installation = current.evidence.installation.filterKeys { it in reusableIds },
-            configured = current.evidence.configured intersect reusableIds,
-            available = current.evidence.available intersect reusableIds,
+            installation = current.evidence.installation.filterKeys { it in retainedBaselineIds },
+            configured = current.evidence.configured intersect retainedBaselineIds,
+            available = current.evidence.available intersect retainedBaselineIds,
             authorizationActions = current.evidence.authorizationActions.filter {
-                it.componentId in reusableIds
+                it.componentId in retainedBaselineIds
             },
-            availability = current.evidence.availability.filterKeys { it in reusableIds },
+            availability = current.evidence.availability.filterKeys { it in retainedBaselineIds },
         )
         val next = candidate.copy(
             state = InstallationSessionState.SELECTION_CONFIRMED,
@@ -3972,22 +3991,28 @@ class InstallationSession(
      * rule separate from missing-only installs so a target update can never be
      * accidentally classified as reusable.
      */
-    private fun reusableMaintenancePrerequisiteIds(
+    private fun preinstalledMaintenancePrerequisiteIds(
         snapshot: InstallationSessionSnapshot,
-        excludedIds: Set<String>,
+        targetComponentId: String,
     ): Set<String> {
-        if (snapshot.maintenance.managedApplicationsState != MaintenanceInventoryState.READY) {
+        if (targetComponentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID ||
+            snapshot.maintenance.managedApplicationsState != MaintenanceInventoryState.READY
+        ) {
             return emptySet()
         }
-        return snapshot.maintenance.managedApplications.asSequence()
-            .filter { it.installed && it.componentId !in excludedIds }
-            .filter { application ->
-                val manifest = installedIdentityManifest(snapshot, application.componentId) ?: return@filter false
-                application.packageName == manifest.packageName &&
-                    application.versionCode == manifest.apkVersion.code
-            }
-            .map { it.componentId }
-            .toSet()
+        val desktopId = AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
+        val application = snapshot.maintenance.managedApplications.firstOrNull {
+            it.installed && it.componentId == desktopId
+        } ?: return emptySet()
+        val manifest = installedIdentityManifest(snapshot, desktopId) ?: return emptySet()
+        return if (
+            application.packageName == manifest.packageName &&
+            application.versionCode == manifest.apkVersion.code
+        ) {
+            setOf(desktopId)
+        } else {
+            emptySet()
+        }
     }
 
     /** Components whose APK/source evidence must be produced in this attempt. */

@@ -96,14 +96,19 @@ class MaintenanceRuntimeTest {
     }
 
     @Test
-    fun `failed baseline is invisible and does not retry for an unverified inventory refresh`() = runTest {
+    fun `failed baseline remains retryable on the next equivalent business snapshot`() = runTest {
         var attempts = 0
         val runtime = runtime(
             maintenanceSnapshot(),
-            controller = null,
+            controller = MaintenanceController(
+                artifactCache = ArtifactCache(Files.createTempDirectory("maintenance-retry").toFile()),
+                diagnosticStore = MaintenanceDiagnosticStore(
+                    Files.createTempDirectory("maintenance-retry-diagnostics").toFile(),
+                ),
+            ),
             persist = {
                 attempts += 1
-                error("disk unavailable")
+                if (attempts == 1) error("disk unavailable")
             },
         )
         advanceUntilIdle()
@@ -111,32 +116,10 @@ class MaintenanceRuntimeTest {
         assertEquals(1, attempts)
         assertEquals(InstallationSessionState.MAINTENANCE, runtime.session.currentSnapshot().state)
 
-        // Persistence feedback projects to the same business baseline and must
-        // not recursively trigger a second write.
-        advanceUntilIdle()
-        assertEquals(1, attempts)
-
-        val action = runtime.session.dispatch(
-            InstallationSessionCommand.MaintenanceAction(MaintenanceActionId.MANAGE_APPS),
-        )
-        runtime.session.dispatchEvent(
-            InstallationSessionEvent.MaintenanceApplicationsResolved(
-                applications = listOf(
-                    ManagedApplicationStatus(
-                        componentId = "desktop",
-                        packageName = "com.ninepointnine.desktop",
-                        installed = true,
-                        versionCode = 1L,
-                    ),
-                ),
-            ),
-            sessionId = action.sessionId,
-        )
+        runtime.dispatch(InstallationSessionCommand.MaintenanceAction(MaintenanceActionId.CLEANUP))
         advanceUntilIdle()
 
-        // An inventory row is not an installation identity. It must not turn
-        // an unverified package observation into a new durable baseline.
-        assertEquals(1, attempts)
+        assertEquals(2, attempts)
         assertEquals(InstallationSessionState.MAINTENANCE, runtime.session.currentSnapshot().state)
         runtime.close()
     }

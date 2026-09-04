@@ -551,7 +551,9 @@ internal fun InstallationBatchReceipt.toResultSummary(
     val maintenanceEntryReady = if (snapshot.installationFlow == InstallationFlow.SELF_UPDATE) {
         true
     } else {
-        desktop?.status == ComponentResultStatus.READY
+        desktop?.status == ComponentResultStatus.READY ||
+            AuthorizationPlanFactory.DESKTOP_COMPONENT_ID in snapshot.installationBatch
+                ?.preinstalledComponentIds.orEmpty()
     }
     return InstallationResultSummary(
         kind = kind,

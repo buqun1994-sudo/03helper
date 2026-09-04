@@ -5,8 +5,13 @@ import com.ninepointnine.helper.application.artifact.PreparedArtifact
 import com.ninepointnine.helper.application.device.DeviceDiscoverySessionAdapter
 import com.ninepointnine.helper.application.device.DeviceConnectionSessionAdapter
 import com.ninepointnine.helper.application.device.toDeviceSummary
+import com.ninepointnine.helper.application.maintenance.MaintenanceController
+import com.ninepointnine.helper.application.maintenance.MaintenanceDiagnosticStore
 import com.ninepointnine.helper.application.session.InstallationSessionBoundary
 import com.ninepointnine.helper.application.session.InstallationSessionEventPort
+import com.ninepointnine.helper.data.catalog.DistributionConfigLoadResult
+import com.ninepointnine.helper.data.catalog.InstallerComponentSource
+import com.ninepointnine.helper.data.catalog.InstallerDistributionConfig
 import com.ninepointnine.helper.domain.artifact.ApkExtractionEvidence
 import com.ninepointnine.helper.domain.artifact.ArchiveDownloadEvidence
 import com.ninepointnine.helper.domain.artifact.ArchiveVerificationEvidence
@@ -22,17 +27,31 @@ import com.ninepointnine.helper.domain.artifact.InstallerSelfIdentity
 import com.ninepointnine.helper.domain.artifact.SourceSelectionEvidence
 import com.ninepointnine.helper.domain.artifact.toComponentDescriptor
 import com.ninepointnine.helper.domain.device.ConnectedDevice
+import com.ninepointnine.helper.domain.device.AdbCommandGateway
+import com.ninepointnine.helper.domain.device.AuthorizationPlan
 import com.ninepointnine.helper.domain.device.DeviceCapability
+import com.ninepointnine.helper.domain.device.DeviceActionConnectionLease
 import com.ninepointnine.helper.domain.device.DeviceConnectionAttempt
 import com.ninepointnine.helper.domain.device.DeviceConnectionCheck
 import com.ninepointnine.helper.domain.device.DeviceConnectionFactory
 import com.ninepointnine.helper.domain.device.DeviceConnectionLease
 import com.ninepointnine.helper.domain.device.DeviceActionFailure
+import com.ninepointnine.helper.domain.device.DeviceInstallResult
 import com.ninepointnine.helper.domain.device.DeviceDiscovery
 import com.ninepointnine.helper.domain.device.DeviceDiscoveryResult
 import com.ninepointnine.helper.domain.device.DeviceEndpoint
 import com.ninepointnine.helper.domain.device.DeviceIdentity
+import com.ninepointnine.helper.domain.device.DeviceShortcut
+import com.ninepointnine.helper.domain.device.DeviceShortcutResult
+import com.ninepointnine.helper.domain.device.InstallableArtifact
 import com.ninepointnine.helper.domain.device.InstalledArtifactEvidence
+import com.ninepointnine.helper.domain.device.MaintenanceCommandGateway
+import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationResult
+import com.ninepointnine.helper.domain.device.MaintenanceDeviceResult
+import com.ninepointnine.helper.domain.device.ManagedApplicationDetailsProbeResult
+import com.ninepointnine.helper.domain.device.ManagedApplicationProbe
+import com.ninepointnine.helper.domain.device.ManagedApplicationsResult
+import com.ninepointnine.helper.domain.device.ManagedComponent
 import com.ninepointnine.helper.domain.session.ComponentDescriptor
 import com.ninepointnine.helper.domain.session.DeviceConnectionStatus
 import com.ninepointnine.helper.domain.session.InstallationSession
@@ -54,6 +73,8 @@ import com.ninepointnine.helper.domain.session.AvailabilityStageReceiptStatus
 import com.ninepointnine.helper.domain.session.MaintenanceInstallationOption
 import com.ninepointnine.helper.domain.session.MaintenanceInstallationSelection
 import com.ninepointnine.helper.domain.session.MaintenanceInventoryState
+import com.ninepointnine.helper.domain.session.MaintenanceActionId
+import com.ninepointnine.helper.domain.session.MaintenanceApplicationActionId
 import com.ninepointnine.helper.domain.session.MaintenanceSnapshot
 import com.ninepointnine.helper.domain.session.MaintenanceUpdateState
 import com.ninepointnine.helper.domain.session.MaintenanceUpdateStatus
@@ -61,12 +82,16 @@ import com.ninepointnine.helper.domain.session.ManagedApplicationStatus
 import com.ninepointnine.helper.data.download.ArtifactCache
 import java.io.File
 import java.nio.file.Files
+import java.time.Instant
 import kotlin.coroutines.CoroutineContext
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -74,6 +99,36 @@ import org.junit.Test
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class InstallerRuntimeTest {
+    @Test
+    fun `replacement device work waits until the cancelled owner fully exits`() = runTest {
+        val owner = SerializedDeviceWorkOwner(this)
+        val firstStarted = CompletableDeferred<Unit>()
+        val firstExiting = CompletableDeferred<Unit>()
+        val releaseFirst = CompletableDeferred<Unit>()
+        val secondStarted = CompletableDeferred<Unit>()
+
+        owner.replace {
+            firstStarted.complete(Unit)
+            try {
+                awaitCancellation()
+            } finally {
+                withContext(NonCancellable) {
+                    firstExiting.complete(Unit)
+                    releaseFirst.await()
+                }
+            }
+        }
+        firstStarted.await()
+
+        owner.replace { secondStarted.complete(Unit) }
+        firstExiting.await()
+        assertFalse(secondStarted.isCompleted)
+
+        releaseFirst.complete(Unit)
+        advanceUntilIdle()
+        assertTrue(secondStarted.isCompleted)
+    }
+
     @Test
     fun `foreground entry starts discovery from the initial connection page`() = runTest {
         var discoveryStarts = 0
@@ -885,6 +940,284 @@ class InstallerRuntimeTest {
     }
 
     @Test
+    fun `single maintenance update hands only its target to the device executor`() = runTest {
+        val desktop = manifest("desktop")
+        val cast = manifest("cast")
+        val descriptors = listOf(desktop, cast).map { it.toComponentDescriptor() }
+        var executedArtifacts: List<PreparedArtifact> = emptyList()
+        var executedBatch: InstallationBatchPlan? = null
+        val runtime = InstallerRuntime(
+            session = InstallationSession(
+                initialSnapshot = InstallationSessionSnapshot(
+                    state = InstallationSessionState.MAINTENANCE,
+                    device = fakeVehicle().toDeviceSummary().copy(
+                        connectionStatus = DeviceConnectionStatus.DISCONNECTED,
+                    ),
+                    components = descriptors,
+                    catalogVersion = "catalog-1",
+                    catalogRevision = 1L,
+                    catalogKeyId = "key-1",
+                    catalogSignatureAlgorithm = "Ed25519",
+                    evidence = com.ninepointnine.helper.domain.session.SessionEvidence(
+                        installed = setOf("desktop", "cast"),
+                        configured = setOf("desktop", "cast"),
+                        available = setOf("desktop", "cast"),
+                    ),
+                    maintenance = MaintenanceSnapshot(
+                        managedApplicationsState = MaintenanceInventoryState.READY,
+                        managedApplications = listOf(desktop, cast).map { manifest ->
+                            ManagedApplicationStatus(
+                                componentId = manifest.componentId,
+                                packageName = manifest.packageName,
+                                installed = true,
+                                versionCode = manifest.apkVersion.code,
+                            )
+                        },
+                        availableComponents = descriptors,
+                        installedManifests = listOf(desktop, cast),
+                        availableManifests = listOf(desktop, cast),
+                        availableCatalogVersion = "catalog-1",
+                        availableCatalogRevision = 1L,
+                        availableCatalogKeyId = "key-1",
+                        availableCatalogSignatureAlgorithm = "Ed25519",
+                        updateStatuses = listOf(
+                            MaintenanceUpdateStatus(
+                                componentId = "cast",
+                                displayName = "cast",
+                                versionLabel = "1.0.0",
+                                installedVersionLabel = "0.9.0",
+                                state = MaintenanceUpdateState.UPDATE_AVAILABLE,
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            createDiscoveryAdapter = { port -> DeviceDiscoverySessionAdapter(fakeDiscovery(), port) },
+            createConnectionAdapter = { port -> fakeConnectionAdapter(port) },
+            loadCatalog = {},
+            prepareInstallationBatch = { batch, port ->
+                assertEquals(setOf("cast"), batch.selectedComponentIds)
+                assertEquals(setOf("desktop"), batch.preinstalledComponentIds)
+                emitArtifactBatchPrepared(batch, listOf(cast), port = port)
+                ArtifactPreparationResult.Prepared(
+                    artifacts = listOf(
+                        PreparedArtifact(
+                            manifest = cast,
+                            sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                            finalApk = File("cast.apk"),
+                        ),
+                    ),
+                )
+            },
+            executeDeviceInstallationWithBatch = { _, artifacts, batch, _, _ ->
+                executedArtifacts = artifacts
+                executedBatch = batch
+            },
+            coroutineContext = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        runtime.dispatch(InstallationSessionCommand.Reconnect)
+        advanceUntilIdle()
+        runtime.dispatch(InstallationSessionCommand.StartMaintenanceComponentUpdate("cast"))
+        advanceUntilIdle()
+
+        assertEquals(setOf("cast"), executedBatch?.selectedComponentIds)
+        assertEquals(setOf("desktop"), executedBatch?.preinstalledComponentIds)
+        assertEquals(listOf("cast"), executedArtifacts.map { it.manifest.componentId })
+        runtime.close()
+    }
+
+    @Test
+    fun `failed cast update can return check again and retry without reinstalling desktop`() = runTest {
+        val desktop = manifest("desktop").copy(
+            version = ArtifactVersion("1.0.2", 3L),
+            apkVersion = ArtifactVersion("1.0.2", 3L),
+            packageName = "com.ninepointnine.desktop.test",
+        )
+        val cast = manifest("cast").copy(
+            version = ArtifactVersion("1.0.3", 4L),
+            apkVersion = ArtifactVersion("1.0.3", 4L),
+            packageName = "com.ninepointnine.desktopcast.test",
+        )
+        val descriptors = listOf(desktop, cast).map { it.toComponentDescriptor() }
+        val gateway = UpdateInventoryGateway(desktop, cast, installedCastVersionCode = 3L)
+        val root = Files.createTempDirectory("runtime-cast-retry").toFile()
+        val executedIds = mutableListOf<Set<String>>()
+        var executionCount = 0
+        val runtime = InstallerRuntime(
+            session = InstallationSession(
+                initialSnapshot = InstallationSessionSnapshot(
+                    state = InstallationSessionState.MAINTENANCE,
+                    device = fakeVehicle().toDeviceSummary().copy(
+                        connectionStatus = DeviceConnectionStatus.DISCONNECTED,
+                    ),
+                    components = descriptors,
+                    catalogVersion = "catalog-1",
+                    catalogRevision = 1L,
+                    catalogKeyId = "key-1",
+                    catalogSignatureAlgorithm = "Ed25519",
+                    evidence = com.ninepointnine.helper.domain.session.SessionEvidence(
+                        installed = setOf("desktop", "cast"),
+                        configured = setOf("desktop", "cast"),
+                        available = setOf("desktop", "cast"),
+                    ),
+                    maintenance = MaintenanceSnapshot(
+                        managedApplicationsState = MaintenanceInventoryState.READY,
+                        managedApplications = listOf(
+                            ManagedApplicationStatus(
+                                componentId = "desktop",
+                                packageName = desktop.packageName,
+                                installed = true,
+                                versionCode = desktop.apkVersion.code,
+                            ),
+                            ManagedApplicationStatus(
+                                componentId = "cast",
+                                packageName = cast.packageName,
+                                installed = true,
+                                versionCode = 3L,
+                            ),
+                        ),
+                        initialInstallationCompleted = true,
+                        availableComponents = descriptors,
+                        installedManifests = listOf(desktop, cast.copy(
+                            version = ArtifactVersion("1.0.2", 3L),
+                            apkVersion = ArtifactVersion("1.0.2", 3L),
+                        )),
+                        availableManifests = listOf(desktop, cast),
+                        availableCatalogVersion = "catalog-1",
+                        availableCatalogRevision = 1L,
+                        availableCatalogKeyId = "key-1",
+                        availableCatalogSignatureAlgorithm = "Ed25519",
+                        updateStatuses = listOf(
+                            MaintenanceUpdateStatus(
+                                componentId = "cast",
+                                displayName = "03投屏",
+                                versionLabel = cast.version.name,
+                                installedVersionLabel = "1.0.2",
+                                state = MaintenanceUpdateState.UPDATE_AVAILABLE,
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            createDiscoveryAdapter = { port -> DeviceDiscoverySessionAdapter(fakeDiscovery(), port) },
+            createConnectionAdapter = { port -> fakeActionConnectionAdapter(port, gateway) },
+            loadCatalog = {},
+            prepareInstallationBatch = { batch, port ->
+                assertEquals(setOf("cast"), batch.selectedComponentIds)
+                assertEquals(setOf("desktop"), batch.preinstalledComponentIds)
+                emitArtifactBatchPrepared(batch, listOf(cast), port = port)
+                ArtifactPreparationResult.Prepared(
+                    artifacts = listOf(
+                        PreparedArtifact(
+                            manifest = cast,
+                            sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                            finalApk = File("cast.apk"),
+                        ),
+                    ),
+                )
+            },
+            executeDeviceInstallationWithBatch = { _, artifacts, batch, _, port ->
+                executionCount += 1
+                executedIds += artifacts.mapTo(linkedSetOf()) { it.manifest.componentId }
+                port.emit(InstallationSessionEvent.InstallationStarted(listOf("cast")))
+                val installation = if (executionCount == 1) {
+                    InstallationStageReceipt(
+                        status = InstallationStageReceiptStatus.FAILED,
+                        reasonCode = "adb_pm_install_failed",
+                        retryable = true,
+                    )
+                } else {
+                    InstallationStageReceipt(
+                        status = InstallationStageReceiptStatus.VERIFIED,
+                        evidence = InstalledArtifactEvidence(
+                            componentId = "cast",
+                            packageName = cast.packageName,
+                            version = cast.apkVersion,
+                            apkSizeBytes = cast.apkSizeBytes,
+                            apkSha256 = cast.apkSha256,
+                            certificateSha256 = cast.certificateSha256,
+                        ),
+                        writeConfirmed = true,
+                        operationConfirmed = true,
+                    )
+                }
+                port.emit(
+                    InstallationSessionEvent.InstallationBatchCompleted(
+                        InstallationBatchReceipt(
+                            batchId = batch.batchId,
+                            components = listOf(
+                                InstallationComponentReceipt(
+                                    componentId = "cast",
+                                    installation = installation,
+                                    authorization = AuthorizationStageReceipt(
+                                        status = if (executionCount == 1) {
+                                            AuthorizationStageReceiptStatus.NOT_ATTEMPTED
+                                        } else {
+                                            AuthorizationStageReceiptStatus.NOT_REQUIRED
+                                        },
+                                        reasonCode = "installation_failed".takeIf { executionCount == 1 },
+                                    ),
+                                    availability = AvailabilityStageReceipt(
+                                        status = if (executionCount == 1) {
+                                            AvailabilityStageReceiptStatus.NOT_ATTEMPTED
+                                        } else {
+                                            AvailabilityStageReceiptStatus.NOT_REQUIRED
+                                        },
+                                        reasonCode = "installation_failed".takeIf { executionCount == 1 },
+                                    ),
+                                ),
+                            ),
+                        ),
+                    ),
+                )
+            },
+            maintenanceController = MaintenanceController(
+                artifactCache = ArtifactCache(root.resolve("artifacts")),
+                diagnosticStore = MaintenanceDiagnosticStore(root.resolve("diagnostics")),
+                loadDistributionConfig = { maintenanceUpdateConfig(desktop, cast) },
+            ),
+            coroutineContext = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        runtime.dispatch(InstallationSessionCommand.Reconnect)
+        advanceUntilIdle()
+        runtime.dispatch(InstallationSessionCommand.StartMaintenanceComponentUpdate("cast"))
+        advanceUntilIdle()
+
+        assertEquals(InstallationSessionState.COMPLETED_WITH_ERRORS, runtime.session.currentSnapshot().state)
+        assertEquals(listOf("cast"), runtime.session.currentSnapshot().componentResults.map { it.componentId })
+
+        runtime.dispatch(InstallationSessionCommand.ReturnToMaintenanceInstallationSelection)
+        advanceUntilIdle()
+        assertEquals(InstallationSessionState.MAINTENANCE, runtime.session.currentSnapshot().state)
+        assertEquals(null, runtime.session.currentSnapshot().maintenance.routeAction)
+        assertEquals(null, runtime.session.currentSnapshot().installationBatchReceipt)
+
+        runtime.dispatch(InstallationSessionCommand.MaintenanceAction(MaintenanceActionId.CHECK_UPDATES))
+        advanceUntilIdle()
+        assertEquals(
+            "inventoryReads=${gateway.inventoryReads}, action=${runtime.session.currentSnapshot().maintenance.lastAction}",
+            null,
+            runtime.session.currentSnapshot().maintenance.activeAction,
+        )
+        assertEquals(
+            MaintenanceUpdateState.UPDATE_AVAILABLE,
+            runtime.session.currentSnapshot().maintenance.updateStatuses.single { it.componentId == "cast" }.state,
+        )
+
+        runtime.dispatch(InstallationSessionCommand.StartMaintenanceComponentUpdate("cast"))
+        advanceUntilIdle()
+
+        val completed = runtime.session.currentSnapshot()
+        assertEquals(InstallationSessionState.SUCCEEDED, completed.state)
+        assertEquals(listOf(setOf("cast"), setOf("cast")), executedIds)
+        assertEquals(listOf("cast"), completed.installationBatchReceipt?.components?.map { it.componentId })
+        assertEquals(listOf("cast"), completed.componentResults.map { it.componentId })
+        runtime.close()
+    }
+
+    @Test
     fun `self update stages without touching the vehicle and commits through the ordinary receipt`() = runTest {
         val self = selfManifest(versionCode = 2)
         val installer = RecordingSelfUpdateInstaller()
@@ -1445,6 +1778,128 @@ class InstallerRuntimeTest {
             },
             eventPort = eventPort,
         )
+
+    private fun fakeActionConnectionAdapter(
+        eventPort: InstallationSessionEventPort,
+        gateway: UpdateInventoryGateway,
+    ): DeviceConnectionSessionAdapter = DeviceConnectionSessionAdapter(
+        connectionFactory = DeviceConnectionFactory {
+            DeviceConnectionAttempt.Connected(
+                object : DeviceActionConnectionLease {
+                    override val device: ConnectedDevice = fakeVehicle()
+                    override val commandGateway: AdbCommandGateway = gateway
+                    override val maintenanceGateway: MaintenanceCommandGateway = gateway
+
+                    override suspend fun check(): DeviceConnectionCheck = DeviceConnectionCheck(true)
+
+                    override fun close() = Unit
+                },
+            )
+        },
+        eventPort = eventPort,
+    )
+
+    private class UpdateInventoryGateway(
+        private val desktop: ArtifactManifest,
+        private val cast: ArtifactManifest,
+        private val installedCastVersionCode: Long,
+    ) : AdbCommandGateway, MaintenanceCommandGateway {
+        var inventoryReads: Int = 0
+
+        override suspend fun installBatch(
+            artifacts: List<InstallableArtifact>,
+            strategy: InstallationStrategy,
+        ): DeviceInstallResult = error("installation is owned by the runtime executor in this test")
+
+        override suspend fun runShortcut(
+            shortcut: DeviceShortcut,
+            selectedComponentIds: Set<String>,
+            authorizationPlan: AuthorizationPlan,
+        ): DeviceShortcutResult = error("authorization is owned by the runtime executor in this test")
+
+        override suspend fun repairAuthorization(
+            manifests: List<ArtifactManifest>,
+            declarationsByComponent: Map<String, com.ninepointnine.helper.domain.device.ApkDeclarationMetadata>,
+        ): MaintenanceDeviceResult = error("authorization repair is outside this test")
+
+        override suspend fun inspectManagedApplications(
+            components: List<ManagedComponent>,
+        ): ManagedApplicationsResult = inspectInstalledApplicationInventory(components)
+
+        override suspend fun inspectInstalledApplicationInventory(
+            components: List<ManagedComponent>,
+        ): ManagedApplicationsResult {
+            inventoryReads += 1
+            val installed = mapOf(
+                desktop.componentId to ManagedApplicationProbe(
+                    componentId = desktop.componentId,
+                    packageName = desktop.packageName,
+                    installed = true,
+                    versionLabel = desktop.apkVersion.name,
+                    versionCode = desktop.apkVersion.code,
+                ),
+                cast.componentId to ManagedApplicationProbe(
+                    componentId = cast.componentId,
+                    packageName = cast.packageName,
+                    installed = true,
+                    versionLabel = "1.0.2",
+                    versionCode = installedCastVersionCode,
+                ),
+            )
+            return ManagedApplicationsResult.Completed(
+                components.mapNotNull { component -> installed[component.componentId] },
+            )
+        }
+
+        override suspend fun launchManagedComponent(
+            component: ManagedComponent,
+        ): MaintenanceDeviceResult = error("launch is outside this test")
+
+        override suspend fun inspectComponentAuthorization(
+            components: List<ManagedComponent>,
+            installedApplications: List<ManagedApplicationProbe>,
+        ): MaintenanceAuthorizationResult = error("authorization inspection is outside this test")
+
+        override suspend fun performApplicationAction(
+            component: ManagedComponent,
+            actionId: MaintenanceApplicationActionId,
+        ): MaintenanceDeviceResult = error("application actions are outside this test")
+
+        override suspend fun inspectManagedApplicationDetails(
+            component: ManagedComponent,
+        ): ManagedApplicationDetailsProbeResult = error("application details are outside this test")
+    }
+
+    private fun maintenanceUpdateConfig(
+        desktop: ArtifactManifest,
+        cast: ArtifactManifest,
+    ): DistributionConfigLoadResult.Success = DistributionConfigLoadResult.Success(
+        InstallerDistributionConfig(
+            channel = "debug",
+            environment = "staging",
+            expiresAt = Instant.parse("2099-01-01T00:00:00Z"),
+            catalogVersion = "catalog-2",
+            catalogRevision = 2L,
+            keyId = "test-key",
+            signatureAlgorithm = "Ed25519",
+            folderUrl = "https://wwatl.lanzouw.com/b0fqlrcyb",
+            apps = listOf(desktop, cast).map { manifest ->
+                InstallerComponentSource(
+                    componentId = manifest.componentId,
+                    archiveFileName = manifest.archiveFileName,
+                    required = manifest.required,
+                    displayName = manifest.displayName,
+                    versionCode = manifest.apkVersion.code,
+                    versionName = manifest.apkVersion.name,
+                    apkSizeBytes = manifest.apkSizeBytes,
+                    packageName = manifest.packageName,
+                    certificateSha256 = manifest.certificateSha256,
+                    apkEntryName = manifest.apkEntryName,
+                    trustProfileId = "nine-studio",
+                )
+            },
+        ),
+    )
 
     private fun emitArtifactBatchPrepared(
         batchPlan: InstallationBatchPlan,

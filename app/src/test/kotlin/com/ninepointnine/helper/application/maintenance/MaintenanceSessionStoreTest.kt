@@ -193,6 +193,20 @@ class MaintenanceSessionStoreTest {
     }
 
     @Test
+    fun `runtime projected baseline is written without a second projection`() {
+        val file = Files.createTempDirectory("maintenance-store-projected")
+            .resolve("session.json")
+            .toFile()
+        val store = MaintenanceSessionStore(file)
+        val baseline = checkNotNull(
+            MaintenanceBaselineProjector.project(maintenanceSnapshot(manifests(1L), manifests(2L))),
+        )
+
+        assertTrue(store.saveProjectedBaseline(baseline))
+        assertEquals(baseline.evidence.installed, store.load()?.evidence?.installed)
+    }
+
+    @Test
     fun `legacy artifact identity backed by installation evidence is migrated before empty identity rejection`() {
         val file = Files.createTempDirectory("maintenance-store-legacy-identity")
             .resolve("session.json")
@@ -286,6 +300,65 @@ class MaintenanceSessionStoreTest {
         assertTrue(restored.maintenance.installedManifests.isEmpty())
         assertEquals(MaintenanceInventoryState.READY, restored.maintenance.managedApplicationsState)
         assertEquals(setOf("desktop", "lyrics"), restored.evidence.installed)
+    }
+
+    @Test
+    fun `single update after initial completion preserves the complete installed inventory`() {
+        val file = Files.createTempDirectory("maintenance-store-initial-update")
+            .resolve("session.json")
+            .toFile()
+        val desktop = manifest("desktop", 2L, required = true)
+        val cast = manifest("cast", 4L, required = false)
+        val base = maintenanceSnapshot(listOf(desktop), listOf(desktop, cast))
+        val snapshot = base.copy(
+            state = InstallationSessionState.SUCCEEDED,
+            components = listOf(desktop, cast).map { it.toComponentDescriptor() },
+            artifactManifests = listOf(cast),
+            artifactCatalogStage = ArtifactCatalogStage.PREPARED,
+            evidence = SessionEvidence(
+                installed = setOf("desktop", "cast"),
+                configured = setOf("desktop", "cast"),
+                available = setOf("desktop", "cast"),
+            ),
+            maintenance = base.maintenance.copy(
+                managedApplicationsState = MaintenanceInventoryState.READY,
+                managedApplications = listOf(
+                    ManagedApplicationStatus(
+                        componentId = "desktop",
+                        packageName = desktop.packageName,
+                        installed = true,
+                        versionCode = desktop.apkVersion.code,
+                    ),
+                    ManagedApplicationStatus(
+                        componentId = "cast",
+                        packageName = cast.packageName,
+                        installed = true,
+                        versionCode = cast.apkVersion.code,
+                    ),
+                ),
+                initialInstallationCompleted = true,
+                availableComponents = listOf(desktop, cast).map { it.toComponentDescriptor() },
+                installedManifests = emptyList(),
+                availableManifests = listOf(desktop, cast),
+            ),
+        )
+        val store = MaintenanceSessionStore(file)
+
+        val baseline = checkNotNull(MaintenanceBaselineProjector.project(snapshot))
+        assertEquals(setOf("desktop", "cast"), baseline.evidence.installed)
+        assertEquals(listOf("cast"), baseline.maintenance.installedManifests.map { it.componentId })
+        assertTrue(store.saveProjectedBaseline(baseline))
+
+        val restored = store.load() ?: error("initial_update_not_restored")
+        assertTrue(restored.maintenance.initialInstallationCompleted)
+        assertEquals(setOf("desktop", "cast"), restored.evidence.installed)
+        assertEquals(
+            setOf("desktop", "cast"),
+            restored.maintenance.managedApplications.map { it.componentId }.toSet(),
+        )
+        assertEquals(2L, restored.maintenance.managedApplications.single { it.componentId == "desktop" }.versionCode)
+        assertEquals(4L, restored.maintenance.managedApplications.single { it.componentId == "cast" }.versionCode)
+        assertEquals(listOf("cast"), restored.maintenance.installedManifests.map { it.componentId })
     }
 
     @Test

@@ -421,7 +421,7 @@ class DeviceInstallationCoordinator(
             }
         } else if (freshInstalledIds.isNotEmpty()) {
             val freshArtifacts = artifacts.filter { it.manifest.componentId in freshInstalledIds }
-            val requireDesktop = AuthorizationPlanFactory.DESKTOP_COMPONENT_ID !in batchPlan.reusableComponentIds
+            val requireDesktop = AuthorizationPlanFactory.DESKTOP_COMPONENT_ID in freshInstalledIds
             val preparation = prepareAuthorizationBatch(freshArtifacts, requireDesktop)
             authorization.putAll(preparation.rejected)
             preparation.rejected.keys.forEach { componentId ->

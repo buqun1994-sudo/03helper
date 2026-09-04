@@ -81,6 +81,33 @@ class FolderArtifactCatalogAdapterTest {
     }
 
     @Test
+    fun `single optional update accepts desktop as a preinstalled prerequisite`() = runBlocking {
+        val config = config()
+        val adapter = FolderArtifactCatalogAdapter(configAdapter(config))
+        adapter.loadSelection()
+        val batch = InstallationBatchPlan(
+            batchId = 42L,
+            flow = InstallationFlow.MAINTENANCE_INSTALL,
+            strategy = InstallationStrategy.REINSTALL_SELECTED,
+            selectedComponentIds = setOf("lyrics"),
+            reusableComponentIds = emptySet(),
+            preinstalledComponentIds = setOf("desktop"),
+            preparationComponentIds = setOf("lyrics"),
+            resultComponentIds = setOf("lyrics"),
+            catalogIdentity = InstallationCatalogIdentity(
+                version = config.effectiveCatalogVersion(),
+                revision = config.catalogRevision,
+                keyId = config.keyId,
+                signatureAlgorithm = config.signatureAlgorithm,
+            ),
+        )
+
+        val result = adapter.buildPreparationPlan(batch) as ArtifactPreparationPlanResult.Ready
+
+        assertEquals(setOf("lyrics"), result.plan.components.map { it.componentId }.toSet())
+    }
+
+    @Test
     fun `preparation plan rejects catalog identity drift before any artifact work`() = runBlocking {
         val config = config()
         val adapter = FolderArtifactCatalogAdapter(configAdapter(config))

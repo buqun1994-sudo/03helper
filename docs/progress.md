@@ -1,3 +1,13 @@
+# 2026-09-04 单项维护批次边界收口与 1.0.9 staging 收尾（已安装手机，待合并主测）
+
+1. 本轮将“用户点击更新的目标”和“已安装运行前置”拆成独立批次语义。单独更新 03投屏时，03桌面只能作为已验证前置保留，不能进入制品准备、设备安装、授权、启动或结果收据；这修复的是批次边界缺陷，桌面悬浮条闪烁只是旧链路重装桌面的可观察后果。
+2. 初始化库存、制品准备、维护检查和设备执行现由同一串行 owner 管理；替换操作会取消并等待旧任务退出。维护终态清除旧收据，初始化完成库存独立持久化，单项更新不会抹掉完整库存，因此“完成”后冷启动应稳定进入维护态。
+3. 授权计划、维护检查和运行验证均优先使用已验证 APK 的实际 `applicationId` 与 Manifest Service；不按 debug / staging / release 包名写死。同用途多个 Service 或跨包 Service 会 fail closed，不会猜测目标。实际 staging 03桌面 APK 已核对包含对应声明，旧“授权未完成”归属助手的静态身份裁决，不归属 03桌面缺少声明。
+4. 已通过 `:app:testDebugUnitTest`（334 项，0 failures / 0 errors / 0 skipped）、`compileDebugAndroidTestKotlin`、`lintDebug`、`assembleDebug`、`assembleDebugAndroidTest`、本地环境与文档 / Skill / diff 检查。新增时序回归覆盖“投屏失败 -> 返回维护 -> 再检查更新 -> 再次只更新投屏”，第二次设备执行集合与结果收据都只含投屏。
+5. Cloud 统一 staging 入口已生成桌面产物 `03车机助手-staging-v1.0.9-test.apk` 与对应 ZIP：包名 `com.ninepointnine.helper.test`、版本 `1.0.9-test (10)`；APK SHA-256 为 `c0a856a73d53105ac9e70c54a2e54b770c3108079626084464ec61060c1e1455`，ZIP SHA-256 为 `eabe04cd380f2028d0c363a3097977f0417a44929c09205a467a01041e1540ba`。单 signer、staging 证书 SHA-256 `aca4f178fea11ccc97a1373c8aa5345b274a3a783398929a9340a79ee83663af`、APK v2 和 ZIP 单 APK 完整性均已核对。
+6. 显式测试手机 RMX1901 已保留数据覆盖安装该 staging APK，并回读包名、版本和 Launcher；启动后 `MainActivity` 为前台 Activity。AndroidTest 两次都在 ColorOS 安装测试包阶段返回 `-99`，显示 `Starting 0 tests`，因此未将 instrumentation 记为通过。未清数据、未卸载、未降级、未重启，未对车机执行任何写入。
+7. 合并后仅需人工验证四项：全装状态点击“完成”后冷启动直接进维护页；单独更新 03投屏时桌面不闪烁且结果只含投屏；投屏失败返回后再次检查更新不再停在“正在准备”；更新桌面后“重新授权”能按实际 APK Service 改变状态。
+
 # 2026-09-04 初始化与授权生命周期修复收尾（staging 已生成，设备 smoke 阻断）
 
 1. 本轮隔离提交为 `c3078ae`（初始化完成持久化、动态 Manifest 授权计划、维护任务取消与授权状态收口）、`2ad193b`（1.0.7 版本递增）和 `a0c325a`（1.0.8 / versionCode 9 版本递增）；主工作区另一对话的未提交改动未进入这些提交。

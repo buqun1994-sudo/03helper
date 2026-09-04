@@ -58,6 +58,31 @@ private sealed interface MaintenancePersistenceOperation {
     data object Clear : MaintenancePersistenceOperation
 }
 
+/** Serializes every operation that owns the retained vehicle connection. */
+internal class SerializedDeviceWorkOwner(
+    private val scope: CoroutineScope,
+) {
+    private val mutex = Mutex()
+    private var currentJob: Job? = null
+
+    @Synchronized
+    fun replace(block: suspend () -> Unit): Job {
+        val predecessor = currentJob
+        predecessor?.cancel()
+        return scope.launch {
+            predecessor?.join()
+            mutex.withLock { block() }
+        }.also { replacement ->
+            currentJob = replacement
+        }
+    }
+
+    @Synchronized
+    fun cancel() {
+        currentJob?.cancel()
+    }
+}
+
 /**
  * Defines what preparation files may survive an operation boundary.
  *
@@ -146,6 +171,7 @@ class InstallerRuntime(
 ) : AutoCloseable {
     private val runtimeJob = SupervisorJob(coroutineContext[Job])
     private val scope = CoroutineScope(coroutineContext + runtimeJob)
+    private val deviceWorkOwner = SerializedDeviceWorkOwner(scope)
     private var discoveryAdapter: DeviceDiscoverySessionAdapter? = null
     private var discoveryJob: Job? = null
     private var connectionAdapter: DeviceConnectionSessionAdapter? = null
@@ -156,12 +182,6 @@ class InstallerRuntime(
     private var catalogJob: Job? = null
     private var initialInventoryJob: Job? = null
     private var artifactJob: Job? = null
-    /**
-     * One preparation owns the shared private workspace at a time. A new
-     * session generation waits for the cancelled owner to finish its local
-     * cleanup before it can touch the same paths.
-     */
-    private val artifactPreparationMutex = Mutex()
     private var maintenanceJob: Job? = null
     private var eventDispatcherSessionId: Long? = null
     private var eventDispatcher: InstallationSessionBoundary? = null
@@ -203,12 +223,15 @@ class InstallerRuntime(
                     if (operation == lastMaintenancePersistenceOperation) return@collect
                     // Phone-local durability is deliberately outside the session.
                     // It cannot change a verified car result or trigger a UI state.
-                    lastMaintenancePersistenceOperation = operation
                     try {
                         when (operation) {
                             is MaintenancePersistenceOperation.Save -> checkNotNull(persist).invoke(operation.snapshot)
                             MaintenancePersistenceOperation.Clear -> checkNotNull(clear).invoke()
                         }
+                        // Only a completed write establishes the deduplication
+                        // baseline. A failed attempt must remain retryable when
+                        // the same business state is emitted again.
+                        lastMaintenancePersistenceOperation = operation
                     } catch (cancelled: CancellationException) {
                         throw cancelled
                     } catch (exception: Exception) {
@@ -865,7 +888,7 @@ class InstallerRuntime(
         if (initialInventoryJob?.isActive == true) return
         val port = eventPortFor(snapshot)
         val connection = activeConnection ?: return
-        initialInventoryJob = scope.launch {
+        initialInventoryJob = deviceWorkOwner.replace {
             try {
                 loader(snapshot, connection, port)
                 val latest = session.currentSnapshot()
@@ -922,10 +945,8 @@ class InstallerRuntime(
         batchPlan: InstallationBatchPlan,
         port: InstallationSessionBoundary,
     ) {
-        artifactJob = scope.launch {
-            artifactPreparationMutex.withLock {
-                runUnifiedArtifactPreparation(snapshot, batchPlan, port)
-            }
+        artifactJob = deviceWorkOwner.replace {
+            runUnifiedArtifactPreparation(snapshot, batchPlan, port)
         }
     }
 
@@ -1209,7 +1230,7 @@ class InstallerRuntime(
             return
         }
         val connection = activeConnection
-        maintenanceJob = scope.launch {
+        maintenanceJob = deviceWorkOwner.replace {
             try {
                 controller.execute(actionId, snapshot, connection, port)
             } catch (cancelled: CancellationException) {
@@ -1245,7 +1266,7 @@ class InstallerRuntime(
             return
         }
         val connection = activeConnection
-        maintenanceJob = scope.launch {
+        maintenanceJob = deviceWorkOwner.replace {
             try {
                 controller.executeApplicationAction(
                     componentId = command.componentId,
@@ -1294,10 +1315,13 @@ class InstallerRuntime(
         cancelDiscovery()
         cancelConnectionAttempt()
         catalogJob?.cancel()
+        connectionHealthJob?.cancel()
         initialInventoryJob?.cancel()
         artifactJob?.cancel()
         maintenanceJob?.cancel()
+        deviceWorkOwner.cancel()
         catalogJob = null
+        connectionHealthJob = null
         artifactJob = null
         initialInventoryJob = null
         maintenanceJob = null

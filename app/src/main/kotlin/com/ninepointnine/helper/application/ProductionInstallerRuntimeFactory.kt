@@ -215,7 +215,7 @@ object ProductionInstallerRuntimeFactory {
             maintenanceController = maintenanceController,
             persistMaintenanceSnapshot = { snapshot ->
                 withContext(Dispatchers.IO) {
-                    check(maintenanceSessionStore.save(snapshot)) { "maintenance_baseline_rejected" }
+                    check(maintenanceSessionStore.saveProjectedBaseline(snapshot)) { "maintenance_baseline_rejected" }
                 }
             },
             clearMaintenanceSnapshot = {

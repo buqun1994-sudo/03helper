@@ -2117,17 +2117,21 @@ class DeviceActionsTest {
     }
 
     @Test
-    fun `maintenance cast batch preserves desktop and records explicit no-action success`() {
-        val desktopFile = Files.createTempFile("desktop-cast-baseline", ".apk").toFile().apply {
-            writeBytes(byteArrayOf(1))
-        }
+    fun `single cast update never sends or launches its preinstalled desktop prerequisite`() {
         val castFile = Files.createTempFile("cast", ".apk").toFile().apply { writeBytes(byteArrayOf(2)) }
-        val artifacts = listOf(
-            prepared("desktop", "com.tcrrry.desktop", desktopFile).copy(finalApk = null, declarations = null),
-            prepared("cast", "com.ninepointnine.desktopcast", castFile),
+        val artifacts = listOf(prepared("cast", "com.ninepointnine.desktopcast", castFile))
+        val plan = InstallationBatchPlan(
+            batchId = 2L,
+            flow = InstallationFlow.MAINTENANCE_INSTALL,
+            strategy = InstallationStrategy.REINSTALL_SELECTED,
+            selectedComponentIds = setOf("cast"),
+            reusableComponentIds = emptySet(),
+            preinstalledComponentIds = setOf("desktop"),
+            preparationComponentIds = setOf("cast"),
+            resultComponentIds = setOf("cast"),
         )
-        val plan = maintenanceBatchPlan(artifacts, reusableIds = setOf("desktop"))
         var installCalls = 0
+        val installSelections = mutableListOf<Set<String>>()
         val shortcuts = mutableListOf<DeviceShortcut>()
         val events = mutableListOf<InstallationSessionEvent>()
         val gateway = object : AdbCommandGateway {
@@ -2136,6 +2140,8 @@ class DeviceActionsTest {
                 strategy: InstallationStrategy,
             ): DeviceInstallResult = DeviceInstallResult.Installed(artifacts.map(::installedEvidence)).also {
                 installCalls += 1
+                installSelections += artifacts.mapTo(linkedSetOf()) { it.manifest.componentId }
+                assertEquals(InstallationStrategy.REINSTALL_SELECTED, strategy)
             }
 
             override suspend fun runShortcut(
@@ -2161,14 +2167,14 @@ class DeviceActionsTest {
         }
 
         assertEquals(1, installCalls)
+        assertEquals(listOf(setOf("cast")), installSelections)
         assertEquals(listOf(DeviceShortcut.CONFIGURE_SELECTED_APPS), shortcuts)
         val receipt = events.filterIsInstance<InstallationSessionEvent.InstallationBatchCompleted>()
-            .single().receipt.components.associateBy { it.componentId }
-        assertEquals(AuthorizationStageReceiptStatus.PRESERVED, receipt.getValue("desktop").authorization.status)
-        assertEquals(AvailabilityStageReceiptStatus.PRESERVED, receipt.getValue("desktop").availability.status)
-        assertEquals(InstallationStageReceiptStatus.VERIFIED, receipt.getValue("cast").installation.status)
-        assertEquals(AuthorizationStageReceiptStatus.NOT_REQUIRED, receipt.getValue("cast").authorization.status)
-        assertEquals(AvailabilityStageReceiptStatus.NOT_REQUIRED, receipt.getValue("cast").availability.status)
+            .single().receipt.components.single()
+        assertEquals("cast", receipt.componentId)
+        assertEquals(InstallationStageReceiptStatus.VERIFIED, receipt.installation.status)
+        assertEquals(AuthorizationStageReceiptStatus.NOT_REQUIRED, receipt.authorization.status)
+        assertEquals(AvailabilityStageReceiptStatus.NOT_REQUIRED, receipt.availability.status)
     }
 
     @Test

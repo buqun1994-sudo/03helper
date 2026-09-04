@@ -67,6 +67,11 @@ class MaintenanceSessionStore(
 
     fun save(snapshot: InstallationSessionSnapshot): Boolean {
         val baseline = MaintenanceBaselineProjector.project(snapshot) ?: return false
+        return saveProjectedBaseline(baseline)
+    }
+
+    /** Writes the canonical baseline produced by the runtime without projecting it a second time. */
+    internal fun saveProjectedBaseline(baseline: InstallationSessionSnapshot): Boolean {
         return try {
             val stored = StoredMaintenanceState.from(baseline)
             if (stored.toSnapshotOrNull(sourcePolicy) == null) return false
@@ -184,7 +189,10 @@ internal object MaintenanceBaselineProjector {
         // The completed initial-inventory route is a navigation checkpoint
         // only and grants no APK reuse privilege.
         val installedIds = maintenance.installedManifests.mapTo(mutableSetOf()) { it.componentId }
-        if (installedIds.isEmpty() && maintenance.initialInstallationCompleted) {
+        if (maintenance.initialInstallationCompleted) {
+            // A verified manifest upgrades only that component's reusable APK
+            // identity. It must not replace the separate, already-completed
+            // initial inventory used to decide the durable maintenance route.
             maintenance.managedApplications.filter { it.installed }.forEach { installedIds += it.componentId }
         }
         if (installedIds.isEmpty()) return null
