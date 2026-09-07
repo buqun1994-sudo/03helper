@@ -25,7 +25,7 @@ import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationState
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationRequirement
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationRequirementKind
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationResultValue
-import com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
+import com.ninepointnine.helper.domain.artifact.KnownApplicationPackages
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -370,8 +370,7 @@ class InstallationSessionTest {
         val cast = ComponentDescriptor(
             id = "cast",
             displayName = "Cast",
-            // A non-desktop `required` value is only a catalog recommendation;
-            // it must not make the row mandatory in the initial flow.
+            // Every required value comes from Cloud, including non-desktop apps.
             required = true,
             versionLabel = "1.0",
             sizeLabel = "7 MB",
@@ -390,7 +389,7 @@ class InstallationSessionTest {
 
         session.dispatchEvent(resolvedCatalog(revision = 1L))
         assertEquals(
-            setOf("lyrics", "file-manager", "cast"),
+            setOf("lyrics", "file-manager"),
             session.currentSnapshot().selectedOptionalComponentIds,
         )
 
@@ -399,7 +398,7 @@ class InstallationSessionTest {
         )
         session.dispatchEvent(resolvedCatalog(revision = 2L))
         assertEquals(
-            setOf("file-manager", "cast"),
+            setOf("file-manager"),
             session.currentSnapshot().selectedOptionalComponentIds,
         )
 
@@ -414,7 +413,7 @@ class InstallationSessionTest {
         )
         session.dispatch(InstallationSessionCommand.StartInstallation)
         assertEquals(
-            setOf("desktop", "file-manager"),
+            setOf("desktop", "file-manager", "cast"),
             session.currentSnapshot().installationBatch?.selectedComponentIds,
         )
     }
@@ -896,7 +895,7 @@ class InstallationSessionTest {
         val snapshot = fixture.session.currentSnapshot()
         assertEquals(InstallationSessionState.COMPLETED_WITH_ERRORS, snapshot.state)
         assertEquals(ResultKind.CONFIRMATION_PENDING, snapshot.resolveInstallationResult().kind)
-        assertFalse(snapshot.resolveInstallationResult().canEnterMaintenance)
+        assertTrue(snapshot.resolveInstallationResult().canEnterMaintenance)
         assertTrue(snapshot.failedComponentIds.isEmpty())
     }
 
@@ -1178,7 +1177,7 @@ class InstallationSessionTest {
                 packageName = when (component.id) {
                     "desktop" -> AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME
                     "lyrics" -> AuthorizationPlanFactory.LYRICS_PACKAGE_NAME
-                    else -> InstallerComponentTrustRegistry.FILE_MANAGER_PACKAGE_NAME
+                    else -> KnownApplicationPackages.FILE_MANAGER_PACKAGE_NAME
                 },
                 installed = true,
                 versionCode = 1L,
@@ -1201,6 +1200,20 @@ class InstallationSessionTest {
             inventory.map { it.componentId }.toSet(),
             afterFinish.maintenance.managedApplications.map { it.componentId }.toSet(),
         )
+    }
+
+    @Test
+    fun `initial inventory accepts an installed independent publisher from the current catalog`() {
+        val descriptor = components.first().copy(id = "new-player", packageName = "org.independent.player")
+        val session = InstallationSession(InstallationSessionSnapshot(
+            state = InstallationSessionState.CONNECTED,
+            components = listOf(descriptor),
+        ))
+        session.dispatchEvent(InstallationSessionEvent.InitialInstalledApplicationsResolved(listOf(
+            ManagedApplicationStatus(descriptor.id, descriptor.packageName, installed = true, versionCode = 1L),
+        )))
+        assertEquals(InitialApplicationInventoryState.READY, session.currentSnapshot().initialInventory.state)
+        assertEquals(ComponentStatus.INSTALLED_LATEST, session.currentSnapshot().components.single().status)
     }
 
     @Test
@@ -3676,6 +3689,7 @@ class InstallationSessionTest {
         val components = listOf(
             ComponentDescriptor(
                 id = "lyrics",
+                packageName = AuthorizationPlanFactory.LYRICS_PACKAGE_NAME,
                 displayName = "Lyrics",
                 required = false,
                 versionLabel = "1.14",
@@ -3684,6 +3698,7 @@ class InstallationSessionTest {
             ),
             ComponentDescriptor(
                 id = "desktop",
+                packageName = AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME,
                 displayName = "Desktop",
                 required = true,
                 versionLabel = "0.1",
@@ -3692,6 +3707,7 @@ class InstallationSessionTest {
             ),
             ComponentDescriptor(
                 id = "file-manager",
+                packageName = KnownApplicationPackages.FILE_MANAGER_PACKAGE_NAME,
                 displayName = "File Manager",
                 required = false,
                 versionLabel = "1.6.1",

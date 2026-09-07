@@ -514,8 +514,6 @@ class InstallationSession(
             )
 
             isMandatory(component) -> {
-                // The desktop is the only core invariant. Other required entries
-                // are recommendations and remain user-selectable.
                 return
             }
 
@@ -671,17 +669,11 @@ class InstallationSession(
             // Catalog retry has no installation checkpoint. Clear the stale
             // preparation error and invalidate the old batch before asking
             // the runtime to load a fresh signed control-plane snapshot.
-            val retryInitialInventory = current.initialInventory.state == InitialApplicationInventoryState.FAILED &&
-                current.failure?.reasonCode?.startsWith("initial_inventory") == true
             publish(
                 current.copy(
                     components = emptyList(),
                     selectedOptionalComponentIds = emptySet(),
-                    initialInventory = if (retryInitialInventory) {
-                        InitialApplicationInventory()
-                    } else {
-                        current.initialInventory
-                    },
+                    initialInventory = InitialApplicationInventory(state = InitialApplicationInventoryState.LOADING),
                     artifactManifests = emptyList(),
                     artifactCatalogStage = ArtifactCatalogStage.NOT_LOADED,
                     installationBatch = null,
@@ -975,8 +967,7 @@ class InstallationSession(
             returnToMaintenanceAfterSelfUpdate(current)
             return
         }
-        val desktopReady = AuthorizationPlanFactory.DESKTOP_COMPONENT_ID in current.evidence.available
-        if (!desktopReady ||
+        if (current.evidence.installed.isEmpty() ||
             (current.state == InstallationSessionState.SUCCEEDED && !hasCompleteSuccessEvidence(current))
         ) {
             fail(
@@ -1673,7 +1664,6 @@ class InstallationSession(
                     )
                 }
                 .map { it.componentId }
-                .filter { it != AuthorizationPlanFactory.DESKTOP_COMPONENT_ID }
                 .toSet()
                 .ifEmpty { current.selectedOptionalComponentIds }
             MaintenanceActionId.INSTALL_APPLICATIONS ->
@@ -1682,7 +1672,7 @@ class InstallationSession(
                 current.selectedOptionalComponentIds + AuthorizationPlanFactory.FILE_MANAGER_COMPONENT_ID
 
             else -> targetComponentId?.let { setOf(it) } ?: return
-        }).filterNot { it == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID }.toSet()
+        }).toSet()
         // The maintenance catalog is the only source for a new maintenance
         // batch. The current batch manifests are not a catalog cache and must
         // never silently repopulate a newer control-plane selection.
@@ -1746,12 +1736,13 @@ class InstallationSession(
                 .asSequence()
                 .filter { it.installed }
                 .map { it.componentId }
-                .filter { it != AuthorizationPlanFactory.DESKTOP_COMPONENT_ID && it in availableIds }
+                .filter { it in availableIds }
                 .toSet() - reusableInstalledComponentIds(candidateBase)
         } else {
             emptySet()
         }
-        val selectedOptional = requestedOptional + unverifiedInstalledOptionalIds
+        val selectedOptional = (requestedOptional + unverifiedInstalledOptionalIds) -
+            candidateBase.components.filter(::isMandatory).map { it.id }.toSet()
         val candidateWithSelection = candidateBase.copy(selectedOptionalComponentIds = selectedOptional)
         val selectedIdsForCoverage = targetComponentId?.let(::setOf)
             ?: selectedComponents(candidateWithSelection).map { it.id }.toSet()
@@ -1800,13 +1791,6 @@ class InstallationSession(
             preinstalledMaintenancePrerequisiteIds(candidate, targetComponentId)
         } else {
             emptySet()
-        }
-        if (targetComponentId != null &&
-            targetComponentId != AuthorizationPlanFactory.DESKTOP_COMPONENT_ID &&
-            AuthorizationPlanFactory.DESKTOP_COMPONENT_ID !in preinstalledIds
-        ) {
-            recordMaintenanceUpdateFailure(current, targetComponentId, "desktop_prerequisite_unverified")
-            return
         }
         // Starting a maintenance install is a new device-work generation. The
         // batch id and the checkpoint token must be created from that same
@@ -1895,7 +1879,7 @@ class InstallationSession(
                 versionLabel = manifest?.let { formatArtifactVersionLabel(it.version.name) } ?: component.versionLabel,
                 sizeLabel = manifest?.let { formatArtifactSizeLabel(it.apkSizeBytes) } ?: component.sizeLabel,
                 installed = component.id in existingInstalled,
-                required = component.required || component.id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID,
+                required = component.required,
                 iconKey = component.iconKey,
             )
         }.ifEmpty {
@@ -1906,7 +1890,7 @@ class InstallationSession(
                     versionLabel = formatArtifactVersionLabel(manifest.version.name),
                     sizeLabel = formatArtifactSizeLabel(manifest.apkSizeBytes),
                     installed = manifest.componentId in existingInstalled,
-                    required = manifest.required || manifest.componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID,
+                    required = manifest.required,
                     iconKey = manifest.componentId,
                 )
             }
@@ -1957,29 +1941,7 @@ class InstallationSession(
     private fun startSelectedMaintenanceInstallation() {
         val current = _snapshot.value
         val selection = current.maintenance.installationSelection ?: return
-        val desktop = selection.options.firstOrNull {
-            it.componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
-        }
-        val desktopSelected = AuthorizationPlanFactory.DESKTOP_COMPONENT_ID in selection.selectedComponentIds
-        val desktopAlreadyInstalled = desktop?.installed == true
-        if (!desktopSelected && !desktopAlreadyInstalled) {
-            publish(
-                current.copy(
-                    maintenance = current.maintenance.copy(
-                        installationSelection = selection,
-                        lastAction = MaintenanceActionRecord(
-                            actionId = selection.actionId,
-                            status = MaintenanceActionStatus.FAILED,
-                            reasonCode = "maintenance_desktop_required",
-                            retryable = false,
-                        ),
-                    ),
-                ),
-            )
-            return
-        }
         val selectedOptional = selection.selectedComponentIds
-            .filterNot { it == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID }
             .filter { componentId ->
                 selection.options.firstOrNull { it.componentId == componentId }?.installed != true
             }
@@ -2272,15 +2234,11 @@ class InstallationSession(
         val normalized = event.applications
             .filter { it.installed }
             .distinctBy { it.componentId }
-        val knownIds = buildSet {
-            addAll(current.components.map { it.id })
-            addAll(com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry.ids())
-        }
+        val approvedPackages = current.components.associate { it.id to it.packageName }
         val packagePattern = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$")
         val invalid = normalized.any { application ->
-            application.componentId !in knownIds ||
-                !packagePattern.matches(application.packageName) ||
-                !isKnownManagedPackage(current, application.componentId, application.packageName)
+            !packagePattern.matches(application.packageName) ||
+                approvedPackages[application.componentId] != application.packageName
         }
         if (event.applications.size != normalized.size || invalid) {
             handleInitialInstalledApplicationsFailed(
@@ -2656,21 +2614,13 @@ class InstallationSession(
         val ids = displayedComponents.map { it.id }
         if (
             ids.size != ids.toSet().size ||
-            displayedComponents.none { it.id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID } ||
             displayedComponents.any { it.displayName.isBlank() }
         ) {
             fail(FailureCategory.VERIFICATION, retryable = false, reasonCode = "distribution_config_components_invalid")
             return
         }
         val selectableIds = displayedComponents.filterNot(::isMandatory).map { it.id }.toSet()
-        val recommendedIds = displayedComponents
-            .filter { it.required && !isMandatory(it) }
-            .map { it.id }
-            .toSet()
-        // The first control-plane snapshot is the user's initial install
-        // choice: every non-desktop component starts checked. Once a catalog
-        // identity exists, retain explicit opt-outs across a refresh and only
-        // re-apply the protocol's required-as-recommendation entries.
+        // Optional entries start checked once; later refreshes preserve opt-outs.
         // Metadata can survive a failed catalog attempt for rollback checks;
         // CONTROL_PLANE_READY is the explicit boundary that a prior catalog
         // was accepted for the current selection page. This keeps a retry's
@@ -2678,7 +2628,7 @@ class InstallationSession(
         val hasResolvedCatalog = current.components.isNotEmpty() &&
             current.artifactCatalogStage == ArtifactCatalogStage.CONTROL_PLANE_READY
         val selectedOptionalIds = if (hasResolvedCatalog) {
-            ((current.selectedOptionalComponentIds intersect selectableIds) + recommendedIds) - initiallyInstalledIds
+            (current.selectedOptionalComponentIds intersect selectableIds) - initiallyInstalledIds
         } else {
             selectableIds - initiallyInstalledIds
         }
@@ -2946,7 +2896,7 @@ class InstallationSession(
         val manifests = trustedManifests(snapshot)
         return evidence.all { item ->
             val manifest = manifests[item.componentId] ?: return@all false
-            val isLaunchTarget = item.componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
+            val isLaunchTarget = AuthorizationPlanFactory.requiresLaunchVerification(item.componentId, manifest.packageName)
             item.packageName == manifest.packageName &&
                 item.installedArchiveVerified &&
                 item.launchAttempted == isLaunchTarget &&
@@ -3479,36 +3429,6 @@ class InstallationSession(
         )
     }
 
-    private fun isKnownManagedPackage(
-        snapshot: InstallationSessionSnapshot,
-        componentId: String,
-        packageName: String,
-    ): Boolean {
-        val batchManifests = if (snapshot.artifactCatalogStage == ArtifactCatalogStage.PREPARED) {
-            snapshot.artifactManifests
-        } else {
-            emptyList()
-        }
-        val manifestPackage = (
-            batchManifests +
-                snapshot.maintenance.installedManifests +
-                snapshot.maintenance.availableManifests
-            )
-            .firstOrNull { it.componentId == componentId }
-            ?.packageName
-        if (manifestPackage == packageName) return true
-        if (snapshot.evidence.installation.any {
-                it.key == componentId && it.value.packageName == packageName
-            }
-        ) return true
-        if (snapshot.maintenance.managedApplications.any {
-                it.componentId == componentId && it.packageName == packageName
-            }
-        ) return true
-        return com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
-            .isAllowedPackageName(componentId, packageName)
-    }
-
     private fun handleMaintenanceCatalogRefreshed(event: InstallationSessionEvent.MaintenanceCatalogRefreshed) {
         val current = _snapshot.value
         if (current.state != InstallationSessionState.MAINTENANCE ||
@@ -3598,7 +3518,6 @@ class InstallationSession(
         }
         val componentIds = components.map { it.id }.toSet()
         if (componentIds.size != components.size ||
-            components.none { it.id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID } ||
             !event.controlPlaneOnly && installableManifests.any { it.componentId !in componentIds }
         ) {
             failMaintenanceAction("maintenance_catalog_components_invalid", retryable = false)
@@ -4023,12 +3942,6 @@ class InstallationSession(
         if (components.any { it.id.isBlank() || it.displayName.isBlank() }) return "component_identity_missing"
         if (components.map { it.id }.toSet().size != components.size) return "component_identity_duplicate"
 
-        val desktop = components.firstOrNull { it.id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID }
-        if (desktop == null) return "required_components_missing"
-        if (!desktop.required) return "required_component_unlocked"
-        // Cloud controls installPolicy; multiple required apps are valid. The
-        // desktop entry remains the only mandatory core invariant.
-
         val selectableIds = components.filterNot(::isMandatory).map { it.id }.toSet()
         val initiallyInstalledIds = initialInstalledComponentIds(snapshot)
         if (!snapshot.selectedOptionalComponentIds.all { it in selectableIds || it in initiallyInstalledIds }) {
@@ -4169,7 +4082,7 @@ class InstallationSession(
     }
 
     private fun isMandatory(component: ComponentDescriptor): Boolean =
-        component.id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
+        component.required
 
     private fun isSelectable(component: ComponentDescriptor): Boolean = component.status in setOf(
         ComponentStatus.AVAILABLE,

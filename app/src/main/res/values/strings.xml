@@ -21,11 +21,10 @@
     <string name="connection_failed_description">请确认车机已开启 ADB，并与手机在同一网络。</string>
     <string name="connection_reconnect">重新连接</string>
     <string name="selection_title">选择要安装的应用</string>
-    <string name="selection_description">“03桌面”为必装项，其他应用默认选中，可按需取消</string>
     <string name="selection_prepare_loading_title">正在准备安装应用</string>
     <string name="selection_prepare_loading_description">正在读取最新应用清单，请稍候。</string>
     <string name="selection_inventory_loading_title">正在读取车机应用</string>
-    <string name="selection_inventory_loading_description">正在确认已安装的 03 应用，请稍候。</string>
+    <string name="selection_inventory_loading_description">正在确认已安装的应用，请稍候。</string>
     <string name="required_label">必装</string>
     <string name="optional_label">可选</string>
     <string name="selection_summary">本次安装：%1$d 个应用 · %2$s</string>

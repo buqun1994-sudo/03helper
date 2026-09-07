@@ -167,10 +167,24 @@ class InstallerRuntimeTest {
             session = InstallationSession(),
             createDiscoveryAdapter = { port -> DeviceDiscoverySessionAdapter(fakeDiscovery(), port) },
             createConnectionAdapter = { port -> fakeConnectionAdapter(port) },
-            loadCatalog = {
+            loadCatalog = { port ->
                 catalogLoads += 1
+                port.emit(
+                    InstallationSessionEvent.DistributionConfigResolved(
+                        configVersion = "catalog-v5",
+                        keyId = "fixture-key",
+                        signatureAlgorithm = "SHA256withECDSA",
+                        components = listOf(ComponentDescriptor(
+                            id = "new-player", displayName = "Player", required = false,
+                            versionLabel = "1.0", sizeLabel = "1 MB", compatibilityLabel = null,
+                            packageName = "org.independent.player",
+                        )),
+                        catalogRevision = catalogLoads.toLong(),
+                    ),
+                )
             },
-            loadInitialInventory = { _, _, port ->
+            loadInitialInventory = { snapshot, _, port ->
+                assertEquals("org.independent.player", snapshot.components.single().packageName)
                 inventoryReads += 1
                 port.emit(
                     InstallationSessionEvent.InitialInstalledApplicationsFailed(
@@ -188,7 +202,7 @@ class InstallerRuntimeTest {
 
         assertEquals(InstallationSessionState.CONNECTED, runtime.session.currentSnapshot().state)
         assertEquals(1, inventoryReads)
-        assertEquals(0, catalogLoads)
+        assertEquals(1, catalogLoads)
 
         advanceUntilIdle()
         assertEquals(1, inventoryReads)
@@ -197,7 +211,7 @@ class InstallerRuntimeTest {
         advanceUntilIdle()
 
         assertEquals(2, inventoryReads)
-        assertEquals(0, catalogLoads)
+        assertEquals(2, catalogLoads)
         assertEquals(
             "initial_inventory_package_inventory_failed",
             runtime.session.currentSnapshot().failure?.reasonCode,
@@ -1895,7 +1909,6 @@ class InstallerRuntimeTest {
                     packageName = manifest.packageName,
                     certificateSha256 = manifest.certificateSha256,
                     apkEntryName = manifest.apkEntryName,
-                    trustProfileId = "nine-studio",
                 )
             },
         ),

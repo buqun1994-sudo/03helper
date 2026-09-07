@@ -97,7 +97,7 @@ class LanzouFolderSourceAdapter(
                     try {
                         val expectedArchiveFileNames = config.declaredApps()
                         .filter { component ->
-                            component.enabled && component.clientSupported &&
+                            component.enabled &&
                                     componentMatchesExpected(component.componentId, expectedComponentIds)
                             }
                             .mapTo(mutableSetOf()) { it.archiveFileName }
@@ -158,7 +158,7 @@ class LanzouFolderSourceAdapter(
         // artifacts. They are outside the signed app set and are ignored.
         val zipEntries = entries.filter { it.name.endsWith(".zip", ignoreCase = true) }
         val configuredApps = config.declaredApps().filter {
-            it.enabled && it.clientSupported &&
+            it.enabled &&
                 componentMatchesExpected(it.componentId, expectedComponentIds)
         }
         val byName = zipEntries.groupBy { it.name.lowercase(Locale.ROOT) }
@@ -166,16 +166,6 @@ class LanzouFolderSourceAdapter(
         val artifacts = mutableListOf<LanzouFolderArtifact>()
         val appFailures = mutableListOf<LanzouFolderAppFailure>()
         val matchedIds = mutableMapOf<String, String>()
-        config.declaredApps().filter {
-            it.enabled && !it.clientSupported &&
-                componentMatchesExpected(it.componentId, expectedComponentIds)
-        }.forEach { component ->
-            appFailures += LanzouFolderAppFailure(
-                componentId = component.componentId,
-                reasonCode = "lanzou_folder_client_schema_unsupported",
-                retryable = false,
-            )
-        }
         for (component in configuredApps) {
             val entry = byName[component.archiveFileName.lowercase(Locale.ROOT)]?.singleOrNull()
             if (entry == null) {

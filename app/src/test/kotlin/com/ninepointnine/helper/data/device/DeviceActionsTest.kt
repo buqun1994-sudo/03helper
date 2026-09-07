@@ -96,10 +96,10 @@ class DeviceActionsTest {
             ready.plan.actions.map { it.id },
         )
 
-        val rejected = AuthorizationPlanFactory.createForComponents(
+        val standalone = AuthorizationPlanFactory.createForComponents(
             listOf(AuthorizationPlanFactory.allManagedComponents().first { it.componentId == "lyrics" }),
-        ) as AuthorizationPlanBuildResult.Rejected
-        assertEquals("authorization_desktop_missing", rejected.reasonCode)
+        ) as AuthorizationPlanBuildResult.Ready
+        assertEquals(listOf("lyrics"), standalone.plan.components.map { it.componentId })
     }
 
     @Test
@@ -1189,6 +1189,40 @@ class DeviceActionsTest {
             null,
             parsePackagePresence("Warning: package manager busy", "com.ninepointnine.desktop"),
         )
+    }
+
+    @Test
+    fun `unknown publisher installs with empty authorization even when catalog id is desktop`() = kotlinx.coroutines.runBlocking {
+        val file = Files.createTempFile("independent-player", ".apk").toFile().apply { writeBytes(byteArrayOf(1)) }
+        try {
+            for (id in listOf("new-player", "desktop")) {
+                val artifact = prepared(id, "org.independent.player", file,
+                    ApkDeclarationMetadata(requestedPermissions = emptySet()))
+                val events = mutableListOf<InstallationSessionEvent>()
+                val gateway = object : AdbCommandGateway {
+                    override suspend fun installBatch(
+                        artifacts: List<com.ninepointnine.helper.domain.device.InstallableArtifact>,
+                        strategy: InstallationStrategy,
+                    ): DeviceInstallResult = DeviceInstallResult.Installed(artifacts.map(::installedEvidence))
+
+                    override suspend fun runShortcut(
+                        shortcut: DeviceShortcut, selectedComponentIds: Set<String>, authorizationPlan: AuthorizationPlan,
+                    ): DeviceShortcutResult {
+                        assertEquals(DeviceShortcut.CONFIGURE_SELECTED_APPS, shortcut)
+                        assertTrue(authorizationPlan.actions.isEmpty())
+                        return DeviceShortcutResult.Completed(selectedComponentIds, emptySet(), emptyList(), emptyList())
+                    }
+                }
+                val plan = initialBatchPlan(listOf(artifact))
+                DeviceInstallationCoordinator(activeBoundary(events)).executeBatch(actionLease(gateway), listOf(artifact), plan)
+                val receipt = events.filterIsInstance<InstallationSessionEvent.InstallationBatchCompleted>().single().receipt
+                assertEquals(AuthorizationStageReceiptStatus.NOT_REQUIRED, receipt.components.single().authorization.status)
+                assertEquals(AvailabilityStageReceiptStatus.NOT_REQUIRED, receipt.components.single().availability.status)
+                assertEquals(null, receipt.validationFailure(plan, mapOf(id to artifact.manifest), com.ninepointnine.helper.domain.session.SessionEvidence()))
+            }
+        } finally {
+            file.delete()
+        }
     }
 
     @Test

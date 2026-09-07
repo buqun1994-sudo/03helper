@@ -16,8 +16,6 @@ import com.ninepointnine.helper.domain.artifact.ArtifactSource
 import com.ninepointnine.helper.domain.artifact.ArtifactSourceKind
 import com.ninepointnine.helper.domain.artifact.ArtifactVersion
 import com.ninepointnine.helper.domain.artifact.CompatibilityRange
-import com.ninepointnine.helper.domain.artifact.InstallerPublisherTrustRegistry
-import com.ninepointnine.helper.domain.artifact.ArtifactReleaseTrack
 import com.ninepointnine.helper.domain.artifact.ResolvedDownloadRequest
 import com.ninepointnine.helper.domain.artifact.SourcePlan
 import java.io.ByteArrayInputStream
@@ -39,148 +37,6 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ArtifactSecurityTest {
-    @Test
-    fun `publisher trust recognizes debug staging and production component identities`() {
-        assertTrue(
-            InstallerPublisherTrustRegistry.isTrusted(
-                "nine-studio",
-                "com.ninepointnine.desktop.test",
-                setOf("bfb70dc15b54ad2f1b8acd35fa26ecf552bf2ef21d416a44b7eeda5e5e9ebaa9"),
-            ),
-        )
-        assertTrue(
-            InstallerPublisherTrustRegistry.isTrusted(
-                "nine-studio",
-                "com.ninepointnine.desktoplyrics",
-                setOf("934b9151fe62b39a3474a11f00c2114c7f392b18fec85f39f8d71b9596860e03"),
-            ),
-        )
-        assertFalse(
-            InstallerPublisherTrustRegistry.isTrusted(
-                "nine-studio",
-                "com.ninepointnine.desktoplyrics",
-                setOf("1eb136fffd3f1e4c204d0933cab66c51ee4536a29e949b9c080925c01563b51d"),
-            ),
-        )
-        assertTrue(
-            InstallerPublisherTrustRegistry.isTrusted(
-                "nine-studio",
-                "com.tcrrry.desktop",
-                setOf("2990047fddf6d6ec1eb7f83731fcc1398616e5fb83aec97542a4f132c35a1a27"),
-            ),
-        )
-        assertFalse(
-            InstallerPublisherTrustRegistry.isTrusted(
-                "nine-studio",
-                "com.ninepointnine.desktoplyrics",
-                setOf("bfb70dc15b54ad2f1b8acd35fa26ecf552bf2ef21d416a44b7eeda5e5e9ebaa9"),
-            ),
-        )
-        assertTrue(
-            InstallerPublisherTrustRegistry.isTrusted(
-                "fossify-approved",
-                "org.fossify.filemanager.debug",
-                setOf("be75daa9799eaa4bbe0592a59ce66d3aaef9931d7f7f76ef732907665408a10f"),
-            ),
-        )
-    }
-
-    @Test
-    fun `component identity selects the current track package and certificate exactly`() {
-        val stagingDesktop = InstallerPublisherTrustRegistry.matchComponentIdentity(
-            componentId = "desktop",
-            profileId = "nine-studio",
-            environment = "staging",
-            channel = "debug",
-            packageName = "com.ninepointnine.desktop.test",
-            certificateDigests = setOf("bfb70dc15b54ad2f1b8acd35fa26ecf552bf2ef21d416a44b7eeda5e5e9ebaa9"),
-        )
-        assertEquals(ArtifactReleaseTrack.STAGING, stagingDesktop?.track)
-        assertNull(
-            InstallerPublisherTrustRegistry.matchComponentIdentity(
-                componentId = "desktop",
-                profileId = "nine-studio",
-                environment = "staging",
-                channel = "debug",
-                packageName = "com.ninepointnine.desktop",
-                certificateDigests = setOf("bfb70dc15b54ad2f1b8acd35fa26ecf552bf2ef21d416a44b7eeda5e5e9ebaa9"),
-            ),
-        )
-        assertNull(
-            InstallerPublisherTrustRegistry.matchComponentIdentity(
-                componentId = "desktop",
-                profileId = "nine-studio",
-                environment = "staging",
-                channel = "debug",
-                packageName = "com.tcrrry.desktop",
-                certificateDigests = setOf("2990047fddf6d6ec1eb7f83731fcc1398616e5fb83aec97542a4f132c35a1a27"),
-            ),
-        )
-        assertEquals(
-            ArtifactReleaseTrack.DEBUG,
-            InstallerPublisherTrustRegistry.matchComponentIdentity(
-                componentId = "file-manager",
-                profileId = "fossify-approved",
-                environment = "staging",
-                channel = "debug",
-                packageName = "org.fossify.filemanager.debug",
-                certificateDigests = setOf("2990047fddf6d6ec1eb7f83731fcc1398616e5fb83aec97542a4f132c35a1a27"),
-            )?.track,
-        )
-        assertEquals(
-            ArtifactReleaseTrack.RELEASE,
-            InstallerPublisherTrustRegistry.matchComponentIdentity(
-                componentId = "file-manager",
-                profileId = "fossify-approved",
-                environment = "production",
-                channel = "release",
-                packageName = "org.fossify.filemanager.debug",
-                certificateDigests = setOf("be75daa9799eaa4bbe0592a59ce66d3aaef9931d7f7f76ef732907665408a10f"),
-            )?.track,
-        )
-        assertNull(
-            InstallerPublisherTrustRegistry.matchComponentIdentity(
-                componentId = "file-manager",
-                profileId = "fossify-approved",
-                environment = "production",
-                channel = "release",
-                packageName = "org.fossify.filemanager.debug",
-                certificateDigests = setOf("2990047fddf6d6ec1eb7f83731fcc1398616e5fb83aec97542a4f132c35a1a27"),
-            ),
-        )
-        assertEquals(
-            ArtifactReleaseTrack.STAGING,
-            InstallerPublisherTrustRegistry.matchComponentIdentity(
-                componentId = "lyrics",
-                profileId = "nine-studio",
-                environment = "staging",
-                channel = "debug",
-                packageName = "com.ninepointnine.desktoplyrics.test",
-                certificateDigests = setOf("1eb136fffd3f1e4c204d0933cab66c51ee4536a29e949b9c080925c01563b51d"),
-            )?.track,
-        )
-        assertEquals(
-            ArtifactReleaseTrack.STAGING,
-            InstallerPublisherTrustRegistry.matchComponentIdentity(
-                componentId = "cast",
-                profileId = "nine-studio",
-                environment = "staging",
-                channel = "debug",
-                packageName = "com.ninepointnine.desktopcast.test",
-                certificateDigests = setOf("98740b95c30064f727b9401a851ecf2e576d5e5c38fcc318284578747ba50e2a"),
-            )?.track,
-        )
-        assertNull(
-            InstallerPublisherTrustRegistry.matchComponentIdentity(
-                componentId = "cast",
-                profileId = "nine-studio",
-                environment = "staging",
-                channel = "debug",
-                packageName = "com.ninepointnine.desktopcast",
-                certificateDigests = setOf("2990047fddf6d6ec1eb7f83731fcc1398616e5fb83aec97542a4f132c35a1a27"),
-            ),
-        )
-    }
     @Test
     fun `transient download request string representation redacts URL and headers`() {
         val request = ResolvedDownloadRequest(
@@ -676,13 +532,25 @@ class ArtifactSecurityTest {
             name = "hash_stale",
             manifestChange = { it.copy(apkSha256 = "ff".repeat(32)) },
             metadata = ApkMetadata("com.example.app", ArtifactVersion("1.0.0", 7), setOf("aa".repeat(32))),
-            expectedFailure = null,
+            expectedFailure = "apk_hash_mismatch",
         )
         runCase(
             name = "version_stale",
             manifestChange = { it },
             metadata = ApkMetadata("com.example.app", ArtifactVersion("9.0.0", 99), setOf("aa".repeat(32))),
             expectedFailure = "apk_version_mismatch",
+        )
+        runCase(
+            name = "certificate_extra",
+            manifestChange = { it },
+            metadata = ApkMetadata("com.example.app", ArtifactVersion("1.0.0", 7), setOf("aa".repeat(32), "bb".repeat(32))),
+            expectedFailure = "apk_certificate_mismatch",
+        )
+        runCase(
+            name = "certificate_set",
+            manifestChange = { it.copy(certificateSha256s = setOf("aa".repeat(32), "bb".repeat(32))) },
+            metadata = ApkMetadata("com.example.app", ArtifactVersion("1.0.0", 7), setOf("bb".repeat(32), "aa".repeat(32))),
+            expectedFailure = null,
         )
         runCase(
             name = "certificate_wrong",

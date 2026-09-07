@@ -408,20 +408,11 @@ class DeviceInstallationCoordinator(
         // Initial preinstalled components are already present on the vehicle;
         // they are prerequisites, not fresh authorization targets in this batch.
         val freshInstalledIds = installedIds - batchPlan.reusableComponentIds - preinstalledIds
-        if (AuthorizationPlanFactory.DESKTOP_COMPONENT_ID !in installedIds) {
-            freshInstalledIds.forEach { componentId ->
-                authorization[componentId] = AuthorizationStageReceipt(
-                    status = AuthorizationStageReceiptStatus.FAILED,
-                    reasonCode = "desktop_prerequisite_failed",
-                    retryable = false,
-                )
-                availability[componentId] = availabilityNotAttempted(
-                    "availability_not_attempted_authorization_incomplete",
-                )
-            }
-        } else if (freshInstalledIds.isNotEmpty()) {
+        if (freshInstalledIds.isNotEmpty()) {
             val freshArtifacts = artifacts.filter { it.manifest.componentId in freshInstalledIds }
-            val requireDesktop = AuthorizationPlanFactory.DESKTOP_COMPONENT_ID in freshInstalledIds
+            val requireDesktop = freshArtifacts.any {
+                AuthorizationPlanFactory.requiresLaunchVerification(it.manifest.componentId, it.manifest.packageName)
+            }
             val preparation = prepareAuthorizationBatch(freshArtifacts, requireDesktop)
             authorization.putAll(preparation.rejected)
             preparation.rejected.keys.forEach { componentId ->
@@ -441,7 +432,9 @@ class DeviceInstallationCoordinator(
                     gateway = gateway,
                     candidates = preparation.candidates,
                     plan = preparation.plan,
-                    launchDesktop = requireDesktop,
+                    launchDesktop = preparation.candidates.any {
+                        AuthorizationPlanFactory.requiresLaunchVerification(it.manifest.componentId, it.manifest.packageName)
+                    },
                 )
                 val classified = classifyAuthorizationResult(
                     result = shortcutResult,
@@ -478,7 +471,9 @@ class DeviceInstallationCoordinator(
         while (candidates.isNotEmpty()) {
             val plan = when (val build = AuthorizationPlanFactory.createForComponents(
                 candidates.map(::toManagedComponent),
-                requireDesktop = requireDesktop,
+                requireDesktop = requireDesktop && candidates.any {
+                    AuthorizationPlanFactory.requiresLaunchVerification(it.manifest.componentId, it.manifest.packageName)
+                },
                 declaredServicesByComponent = candidates.mapNotNull { artifact ->
                     artifact.declarations?.services?.let { services ->
                         artifact.manifest.componentId to services
@@ -500,10 +495,8 @@ class DeviceInstallationCoordinator(
             val declarationFailure = AuthorizationDeclarationValidator.validate(plan, candidates)
                 ?: return AuthorizationPreparation(candidates, plan, rejected)
             val failedId = declarationFailure.componentId
-            val optionalFailure = failedId != null &&
-                failedId != AuthorizationPlanFactory.DESKTOP_COMPONENT_ID &&
-                candidates.any { it.manifest.componentId == failedId }
-            if (optionalFailure) {
+            val componentFailure = failedId != null && candidates.any { it.manifest.componentId == failedId }
+            if (componentFailure) {
                 rejected[checkNotNull(failedId)] = AuthorizationStageReceipt(
                     status = AuthorizationStageReceiptStatus.FAILED,
                     reasonCode = declarationFailure.reasonCode,
@@ -517,11 +510,7 @@ class DeviceInstallationCoordinator(
                 val componentId = artifact.manifest.componentId
                 rejected[componentId] = AuthorizationStageReceipt(
                     status = AuthorizationStageReceiptStatus.FAILED,
-                    reasonCode = if (failedId == null || componentId == failedId) {
-                        declarationFailure.reasonCode
-                    } else {
-                        "desktop_prerequisite_failed"
-                    },
+                    reasonCode = declarationFailure.reasonCode,
                     retryable = declarationFailure.retryable,
                 )
             }
@@ -657,7 +646,7 @@ class DeviceInstallationCoordinator(
                 authorizationStatus !in AUTHORIZATION_SATISFIED -> availabilityNotAttempted(
                     "availability_not_attempted_authorization_incomplete",
                 )
-                componentId != AuthorizationPlanFactory.DESKTOP_COMPONENT_ID ->
+                !AuthorizationPlanFactory.requiresLaunchVerification(componentId, artifact.manifest.packageName) ->
                     AvailabilityStageReceipt(AvailabilityStageReceiptStatus.NOT_REQUIRED)
                 else -> classifyDesktopAvailability(
                     result = result,

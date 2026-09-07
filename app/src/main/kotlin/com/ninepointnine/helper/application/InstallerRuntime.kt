@@ -661,17 +661,18 @@ class InstallerRuntime(
                 if (activeConnection == null && snapshot.checkpoint != null) {
                     beginAutomaticInstallReconnect(snapshot)
                 } else if (
+                    snapshot.artifactCatalogStage == ArtifactCatalogStage.NOT_LOADED ||
+                    snapshot.artifactCatalogStage == ArtifactCatalogStage.CONTROL_PLANE_READY &&
+                    snapshot.failure != null &&
+                    snapshot.initialInventory.state != com.ninepointnine.helper.domain.session.InitialApplicationInventoryState.FAILED
+                ) {
+                    launchCatalog(snapshot)
+                } else if (
                     loadInitialInventory != null &&
                     snapshot.initialInventory.state == com.ninepointnine.helper.domain.session.InitialApplicationInventoryState.NOT_STARTED &&
                     initialInventoryJob?.isActive != true
                 ) {
                     launchInitialInventory(snapshot)
-                } else if (
-                    snapshot.artifactCatalogStage == ArtifactCatalogStage.NOT_LOADED ||
-                    snapshot.artifactCatalogStage == ArtifactCatalogStage.CONTROL_PLANE_READY &&
-                    snapshot.failure != null
-                ) {
-                    launchCatalog(snapshot)
                 }
             }
 
@@ -852,11 +853,7 @@ class InstallerRuntime(
                 manualMaintenanceDisconnect = false
                 maintenanceReconnectGeneration = null
                 if (confirmedSnapshot.state == InstallationSessionState.CONNECTED) {
-                    if (loadInitialInventory == null) {
-                        launchCatalog(confirmedSnapshot)
-                    } else {
-                        launchInitialInventory(confirmedSnapshot)
-                    }
+                    launchCatalog(confirmedSnapshot)
                 } else {
                     scheduleConnectionHealthCheck(confirmedSnapshot)
                     reconcile(confirmedSnapshot)
@@ -880,6 +877,14 @@ class InstallerRuntime(
         catalogJob = scope.launch {
             try {
                 loadCatalog(port)
+                val latest = session.currentSnapshot()
+                if (latest.sessionId == snapshot.sessionId &&
+                    latest.state == InstallationSessionState.CONNECTED &&
+                    latest.artifactCatalogStage in setOf(ArtifactCatalogStage.CONTROL_PLANE_READY, ArtifactCatalogStage.PREPARED) &&
+                    latest.failure == null && loadInitialInventory != null
+                ) {
+                    launchInitialInventory(latest)
+                }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
@@ -889,24 +894,13 @@ class InstallerRuntime(
     }
 
     private fun launchInitialInventory(snapshot: InstallationSessionSnapshot) {
-        val loader = loadInitialInventory ?: run {
-            launchCatalog(snapshot)
-            return
-        }
+        val loader = loadInitialInventory ?: return
         if (initialInventoryJob?.isActive == true) return
         val port = eventPortFor(snapshot)
         val connection = activeConnection ?: return
         initialInventoryJob = deviceWorkOwner.replace {
             try {
                 loader(snapshot, connection, port)
-                val latest = session.currentSnapshot()
-                if (
-                    latest.sessionId == snapshot.sessionId &&
-                    latest.state == InstallationSessionState.CONNECTED &&
-                    latest.initialInventory.state == com.ninepointnine.helper.domain.session.InitialApplicationInventoryState.READY
-                ) {
-                    launchCatalog(latest)
-                }
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {

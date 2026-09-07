@@ -9,7 +9,7 @@ import com.ninepointnine.helper.domain.artifact.CompatibilityRange
 import com.ninepointnine.helper.domain.artifact.toComponentDescriptor
 import com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
 import com.ninepointnine.helper.domain.device.AuthorizationSetupDeclaration
-import com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
+import com.ninepointnine.helper.domain.artifact.KnownApplicationPackages
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationRequirement
 import com.ninepointnine.helper.domain.device.DeviceCapability
 import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationState
@@ -291,13 +291,13 @@ class MaintenanceSessionStoreTest {
                 managedApplications = listOf(
                     ManagedApplicationStatus(
                         componentId = "app-desktop-observed",
-                        packageName = InstallerComponentTrustRegistry.CURRENT_DESKTOP_TEST_PACKAGE_NAME,
+                        packageName = KnownApplicationPackages.CURRENT_DESKTOP_TEST_PACKAGE_NAME,
                         installed = true,
                         versionCode = 2L,
                     ),
                     ManagedApplicationStatus(
                         componentId = "app-lyrics-observed",
-                        packageName = InstallerComponentTrustRegistry.CURRENT_LYRICS_TEST_PACKAGE_NAME,
+                        packageName = KnownApplicationPackages.CURRENT_LYRICS_TEST_PACKAGE_NAME,
                         installed = true,
                         versionCode = 2L,
                     ),

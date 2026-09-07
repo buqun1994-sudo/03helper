@@ -1,7 +1,6 @@
 package com.ninepointnine.helper.application.artifact
 
 import com.ninepointnine.helper.data.catalog.CatalogLoadResult
-import com.ninepointnine.helper.data.catalog.CloudInstallerDistributionConfigAdapter
 import com.ninepointnine.helper.data.catalog.TrustedArtifactCatalog
 import com.ninepointnine.helper.domain.artifact.toComponentDescriptor
 import com.ninepointnine.helper.domain.session.ComponentCompatibility
@@ -48,7 +47,6 @@ internal fun TrustedArtifactCatalog.toComponentDescriptors(androidSdk: Int? = nu
         val failure = failuresById[app.componentId]
         val base = manifest?.toComponentDescriptor(androidSdk)
         val status = when {
-            app.minClientSchemaVersion > CloudInstallerDistributionConfigAdapter.SUPPORTED_SCHEMA_VERSION -> ComponentStatus.CLIENT_CAPABILITY_INSUFFICIENT
             failure != null -> componentStatusForReasonCode(failure.reasonCode)
             base != null -> ComponentStatus.AVAILABLE
             manifest == null -> ComponentStatus.READING
@@ -56,6 +54,7 @@ internal fun TrustedArtifactCatalog.toComponentDescriptors(androidSdk: Int? = nu
         }
         ComponentDescriptor(
             id = app.componentId,
+            packageName = app.packageName,
             displayName = app.displayName,
             description = app.description,
             required = app.required,

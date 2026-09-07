@@ -8,13 +8,11 @@ import com.ninepointnine.helper.data.catalog.UnavailableReleaseCatalogTransport
 import com.ninepointnine.helper.data.catalog.UrlConnectionReleaseCatalogTransport
 import com.ninepointnine.helper.domain.artifact.ReleaseSourceMode
 import com.ninepointnine.helper.domain.artifact.ReleaseSourcePolicy
-import com.ninepointnine.helper.domain.artifact.ArtifactReleaseTrack
 import java.net.URL
 import java.util.Base64
 
-/** Debug composition for the signed Cloud schema-v3 configuration. */
+/** Debug composition for the signed Cloud V5 configuration. */
 internal object ReleaseCatalogRuntimeConfig {
-    val artifactReleaseTrack: ArtifactReleaseTrack = ArtifactReleaseTrack.STAGING
     val sourcePolicy: ReleaseSourcePolicy = ReleaseSourcePolicy(
         mode = ReleaseSourceMode.FOLDER_CONFIG,
     )
@@ -52,5 +50,5 @@ internal object ReleaseCatalogRuntimeConfig {
     private const val DEBUG_CHANNEL = "debug"
     private const val DEBUG_ENVIRONMENT = "staging"
     private const val DEBUG_CONFIG_KEY_ID = "03helper-staging-config-2026-08-22-v1"
-    private const val DISTRIBUTION_CONFIG_URL = "https://api-staging.9studio.fun/api/03helper/android-config"
+    private const val DISTRIBUTION_CONFIG_URL = "https://api-staging.9studio.fun/api/03helper/android-config?schemaVersion=5"
 }

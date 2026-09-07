@@ -289,10 +289,10 @@ class DynamicAuthorizationTest {
 
         assertTrue(!AuthorizationPlanFactory.validateComponent(invalidSetup))
         assertTrue(
-            !AuthorizationPlanFactory.validateComponent(
+            AuthorizationPlanFactory.validateComponent(
                 ManagedComponent(
                     componentId = AuthorizationPlanFactory.DESKTOP_COMPONENT_ID,
-                    packageName = "com.attacker.desktop",
+                    packageName = "org.independent.desktop",
                 ),
             ),
         )

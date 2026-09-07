@@ -429,6 +429,7 @@ private class FakeSessionDriver(
             InstallationSessionEvent.DeviceConnectionConfirmed(DebugScenarioFixtures.connectedDevice),
             animated,
         )
+        event(InstallationSessionEvent.InitialInstalledApplicationsResolved(emptyList()), animated)
         if (selectOptional) {
             command(
                 InstallationSessionCommand.ToggleOptionalComponent("lyrics", selected = true),

@@ -130,8 +130,6 @@ class FolderArtifactCatalogAdapter(
                 ?: return ArtifactPreparationPlanResult.Failure("self_update_source_unavailable", retryable = true)
             val normalized = selfSource.copy(
                 componentId = InstallerSelfIdentity.COMPONENT_ID,
-                packageName = InstallerSelfIdentity.PACKAGE_NAME,
-                trustProfileId = InstallerSelfIdentity.TRUST_PROFILE_ID,
             )
             return ArtifactPreparationPlanResult.Ready(
                 ArtifactPreparationPlan(
@@ -146,9 +144,6 @@ class FolderArtifactCatalogAdapter(
             .filterNot { InstallerSelfIdentity.isSelfComponentId(it.componentId) }
             .associateBy { it.componentId }
         val batchContextIds = batch.selectedComponentIds + batch.preinstalledComponentIds
-        if (!declared.containsKey(DESKTOP_APP_ID) || DESKTOP_APP_ID !in batchContextIds) {
-            return ArtifactPreparationPlanResult.Failure("distribution_desktop_unavailable", retryable = false)
-        }
         if (!batchContextIds.all { it in declared }) {
             return ArtifactPreparationPlanResult.Failure("selected_catalog_component_set_mismatch", retryable = false)
         }

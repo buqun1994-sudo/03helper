@@ -154,9 +154,7 @@ data class ComponentRow(
     val errorReason: String? = null,
 )
 
-/** Only 03 desktop is locked on the first-install selection surface. */
-internal fun ComponentRow.isMandatory(): Boolean =
-    id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
+internal fun ComponentRow.isMandatory(): Boolean = required
 
 data class UiProgress(
     val completedCount: Int,

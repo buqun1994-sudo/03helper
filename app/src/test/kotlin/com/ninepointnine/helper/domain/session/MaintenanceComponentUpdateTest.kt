@@ -25,6 +25,37 @@ import org.junit.Test
 
 class MaintenanceComponentUpdateTest {
     @Test
+    fun `third party update and maintenance entry do not depend on desktop`() {
+        val app = manifest("player", 2L, required = false).copy(packageName = "org.independent.player")
+        val descriptor = app.toComponentDescriptor()
+        val base = InstallationSessionSnapshot(
+            state = InstallationSessionState.MAINTENANCE,
+            device = DeviceSummary("car", "Car", DeviceConnectionStatus.CONFIRMED, androidSdk = 28,
+                capabilities = setOf(DeviceCapability.ADB_TCP, DeviceCapability.IDENTITY_READ)),
+            components = listOf(descriptor),
+            maintenance = MaintenanceSnapshot(
+                availableComponents = listOf(descriptor), availableManifests = listOf(app),
+                managedApplicationsState = MaintenanceInventoryState.READY,
+                managedApplications = listOf(ManagedApplicationStatus("player", app.packageName, true, versionCode = 1L)),
+                updateStatuses = listOf(MaintenanceUpdateStatus("player", "Player", "v2", "v1", MaintenanceUpdateState.UPDATE_AVAILABLE)),
+            ),
+        )
+        val session = InstallationSession(base)
+        session.dispatch(InstallationSessionCommand.StartMaintenanceComponentUpdate("player"))
+        assertEquals(InstallationSessionState.SELECTION_CONFIRMED, session.currentSnapshot().state)
+        assertEquals(setOf("player"), session.currentSnapshot().installationBatch?.selectedComponentIds)
+        assertTrue(session.currentSnapshot().installationBatch?.preinstalledComponentIds.isNullOrEmpty())
+
+        val completed = InstallationSession(base.copy(
+            state = InstallationSessionState.COMPLETED_WITH_ERRORS,
+            artifactManifests = listOf(app),
+            evidence = SessionEvidence(installed = setOf("player")),
+        ))
+        completed.dispatch(InstallationSessionCommand.EnterMaintenance)
+        assertEquals(InstallationSessionState.MAINTENANCE, completed.currentSnapshot().state)
+    }
+
+    @Test
     fun `optional update freezes only target while reusing trusted desktop prerequisite`() {
         val desktop = manifest("desktop", 1L, required = true)
         val lyrics = manifest("lyrics", 1L, required = false)

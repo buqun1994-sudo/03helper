@@ -67,7 +67,7 @@ class ArtifactIdentityVerifier(
         if (metadata.packageName != manifest.packageName) {
             return existingFailure(manifest, sourceKind, "apk_package_mismatch")
         }
-        if (metadata.certificateSha256s.none { it.equals(manifest.certificateSha256, ignoreCase = true) }) {
+        if (!manifest.matchesCertificates(metadata.certificateSha256s)) {
             return existingFailure(manifest, sourceKind, "apk_certificate_mismatch")
         }
         if (metadata.version.code != manifest.apkVersion.code ||
@@ -125,11 +125,12 @@ class ArtifactIdentityVerifier(
         if (metadata.packageName != manifest.packageName) {
             return failed(manifest, verifiedArchive.file, extractedApk.file, finalApk, "apk_package_mismatch")
         }
-        val certificateMatches = metadata.certificateSha256s.any {
-            it.equals(manifest.certificateSha256, ignoreCase = true)
-        }
+        val certificateMatches = manifest.matchesCertificates(metadata.certificateSha256s)
         if (!certificateMatches) {
             return failed(manifest, verifiedArchive.file, extractedApk.file, finalApk, "apk_certificate_mismatch")
+        }
+        if (extractedApk.file.length() != manifest.apkSizeBytes || !actualSha256.equals(manifest.apkSha256, ignoreCase = true)) {
+            return failed(manifest, verifiedArchive.file, extractedApk.file, finalApk, "apk_hash_mismatch")
         }
         if (
             metadata.version.code != manifest.apkVersion.code ||

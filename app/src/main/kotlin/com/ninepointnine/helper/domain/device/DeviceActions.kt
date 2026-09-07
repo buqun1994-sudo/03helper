@@ -2,7 +2,7 @@ package com.ninepointnine.helper.domain.device
 
 import com.ninepointnine.helper.domain.artifact.ArtifactManifest
 import com.ninepointnine.helper.domain.artifact.ArtifactVersion
-import com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
+import com.ninepointnine.helper.domain.artifact.KnownApplicationPackages
 import com.ninepointnine.helper.domain.session.MaintenanceApplicationActionId
 import com.ninepointnine.helper.domain.session.InstallationStrategy
 import java.io.File
@@ -734,7 +734,7 @@ object AuthorizationPlanFactory {
 
     fun createForManifests(
         manifests: List<ArtifactManifest>,
-        requireDesktop: Boolean = true,
+        requireDesktop: Boolean = false,
     ): AuthorizationPlanBuildResult =
         createComponents(
             manifests.map {
@@ -750,7 +750,7 @@ object AuthorizationPlanFactory {
 
     fun createForComponents(
         components: List<ManagedComponent>,
-        requireDesktop: Boolean = true,
+        requireDesktop: Boolean = false,
         declaredServicesByComponent: Map<String, Set<ApkServiceDeclaration>> = emptyMap(),
     ): AuthorizationPlanBuildResult = createComponents(
         components,
@@ -759,8 +759,7 @@ object AuthorizationPlanFactory {
     )
 
     /**
-     * Builds the same typed action set for a read-only probe without requiring
-     * the desktop component. Repair/install plans continue to require desktop.
+     * Builds the same typed action set for a read-only probe.
      */
     fun createForInspection(components: List<ManagedComponent>): AuthorizationPlanBuildResult =
         createComponents(components, requireDesktop = false)
@@ -772,14 +771,18 @@ object AuthorizationPlanFactory {
      */
     fun validateComponent(component: ManagedComponent): Boolean = isAllowedDynamicComponent(component)
 
+    /** Runtime verification is a local capability, independent of catalog admission. */
+    fun requiresLaunchVerification(componentId: String, packageName: String): Boolean =
+        componentId == DESKTOP_COMPONENT_ID && KnownApplicationPackages.matchesComponent(componentId, packageName)
+
     /** Returns the built-in component descriptors used by maintenance and fallback inspection. */
     fun allManagedComponents(): List<ManagedComponent> = listOf(
         ManagedComponent(DESKTOP_COMPONENT_ID, DESKTOP_PACKAGE_NAME, order = 0),
         ManagedComponent(LYRICS_COMPONENT_ID, LYRICS_PACKAGE_NAME, order = 1),
         ManagedComponent(FILE_MANAGER_COMPONENT_ID, FILE_MANAGER_PACKAGE_NAME, order = 2),
         ManagedComponent(
-            InstallerComponentTrustRegistry.CAST_COMPONENT_ID,
-            InstallerComponentTrustRegistry.CAST_PACKAGE_NAME,
+            KnownApplicationPackages.CAST_COMPONENT_ID,
+            KnownApplicationPackages.CAST_PACKAGE_NAME,
             order = 3,
         ),
     )
@@ -848,7 +851,7 @@ object AuthorizationPlanFactory {
 
     private fun createComponents(
         components: List<ManagedComponent>,
-        requireDesktop: Boolean = true,
+        requireDesktop: Boolean = false,
         declaredServicesByComponent: Map<String, Set<ApkServiceDeclaration>> = emptyMap(),
     ): AuthorizationPlanBuildResult {
         if (components.isEmpty()) return AuthorizationPlanBuildResult.Rejected("authorization_artifacts_missing")
@@ -877,7 +880,7 @@ object AuthorizationPlanFactory {
                     it.permission == "android.permission.BIND_NOTIFICATION_LISTENER_SERVICE" &&
                         serviceBelongsToPackage(it.componentName, requiredComponent.packageName)
                 }
-                when (componentId) {
+                when (componentId.takeIf { managedComponent(requiredComponent) != null }) {
                     DESKTOP_COMPONENT_ID -> accessibilityCount > 1
                     LYRICS_COMPONENT_ID -> notificationCount > 1 || accessibilityCount > 1
                     else -> false
@@ -885,7 +888,7 @@ object AuthorizationPlanFactory {
             }) {
             return AuthorizationPlanBuildResult.Rejected("authorization_service_ambiguous")
         }
-        if (requireDesktop && components.none { it.componentId == DESKTOP_COMPONENT_ID }) {
+        if (requireDesktop && components.none { requiresLaunchVerification(it.componentId, it.packageName) }) {
             return AuthorizationPlanBuildResult.Rejected("authorization_desktop_missing")
         }
         val orderedComponents = components.sortedWith(compareBy<ManagedComponent> { componentOrder(it) }.thenBy { it.componentId })
@@ -1070,7 +1073,7 @@ object AuthorizationPlanFactory {
     }
 
     private fun managedComponent(component: ManagedComponent): ManagedComponentContract? {
-        if (!InstallerComponentTrustRegistry.isAllowedPackageName(component.componentId, component.packageName)) {
+        if (!KnownApplicationPackages.matchesComponent(component.componentId, component.packageName)) {
             return null
         }
         val packageName = component.packageName
@@ -1112,7 +1115,6 @@ object AuthorizationPlanFactory {
     private fun isAllowedDynamicComponent(component: ManagedComponent): Boolean {
         if (component.componentId.isBlank() || !APP_ID_PATTERN.matches(component.componentId)) return false
         if (!PACKAGE_NAME_PATTERN.matches(component.packageName)) return false
-        if (component.componentId in BUILT_IN_COMPONENT_IDS && managedComponent(component) == null) return false
         return validateSetup(component)
     }
 
@@ -1229,12 +1231,12 @@ object AuthorizationPlanFactory {
         val fixedLaunchComponent: String?,
     )
 
-    const val LYRICS_COMPONENT_ID = InstallerComponentTrustRegistry.LYRICS_COMPONENT_ID
-    const val DESKTOP_COMPONENT_ID = InstallerComponentTrustRegistry.DESKTOP_COMPONENT_ID
-    const val FILE_MANAGER_COMPONENT_ID = InstallerComponentTrustRegistry.FILE_MANAGER_COMPONENT_ID
-    const val LYRICS_PACKAGE_NAME = InstallerComponentTrustRegistry.LYRICS_PACKAGE_NAME
-    const val DESKTOP_PACKAGE_NAME = InstallerComponentTrustRegistry.DESKTOP_PACKAGE_NAME
-    const val FILE_MANAGER_PACKAGE_NAME = InstallerComponentTrustRegistry.FILE_MANAGER_PACKAGE_NAME
+    const val LYRICS_COMPONENT_ID = KnownApplicationPackages.LYRICS_COMPONENT_ID
+    const val DESKTOP_COMPONENT_ID = KnownApplicationPackages.DESKTOP_COMPONENT_ID
+    const val FILE_MANAGER_COMPONENT_ID = KnownApplicationPackages.FILE_MANAGER_COMPONENT_ID
+    const val LYRICS_PACKAGE_NAME = KnownApplicationPackages.LYRICS_PACKAGE_NAME
+    const val DESKTOP_PACKAGE_NAME = KnownApplicationPackages.DESKTOP_PACKAGE_NAME
+    const val FILE_MANAGER_PACKAGE_NAME = KnownApplicationPackages.FILE_MANAGER_PACKAGE_NAME
     const val DESKTOP_MAIN_ACTIVITY = "com.tcrrry.desktop/.MainActivity"
     const val LYRICS_MAIN_ACTIVITY = "com.tcrrry.desktoplyrics/.MainActivity"
     const val FILE_MANAGER_MAIN_ACTIVITY =
@@ -1245,12 +1247,6 @@ object AuthorizationPlanFactory {
         "com.tcrrry.desktoplyrics/com.tcrrry.desktoplyrics.IcarDockAccessibilityService"
     const val DESKTOP_ACCESSIBILITY_SERVICE =
         "com.tcrrry.desktop/com.tcrrry.desktop.debug.NavigationDemoAccessibilityService"
-
-    private val BUILT_IN_COMPONENT_IDS = setOf(
-        DESKTOP_COMPONENT_ID,
-        LYRICS_COMPONENT_ID,
-        FILE_MANAGER_COMPONENT_ID,
-    )
 
     private val PROFILE_COMPONENTS = mapOf(
         "desktop-default" to DESKTOP_COMPONENT_ID,

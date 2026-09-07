@@ -284,6 +284,7 @@ internal fun buildIconRequests(snapshot: InstallationSessionSnapshot): List<ApkI
                     componentId = componentId,
                     packageName = installed.packageName,
                     certificateSha256 = exactManifest?.certificateSha256,
+                    certificateSha256s = exactManifest?.certificateSha256s.orEmpty(),
                     apkSha256 = exactManifest
                         ?.takeIf { installed.versionCode == null || it.apkVersion.code == installed.versionCode }
                         ?.apkSha256,
@@ -296,6 +297,7 @@ internal fun buildIconRequests(snapshot: InstallationSessionSnapshot): List<ApkI
                 componentId = componentId,
                 packageName = manifest.packageName,
                 certificateSha256 = manifest.certificateSha256,
+                certificateSha256s = manifest.certificateSha256s,
                 apkSha256 = manifest.apkSha256,
                 versionCode = manifest.apkVersion.code,
             )

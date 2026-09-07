@@ -296,8 +296,6 @@ private fun SelectionScreen(
         InstallStepIndicator(activeStep = 1, modifier = Modifier.testTag("install_steps"))
         Spacer(modifier = Modifier.height(InstallerDimensions.SectionVerticalSpacing))
         Text(text = stringResource(R.string.selection_title), style = MaterialTheme.typography.headlineSmall, color = InstallerColors.White)
-        Spacer(modifier = Modifier.height(8.dp))
-        Text(text = stringResource(R.string.selection_description), style = MaterialTheme.typography.bodyLarge, color = InstallerColors.AuxiliaryWhite)
         Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
 
         if (state.inventoryFailureReason != null) {
@@ -482,8 +480,6 @@ private fun SelectionFailure(
 
 @Composable
 private fun ComponentChoiceRow(component: ComponentRow, onToggle: (Boolean) -> Unit) {
-    // Cloud's `required` field is an install recommendation for non-desktop
-    // entries. Only the desktop component is locked in first-install UI.
     val mandatory = component.isMandatory()
     val selected = !component.installed && (mandatory || component.selected)
     val supported = component.compatibilityState != com.ninepointnine.helper.domain.session.ComponentCompatibility.UNSUPPORTED &&

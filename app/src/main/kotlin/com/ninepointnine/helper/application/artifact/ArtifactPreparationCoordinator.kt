@@ -33,8 +33,6 @@ import com.ninepointnine.helper.domain.artifact.ArtifactSource
 import com.ninepointnine.helper.domain.artifact.ArtifactSourceKind
 import com.ninepointnine.helper.domain.artifact.ArtifactVersion
 import com.ninepointnine.helper.domain.artifact.CompatibilityRange
-import com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
-import com.ninepointnine.helper.domain.artifact.InstallerPublisherTrustRegistry
 import com.ninepointnine.helper.domain.artifact.InstallerSelfIdentity
 import com.ninepointnine.helper.domain.artifact.ManifestValidation
 import com.ninepointnine.helper.domain.artifact.ReleaseSourcePolicy
@@ -131,15 +129,9 @@ class ArtifactPreparationCoordinator(
         // non-matching APK is a miss and never blocks the remote source.
         plan.components.forEach { component ->
             val candidate = localCandidates.asSequence()
-                .mapNotNull { file -> reusableLocalCandidate(plan.config, component, file, metadataReader) }
+                .mapNotNull { file -> reusableLocalCandidate(component, file, metadataReader) }
                 .sortedWith(
-                    compareByDescending<LocalCandidate> {
-                        it.identity.track == InstallerPublisherTrustRegistry.trackFor(
-                            plan.config.environment,
-                            plan.config.channel,
-                        )
-                    }
-                        .thenByDescending { it.metadata.version.code }
+                    compareByDescending<LocalCandidate> { it.metadata.version.code }
                         .thenByDescending { it.file.lastModified() }
                         .thenBy { it.file.name },
                 )
@@ -280,33 +272,14 @@ class ArtifactPreparationCoordinator(
     }
 
     private fun reusableLocalCandidate(
-        config: com.ninepointnine.helper.data.catalog.InstallerDistributionConfig,
         component: InstallerComponentSource,
         file: File,
         reader: ApkMetadataReader,
     ): LocalCandidate? {
         val metadata = runCatching { reader.read(file) }.getOrNull() ?: return null
-        if (component.packageName.isNotBlank() && metadata.packageName != component.packageName) return null
-        if (InstallerSelfIdentity.isSelfComponentId(component.componentId) &&
-            metadata.packageName != InstallerSelfIdentity.PACKAGE_NAME
-        ) return null
-        if (InstallerComponentTrustRegistry.get(component.componentId) != null &&
-            !InstallerComponentTrustRegistry.isAllowedPackageName(component.componentId, metadata.packageName)
-        ) return null
+        val identity = validateDynamicIdentity(component, metadata) ?: return null
         if (!component.matchesDeclaredVersion(metadata.version)) return null
-        if (!InstallerPublisherTrustRegistry.isKnownProfile(component.trustProfileId)) return null
-        if (component.certificateSha256.isNotBlank() && metadata.certificateSha256s.none {
-                it.equals(component.certificateSha256, ignoreCase = true)
-            }
-        ) return null
-        val identity = InstallerPublisherTrustRegistry.matchComponentIdentity(
-            componentId = component.componentId,
-            profileId = component.trustProfileId,
-            environment = config.environment,
-            channel = config.channel,
-            packageName = metadata.packageName,
-            certificateDigests = metadata.certificateSha256s,
-        ) ?: return null
+        if (!component.matchesApprovedFile(file.length(), runCatching { sha256(file) }.getOrNull() ?: return null)) return null
         return LocalCandidate(file, metadata, identity)
     }
 
@@ -321,8 +294,6 @@ class ArtifactPreparationCoordinator(
         if (InstallerSelfIdentity.isSelfComponentId(component.componentId)) {
             component.copy(
                 componentId = InstallerSelfIdentity.COMPONENT_ID,
-                packageName = InstallerSelfIdentity.PACKAGE_NAME,
-                trustProfileId = InstallerSelfIdentity.TRUST_PROFILE_ID,
             )
         } else {
             component
@@ -347,8 +318,8 @@ class ArtifactPreparationCoordinator(
             archiveSizeBytes = 0L,
             archiveSha256 = "",
             apkEntryName = "local.apk",
-            apkSizeBytes = candidate.file.length(),
-            apkSha256 = runCatching { sha256(candidate.file) }.getOrElse {
+            apkSizeBytes = component.apkSizeBytes,
+            apkSha256 = component.apkSha256.ifBlank {
                 return PlanAttemptResult.Failed(
                     ArtifactFailure(
                         phase = ArtifactFailurePhase.CACHE,
@@ -362,6 +333,7 @@ class ArtifactPreparationCoordinator(
             packageName = candidate.metadata.packageName,
             apkVersion = candidate.metadata.version,
             certificateSha256 = candidate.identity.certificateSha256.lowercase(),
+            certificateSha256s = component.certificateSha256s,
             sources = listOf(
                 ArtifactSource(
                     kind = ArtifactSourceKind.LOCAL_DOWNLOAD,
@@ -369,7 +341,6 @@ class ArtifactPreparationCoordinator(
                 ),
             ),
             rollbackId = "${config.effectiveCatalogVersion()}-${component.componentId}",
-            deviceSetup = component.deviceSetup,
             sortOrder = component.sortOrder,
             localOnly = true,
         )
@@ -476,13 +447,13 @@ class ArtifactPreparationCoordinator(
                         retryable = false,
                     ),
                 )
-            val identity = validateDynamicIdentity(config, component, metadata)
+            val identity = validateDynamicIdentity(component, metadata)
                 ?: return PlanAttemptResult.Failed(
                     ArtifactFailure(
                         phase = ArtifactFailurePhase.APK_VERIFICATION,
                         componentId = component.componentId,
                         sourceKind = ArtifactSourceKind.LANZOU_SHARE,
-                        reasonCode = dynamicIdentityFailureReason(config, component, metadata),
+                        reasonCode = dynamicIdentityFailureReason(component, metadata),
                         retryable = false,
                     ),
                 )
@@ -496,6 +467,15 @@ class ArtifactPreparationCoordinator(
                         retryable = false,
                     ),
                 )
+            }
+            if (!component.matchesApprovedFile(inspection.apkSizeBytes, inspection.apkSha256)) {
+                return PlanAttemptResult.Failed(ArtifactFailure(
+                    phase = ArtifactFailurePhase.APK_VERIFICATION,
+                    componentId = component.componentId,
+                    sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+                    reasonCode = "distribution_apk_hash_mismatch",
+                    retryable = false,
+                ))
             }
             val manifest = ArtifactManifest(
                 schemaVersion = ArtifactManifestValidator.SUPPORTED_SCHEMA_VERSION,
@@ -511,14 +491,14 @@ class ArtifactPreparationCoordinator(
                 archiveSizeBytes = archive.sizeBytes,
                 archiveSha256 = archive.sha256,
                 apkEntryName = inspection.entryName,
-                apkSizeBytes = inspection.apkSizeBytes,
-                apkSha256 = inspection.apkSha256,
+                apkSizeBytes = component.apkSizeBytes,
+                apkSha256 = component.apkSha256,
                 packageName = metadata.packageName,
                 apkVersion = metadata.version,
                 certificateSha256 = identity.certificateSha256.lowercase(),
+                certificateSha256s = component.certificateSha256s,
                 sources = listOf(artifact.source),
                 rollbackId = "${config.effectiveCatalogVersion()}-${component.componentId}",
-                deviceSetup = component.deviceSetup,
                 sortOrder = component.sortOrder,
             )
             generatedManifest = manifest
@@ -640,55 +620,23 @@ class ArtifactPreparationCoordinator(
     }
 
     private fun validateDynamicIdentity(
-        config: com.ninepointnine.helper.data.catalog.InstallerDistributionConfig,
         component: InstallerComponentSource,
         metadata: ApkMetadata,
-    ): com.ninepointnine.helper.domain.artifact.TrustedArtifactIdentity? {
+    ): InstallerComponentSource? {
         if (InstallerSelfIdentity.isSelfComponentId(component.componentId) &&
             metadata.packageName != InstallerSelfIdentity.PACKAGE_NAME
         ) return null
-        if (!InstallerPublisherTrustRegistry.isKnownProfile(component.trustProfileId)) return null
-        if (InstallerComponentTrustRegistry.get(component.componentId) != null &&
-            !InstallerComponentTrustRegistry.isAllowedPackageName(component.componentId, metadata.packageName)
-        ) return null
-        if (!AuthorizationPlanFactory.validateComponent(
-                ManagedComponent(
-                    componentId = component.componentId,
-                    packageName = metadata.packageName,
-                    setup = component.deviceSetup,
-                    order = component.sortOrder,
-                ),
-            )
-        ) return null
-        return InstallerPublisherTrustRegistry.matchComponentIdentity(
-            componentId = component.componentId,
-            profileId = component.trustProfileId,
-            environment = config.environment,
-            channel = config.channel,
-            packageName = metadata.packageName,
-            certificateDigests = metadata.certificateSha256s,
-        )
+        if (!component.matchesApprovedIdentity(metadata.packageName, metadata.certificateSha256s)) return null
+        return component
     }
 
     private fun dynamicIdentityFailureReason(
-        config: com.ninepointnine.helper.data.catalog.InstallerDistributionConfig,
         component: InstallerComponentSource,
         metadata: ApkMetadata,
     ): String = when {
+        metadata.packageName != component.packageName -> "distribution_apk_package_mismatch"
         InstallerSelfIdentity.isSelfComponentId(component.componentId) &&
             metadata.packageName != InstallerSelfIdentity.PACKAGE_NAME -> "distribution_self_apk_package_mismatch"
-        !InstallerPublisherTrustRegistry.isKnownProfile(component.trustProfileId) -> "distribution_trust_profile_invalid"
-        InstallerComponentTrustRegistry.get(component.componentId) != null &&
-            !InstallerComponentTrustRegistry.isAllowedPackageName(component.componentId, metadata.packageName) ->
-            "distribution_apk_package_mismatch"
-        !AuthorizationPlanFactory.validateComponent(
-            ManagedComponent(
-                componentId = component.componentId,
-                packageName = metadata.packageName,
-                setup = component.deviceSetup,
-                order = component.sortOrder,
-            ),
-        ) -> "distribution_device_setup_invalid"
         else -> "distribution_apk_certificate_mismatch"
     }
 
@@ -751,7 +699,7 @@ class ArtifactPreparationCoordinator(
     private data class LocalCandidate(
         val file: File,
         val metadata: ApkMetadata,
-        val identity: com.ninepointnine.helper.domain.artifact.TrustedArtifactIdentity,
+        val identity: InstallerComponentSource,
     )
 
     private data class DynamicArchiveInspection(

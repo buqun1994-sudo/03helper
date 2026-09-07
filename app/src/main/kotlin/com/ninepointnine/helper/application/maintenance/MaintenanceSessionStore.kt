@@ -354,11 +354,8 @@ private data class StoredMaintenanceState(
         if (
             componentIds.size != parsedComponents.size ||
             parsedComponents.any { it.id.isBlank() || it.displayName.isBlank() } ||
-            parsedComponents.none {
-                it.id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID && it.required
-            } ||
             selectedOptionalComponentIds.any {
-                it !in componentIds || it == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
+                it !in componentIds || parsedComponents.any { component -> component.id == it && component.required }
             }
         ) {
             return null
@@ -429,8 +426,7 @@ private data class StoredMaintenanceState(
         }
         if (initialInstallationCompleted &&
             (parsedInventoryState != MaintenanceInventoryState.READY ||
-                managedApplications.none { it.installed } ||
-                AuthorizationPlanFactory.DESKTOP_COMPONENT_ID !in installed)
+                managedApplications.none { it.installed })
         ) {
             return null
         }
@@ -590,9 +586,7 @@ private data class StoredMaintenanceState(
         if (ArtifactManifestValidator.validateCatalog(manifests) !is ManifestValidation.Valid) {
             return false
         }
-        if (manifests.any { it.componentId.isBlank() } ||
-            manifests.none { it.componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID }
-        ) {
+        if (manifests.any { it.componentId.isBlank() }) {
             return false
         }
         return manifests.all { manifest ->
@@ -731,6 +725,7 @@ private data class StoredComponent(
     val icon: InstallerAppIconDocument? = null,
     val compatibilityState: String = ComponentCompatibility.SUPPORTED.name,
     val iconKey: String = "",
+    val packageName: String = "",
 ) {
     companion object {
         fun from(component: ComponentDescriptor): StoredComponent = StoredComponent(
@@ -757,6 +752,7 @@ private data class StoredComponent(
             },
             compatibilityState = component.compatibilityState.name,
             iconKey = component.iconKey,
+            packageName = component.packageName,
         )
     }
 
@@ -770,6 +766,7 @@ private data class StoredComponent(
             compatibilityLabel = compatibilityLabel,
             compatibilityState = ComponentCompatibility.valueOf(compatibilityState),
             iconKey = iconKey.ifBlank { id },
+            packageName = packageName,
             iconAsset = icon?.toDomain(),
             description = description,
             status = ComponentStatus.valueOf(status),
@@ -802,6 +799,7 @@ private data class StoredManifest(
     val apkVersionName: String,
     val apkVersionCode: Long,
     val certificateSha256: String,
+    val certificateSha256s: Set<String> = setOf(certificateSha256),
     val sources: List<StoredSource>,
     val rollbackId: String?,
     val deviceSetup: DeviceSetupWireDocument? = null,
@@ -831,6 +829,7 @@ private data class StoredManifest(
             apkVersionName = manifest.apkVersion.name,
             apkVersionCode = manifest.apkVersion.code,
             certificateSha256 = manifest.certificateSha256,
+            certificateSha256s = manifest.certificateSha256s,
             sources = manifest.sources.map { StoredSource(it.kind.wireName, it.url) },
             rollbackId = manifest.rollbackId,
             deviceSetup = manifest.deviceSetup?.let { setup ->
@@ -881,6 +880,7 @@ private data class StoredManifest(
             packageName = packageName,
             apkVersion = ArtifactVersion(apkVersionName, apkVersionCode),
             certificateSha256 = certificateSha256,
+            certificateSha256s = certificateSha256s,
             sources = sources.map { source ->
                 ArtifactSource(
                     kind = ArtifactSourceKind.fromWire(source.kind) ?: throw IllegalArgumentException("source_kind"),

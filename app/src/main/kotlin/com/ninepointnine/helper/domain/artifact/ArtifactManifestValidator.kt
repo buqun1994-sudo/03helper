@@ -6,8 +6,8 @@ object ArtifactManifestValidator {
     const val MAX_ARCHIVE_SIZE_BYTES = 1L shl 30
     const val MAX_APK_SIZE_BYTES = 1L shl 30
 
-    private val componentIdPattern = Regex("^[a-z][a-z0-9-]{0,63}$")
-    private val packageNamePattern = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$")
+    private val componentIdPattern = Regex("^[a-z0-9][a-z0-9._-]{0,63}$")
+    private val packageNamePattern = Regex("^[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)+$")
     private val sha256Pattern = Regex("^[0-9a-fA-F]{64}$")
 
     fun validate(manifest: ArtifactManifest): ManifestValidation = when {
@@ -30,6 +30,8 @@ object ArtifactManifestValidator {
         !sha256Pattern.matches(manifest.apkSha256) -> invalid("apk_sha256_invalid")
         !packageNamePattern.matches(manifest.packageName) -> invalid("apk_package_name_invalid")
         !sha256Pattern.matches(manifest.certificateSha256) -> invalid("certificate_sha256_invalid")
+        manifest.certificateSha256s.isEmpty() || manifest.certificateSha256s.size > 16 ||
+            manifest.certificateSha256s.any { !sha256Pattern.matches(it) } -> invalid("certificate_sha256_invalid")
         manifest.sources.isEmpty() || manifest.sources.size > ArtifactSourceKind.AUTOMATIC_ORDER.size ->
             invalid("source_count_invalid")
         manifest.sources.map { it.kind }.toSet().size != manifest.sources.size ->

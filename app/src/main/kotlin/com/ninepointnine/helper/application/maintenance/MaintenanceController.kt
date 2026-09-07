@@ -44,12 +44,7 @@ class MaintenanceController(
     /** Lightweight signed config + folder listing used by the maintenance install page. */
     private val loadDistributionSelection: (suspend () -> CatalogLoadResult)? = null,
 ) {
-    /**
-     * Reads only the fixed 03 component inventory for the first-install page.
-     * This is deliberately separate from a maintenance action: no route or
-     * action feedback is created, and the result enters the initial session
-     * boundary directly.
-     */
+    /** Queries exactly the packages in the current signed installation catalog. */
     suspend fun inspectInitialApplications(
         snapshot: InstallationSessionSnapshot,
         connection: com.ninepointnine.helper.domain.device.DeviceConnectionLease?,
@@ -65,8 +60,11 @@ class MaintenanceController(
             )
             return
         }
-        val components = com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
-            .allManagedComponents()
+        val components = snapshot.components
+            .filterNot { InstallerSelfIdentity.isSelfComponentId(it.id) }
+            .mapIndexed { index, descriptor ->
+                ManagedComponent(descriptor.id, descriptor.packageName, order = index)
+            }
         when (val result = gateway.inspectInstalledApplicationInventory(components)) {
             is ManagedApplicationsResult.Failed -> eventPort.emit(
                 InstallationSessionEvent.InitialInstalledApplicationsFailed(
@@ -446,9 +444,10 @@ class MaintenanceController(
             ),
         )
         val installedById = installedApplications.associateBy { it.componentId }
-        val installedComponents = installedApplications.mapNotNull { application ->
+        val installedComponents = installedApplications.map { application ->
             candidates.firstOrNull { it.componentId == application.componentId }
                 ?.copy(packageName = application.packageName)
+                ?: ManagedComponent(application.componentId, application.packageName, launchComponent = application.launchComponent)
         }
         val declarations = snapshot.evidence.installation.mapNotNull { (componentId, evidence) ->
             evidence.declarations?.let { componentId to it }
@@ -686,10 +685,7 @@ class MaintenanceController(
             add(ManagedComponent(manifest.componentId, manifest.packageName, manifest.deviceSetup, manifest.sortOrder))
         }
         snapshot.maintenance.availableComponents.forEach { descriptor ->
-            val packageName = com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
-                .allowedPackageNames(descriptor.id)
-                .firstOrNull()
-                ?: return@forEach
+            val packageName = descriptor.packageName.takeIf { it.isNotBlank() } ?: return@forEach
             add(ManagedComponent(descriptor.id, packageName, order = byId.size))
         }
         snapshot.evidence.installation.forEach { (componentId, evidence) ->
@@ -715,13 +711,10 @@ class MaintenanceController(
         }
         snapshot.components.forEach { descriptor ->
             if (byId[descriptor.id] == null) {
-                val packageName = com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
-                    .allowedPackageNames(descriptor.id)
-                    .firstOrNull()
+                val packageName = descriptor.packageName.takeIf { it.isNotBlank() }
                 packageName?.let { add(ManagedComponent(descriptor.id, it, order = byId.size)) }
             }
         }
-        com.ninepointnine.helper.domain.device.AuthorizationPlanFactory.allManagedComponents().forEach(::add)
         return byId.values.toList()
     }
 
@@ -747,8 +740,6 @@ class MaintenanceController(
             catalog.apps.filter { it.enabled }.map { app ->
                 val packageName = app.packageName.ifBlank {
                     knownPackages[app.componentId]
-                        ?: com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
-                            .allowedPackageNames(app.componentId).firstOrNull()
                         ?: InstallerSelfIdentity.PACKAGE_NAME.takeIf {
                             InstallerSelfIdentity.isSelfComponentId(app.componentId)
                         }

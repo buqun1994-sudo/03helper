@@ -362,7 +362,7 @@ data class AvailabilityStageReceipt(
         return when (status) {
             AvailabilityStageReceiptStatus.VERIFIED -> when {
                 reusable -> "installation_batch_receipt_reusable_availability_reverified"
-                componentId != AuthorizationPlanFactory.DESKTOP_COMPONENT_ID ->
+                !AuthorizationPlanFactory.requiresLaunchVerification(componentId, manifest.packageName) ->
                     "installation_batch_receipt_unexpected_availability_verification"
                 evidence == null -> "installation_batch_receipt_availability_evidence_missing"
                 !evidence.installedArchiveVerified || !evidence.launchAttempted || !evidence.launcherResolved ||
@@ -374,7 +374,7 @@ data class AvailabilityStageReceipt(
 
             AvailabilityStageReceiptStatus.NOT_REQUIRED -> when {
                 reusable -> "installation_batch_receipt_reusable_availability_not_preserved"
-                componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID ->
+                AuthorizationPlanFactory.requiresLaunchVerification(componentId, manifest.packageName) ->
                     "installation_batch_receipt_desktop_availability_required"
                 evidence != null || !reasonCode.isNullOrBlank() ->
                     "installation_batch_receipt_not_required_availability_invalid"
@@ -545,16 +545,8 @@ internal fun InstallationBatchReceipt.toResultSummary(
         postInstallFailures > 0 -> InstallationResultFailureStage.POST_INSTALL
         else -> InstallationResultFailureStage.INSTALLATION
     }
-    val desktop = all.firstOrNull {
-        it.componentId == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
-    }
-    val maintenanceEntryReady = if (snapshot.installationFlow == InstallationFlow.SELF_UPDATE) {
-        true
-    } else {
-        desktop?.status == ComponentResultStatus.READY ||
-            AuthorizationPlanFactory.DESKTOP_COMPONENT_ID in snapshot.installationBatch
-                ?.preinstalledComponentIds.orEmpty()
-    }
+    val maintenanceEntryReady = snapshot.installationFlow == InstallationFlow.SELF_UPDATE ||
+        all.any { it.installed } || snapshot.installationBatch?.preinstalledComponentIds.orEmpty().isNotEmpty()
     return InstallationResultSummary(
         kind = kind,
         componentResults = visible,

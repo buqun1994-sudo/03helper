@@ -9,16 +9,14 @@ import com.ninepointnine.helper.data.catalog.UnavailableReleaseCatalogTransport
 import com.ninepointnine.helper.data.catalog.UrlConnectionReleaseCatalogTransport
 import com.ninepointnine.helper.domain.artifact.ReleaseSourcePolicy
 import com.ninepointnine.helper.domain.artifact.ReleaseSourceMode
-import com.ninepointnine.helper.domain.artifact.ArtifactReleaseTrack
 import java.net.URL
 import java.time.Instant
 import java.util.Base64
 
-/** Release composition trusts only the pinned production schema-v4 configuration root. */
+/** Release composition trusts only the pinned production V5 configuration root. */
 internal object ReleaseCatalogRuntimeConfig {
-    val artifactReleaseTrack: ArtifactReleaseTrack = ArtifactReleaseTrack.RELEASE
     val sourcePolicy: ReleaseSourcePolicy = ReleaseSourcePolicy(mode = ReleaseSourceMode.FOLDER_CONFIG)
-    internal val acceptedSchemaVersions: Set<Int> = setOf(4)
+    internal val acceptedSchemaVersions: Set<Int> = setOf(5)
     internal val acceptedSignatureAlgorithms: Set<String> = setOf(PRODUCTION_CONFIG_ALGORITHM)
     private val productionPublicKey: ByteArray? = runCatching {
         Base64.getDecoder().decode(PRODUCTION_PUBLIC_KEY_SPKI_BASE64)
@@ -42,7 +40,6 @@ internal object ReleaseCatalogRuntimeConfig {
                 TrustedCatalogKeyResolver(::resolveTrustedKey),
             ),
             expectedChannel = EXPECTED_CHANNEL,
-            acceptedSchemaVersions = acceptedSchemaVersions,
             acceptedSignatureAlgorithms = acceptedSignatureAlgorithms,
             expectedEnvironment = EXPECTED_ENVIRONMENT,
             now = now,
@@ -57,5 +54,5 @@ internal object ReleaseCatalogRuntimeConfig {
     private const val PRODUCTION_CONFIG_ALGORITHM = "SHA256withECDSA"
     private const val PRODUCTION_PUBLIC_KEY_SPKI_BASE64 =
         "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEirb4nuUiVR2VNowtaPzkKEIipA5lrITQzjCyQWuFSSUjUtX67Zc5tUqkuN/ONG2/jCkIAMKMHPg2xg3AcPrYig=="
-    private const val DISTRIBUTION_CONFIG_URL = "https://api.9.9studio.fun/api/03helper/android-config"
+    private const val DISTRIBUTION_CONFIG_URL = "https://api.9.9studio.fun/api/03helper/android-config?schemaVersion=5"
 }

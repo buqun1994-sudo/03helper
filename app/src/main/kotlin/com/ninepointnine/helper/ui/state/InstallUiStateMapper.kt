@@ -384,7 +384,7 @@ object InstallUiStateMapper {
         displayName = displayName,
         required = required,
         selected = !installed && (
-            id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID || id in selectedOptionalIds
+            required || id in selectedOptionalIds
             ),
         installed = installed,
         versionLabel = versionLabel,

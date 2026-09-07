@@ -1,99 +1,38 @@
-# Android 助手动态分发配置契约 v4
+# Android 助手动态分发配置契约 V5
 
-## 1. 入口与信任边界
+本文件记录客户端接线。完整 wire 字段、Cloud 后台和数据升级的唯一协议真值是 Cloud 仓库 `docs/protocols/android-helper-config-contract.md`；位置从本仓库 `docs/architecture/Cloud项目能力接线.md` 路由。
 
-客户端固定请求 `GET /api/03helper/android-config`。响应是 detached-signature envelope：客户端先对 `payloadBase64` 解码后的原始 UTF-8 字节验签，再解析 payload。当前客户端接受 `schemaVersion = 3` 和 `schemaVersion = 4`；v3 仅用于没有 Logo 的历史快照，所有带 Logo 的新发布必须使用 v4。
+## 1. 职责与入口
 
-构建变体与环境必须成对匹配：Debug 只接受 `environment=staging`、`channel=debug`；Release 只接受 `environment=production`、`channel=release`。其它组合在目录枚举前拒绝。
+1. Cloud 配置服务决定可分发应用、启停、必选策略以及批准的 APK 身份；03helper 只核验并执行。客户端没有发布者证书表、包名前缀准入或逐应用信任档案。
+2. Debug 请求 staging，Release 请求 production，固定路径 `GET /api/03helper/android-config?schemaVersion=5`。新客户端只接受 V5；旧协议仅由 Cloud 冻结入口服务旧客户端。
+3. envelope 只有 keyId、signatureAlgorithm、payloadBase64、signatureBase64。先验证原始 payload 字节，再严格解析 schema、环境、时间和应用字段。
+4. 继续使用现有独立的 staging / production P-256 配置公钥。APK 发布证书由签名 payload 批准；配置公钥与 APK 证书职责不同。
 
-Cloud 声明目录、应用展示元数据、APK 的 `versionCode`、`versionName`、`apkSizeBytes` 以及受限的本地信任 / 授权档案 ID；不声明或覆盖 APK 的 `packageName`、`certificateSha256`、`minAndroidSdk`。客户端在选择页直接展示版本 / 包体字段，并把签名配置中的 `versionCode` / `versionName` 固定为本次准备的目标版本：公共 `Download` 或远端 ZIP 中的 APK 必须与目标版本精确匹配后才能进入安装主链。包名和证书仍由实际 APK 与本地受信发布者根决定；文件大小与 SHA-256 作为传输完整性证据记录，不替代版本门禁。现有内置 `appId` 仍额外绑定其本地官方包名，未知 `appId` 只能落在受信发布者命名空间内。
+## 2. 唯一执行链
 
-## 2. v4 envelope 与 payload
+1. `CloudInstallerDistributionConfigAdapter` 生成携带包名、完整当前证书集合、APK SHA-256、versionCode、versionName 和字节数的 `InstallerComponentSource`。
+2. `ArtifactCatalogSessionAdapter` 将云端 enabled、sortOrder 和 required / optional 策略传入已有会话；运行时随后按当前目录包名查询车机库存，已安装第三方同样不可重复选择。无固定 desktop 必装要求，也不从本地维护记录补充下载目录。
+3. `ArtifactPreparationCoordinator` 优先匹配公共 Download，再按声明文件名解析蓝奏 ZIP。两条来源必须匹配同一批准身份、版本、大小和摘要；根目录单 APK、1 GiB 上限和路径校验沿用现有适配器。
+4. 准备结果进入原 `ArtifactManifest`、设备安装和维护状态机；完整证书集合必须精确相等，额外签名人和同版本不同文件都不能通过。
+5. `KnownApplicationPackages` 仅识别本地已实现能力的包名别名，不是分发清单。未知第三方可以安装；没有对应专属能力时不套用桌面动作，合法空授权计划成功。
+6. 单应用失败隔离，余下应用继续；任意已确认安装的应用可进入维护。Cloud 下架不会卸载已安装应用。
+7. APK 图标只从已经核验的文件提取并绑定批准摘要；未知 APP 下载前使用通用图标，自有内置图标继续作为展示资源。
 
-envelope 与解码后的 payload 都携带同一 `catalogVersion`、`catalogRevision`；两者不一致时在目录枚举前拒绝。
+## 3. 协议边界
 
-```json
-{
-  "schemaVersion": 4,
-  "catalogVersion": "android-debug-2026-08-23-001",
-  "catalogRevision": 1,
-  "keyId": "03helper-staging-config-2026-08-22-v1",
-  "signatureAlgorithm": "SHA256withECDSA",
-  "payloadBase64": "...",
-  "signatureBase64": "..."
-}
-```
+1. payload 包含 schemaVersion=5、environment、catalogRevision、issuedAtUtc、expiresAt、folderUrl、folderPassword、apps。环境派生频道，修订号派生显示标签，不重复在线传输。
+2. APP 字段为 appId、archiveFileName、displayName、enabled、sortOrder、installPolicy、versionCode、versionName、apkSizeBytes、packageName、certificateSha256s、apkSha256。
+3. V5 不接收 description、icon、deviceSetup、trustProfileId、minClientSchemaVersion、历史目录或重复的 channel / catalogVersion。未知字段拒绝。
+4. payload 最大 512 KiB，APK / ZIP 最大 1 GiB，文件名和名称最多 128 UTF-8 字节，密码最多 512 字节，版本名最多 64 字节；证书集合 1..16 个不重复 SHA-256。
+5. 停用草稿不展示、不下载、不安装。授权动作仍由本地强类型能力编译器生成，读取原值并回读，不能由 Cloud 下发 shell 或扩大系统权限。
+6. 反回滚存储按环境和频道保存最高 revision 及原始 payload SHA-256。低修订或相同修订不同字节拒绝，修订持久化失败也拒绝。
+7. 密码仅用于本次加载与目录请求，不写日志、维护基线或持久缓存。
 
-`payloadBase64` 解码后：
+## 4. 升级与验收
 
-```json
-{
-  "schemaVersion": 4,
-  "environment": "staging",
-  "channel": "debug",
-  "issuedAtUtc": "2099-01-01T00:00:00Z",
-  "expiresAt": "2099-12-31T23:59:59Z",
-  "catalogVersion": "android-debug-2026-08-22-001",
-  "catalogRevision": 1,
-  "folderUrl": "https://wwatl.lanzouw.com/bexample",
-  "folderPassword": "...",
-  "previousVersionsUrl": "",
-  "previousVersionsPassword": "",
-  "apps": [
-    {
-      "appId": "desktop",
-      "archiveFileName": "03desktop-debug.zip",
-      "displayName": "03桌面",
-      "description": "车机桌面应用",
-      "versionCode": 123,
-      "versionName": "1.2.3",
-      "apkSizeBytes": 4567890,
-      "enabled": true,
-      "installPolicy": "required",
-      "sortOrder": 10,
-      "minClientSchemaVersion": 3,
-      "trustProfileId": "nine-studio",
-      "deviceSetup": {
-        "profileId": "",
-        "actionIds": []
-      },
-      "icon": {
-        "assetId": "03desktop-staging-logo-app-icon",
-        "assetVersion": 1,
-        "url": "https://download.9.9studio.fun/03-apps/logos/03desktop/sha256-<sha256>.png",
-        "mimeType": "image/png",
-        "width": 216,
-        "height": 216,
-        "sizeBytes": 44699,
-        "sha256": "<sha256>"
-      }
-    }
-  ]
-}
-```
-
-`appId` 是 Cloud 目录标识，不是 Android 包名。`archiveFileName` 必须是单一 ZIP 文件名，禁止目录、查询参数、片段和路径穿越。`displayName`、`description`、`versionCode`、`versionName`、`apkSizeBytes` 都是受签名保护的配置字段；客户端在连接后的轻量选择阶段不下载 ZIP，直接把 `versionName` 规范化为 `v1.2.3` 形式，并把 `apkSizeBytes` 规范化为紧凑单位（例如 `2.6M`）。`versionCode` 是正整数，`versionName` 为非空 Android 版本名，`apkSizeBytes` 为正的 APK 本体字节数。用户确认后，APK 的实际 `versionCode` 必须等于签名配置目标，配置提供非空 `versionName` 时实际版本名也必须完全一致；包名和受信发布者证书仍执行本地身份门禁，大小与 SHA-256 仅作为传输证据。`enabled=false` 的条目不显示、不下载、不安装。启用条目按 `sortOrder` 排序，平局按 `appId`；首次安装选择页默认选中所有非 `desktop` 的启用条目，用户可显式取消。除 `desktop` 外，`installPolicy=required` 只表示目录建议，不改变该 APP 的可选性；`desktop` 必须同时 `enabled=true` 且 `installPolicy=required`，它是首次安装唯一核心必装项。
-
-v4 的 `icon` 仍是受签名保护的兼容字段，不是包名、证书或许可证身份。启用 APP 必须携带 `assetId`、`assetVersion`、不可变摘要 URL、MIME、正方形尺寸、大小和 SHA-256；URL 摘要段必须与 `sha256` 完全一致，并且只允许受控 `download.9.9studio.fun` 的 PNG / WebP 对象。Logo 元数据与 `catalogRevision` 一起签名，图片二进制不放进 payload 或 Base64。当前 Android 客户端不请求该远程对象：初始化和无本地 APK 时使用应用内置的最新 Logo；发现并验签 APK 后，以 APK 内图标覆盖并按组件、版本和 APK 摘要持久化缓存。该字段保留用于配置兼容和发布校验，不得重新接回运行时远程 Logo 主链。
-
-旧协议中的 `versionLabel`、`sizeLabel` 不再作为 Cloud 字段；客户端不读取它们，也不把 `catalogVersion` 或蓝奏 ZIP 行大小当作应用版本 / APK 大小。`catalogVersion`、`catalogRevision` 仅用于配置快照的防回滚和内部追踪。
-
-客户端不设置业务 APP 数量上限；只执行传输体和字段长度护栏：payload 最大 512 KiB，`appId` 最大 64 字节，文件名最大 128 字节，名称最大 128 字节，描述最大 512 字节。
-
-`archiveFileName` 使用 UTF-8 编码，可包含中文产品名以及字母、数字、`.`、`_`、`-`；客户端按签名值精确匹配蓝奏目录中的文件名。文件名不得包含目录分隔符、查询参数、片段、控制字符或路径穿越内容。
-
-## 3. 目录处理
-
-客户端重新枚举受保护蓝奏云目录，只处理已启用 `apps[]` 中声明的 ZIP。未声明文件（包括说明文件、旧 ZIP 和其它人工文件）直接忽略。目录枚举只负责建立远端定位结果，不是安装包可用性的唯一门槛：用户确认后，每个选中 APP 先扫描手机公共 `Download`，只有同时通过包名、受信发布者证书和签名目标 `versionCode` / `versionName` 校验的 APK 才能直接复用；本地版本不匹配视为未命中，继续解析并下载对应 ZIP。声明 ZIP 缺失（包括 `desktop`）只生成该 APP 的结构化失败，后续应用继续处理；全部结束后由结果页决定是否可进入维护。
-
-每个 ZIP 独立下载、校验和解压。解压根目录必须只有一个 APK，不允许子目录、第二个文件或说明文件；APK 必须能读取包名、版本和证书，并通过客户端内置发布者信任根及签名目标版本门禁。实际 `versionCode` 必须精确匹配配置，配置提供非空 `versionName` 时也必须精确匹配；大小与 SHA-256 继续作为传输证据。已知包名不匹配、版本不匹配或 `deviceSetup` 绑定到其它包名时，只更新该 APP 的失败状态，不阻塞其它 APP。
-
-## 4. 授权声明
-
-`deviceSetup` 在线格式只包含客户端已知的 `profileId` 与 `actionIds`；客户端先将其编译为版本化 `AuthorizationAction`，再落到本地强类型 AppOps、运行时权限、安全设置和安全组件列表项。远端内容不能携带 shell 文本、包身份或任意设置名。执行前读取原值，计算去重后的最终列表并进行 Android 9 容量预检，写入后回读验证并保留已有条目。
-
-## 5. 版本与回滚
-
-客户端按 `environment + channel` 持久化已接受的最高 `catalogRevision`。低于该修订号的签名快照拒绝使用；有意回滚必须由 Cloud 发布一个新的修订号指向旧目录。配置内容不变时 Cloud 不应生成新修订号。
-
-发布顺序固定为：在同一个可长期维护的受密码保护蓝奏入口中上传新增或替换后的 ZIP，确认下载内容、APK 元数据和摘要，再发布与该 APK `versionCode` / `versionName` 一致的完整签名配置。推荐 ZIP 使用带版本的唯一文件名；禁止先发布配置再上传文件，回滚必须通过新的 `catalogRevision` 完成。
+1. 先部署支持 V5 的 Cloud 服务和数据库迁移，再通过真实 APK 发布资料转换配置，最后交付新客户端。部署及环境数据操作由 Windows 开发机负责。
+2. Cloud 旧入口保留升级前签名 payload；新应用只进入 V5。用户必须升级助手才能取得 V5 新目录，不提供本地白名单回退。
+3. 共享契约样本位于 `app/src/test/resources/android-config-v5-contract.json`，由 Cloud 配置服务生成，测试验证公钥、原始字节和未知发布者的完整证书集合。
+4. 客户端验证包括签名、未知字段、环境、时间、反回滚、缓存 / 远端 APK 全字段匹配、单项失败、云端必选策略、维护恢复、自更新和空授权计划。
+5. 构建、运行及剩余真实链路见 `docs/testing/验证矩阵.md`；施工与授权记录见 `docs/plans/Android分发V5施工方案.md`。

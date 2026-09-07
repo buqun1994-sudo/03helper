@@ -223,20 +223,23 @@ class InstallUiStateMapperTest {
     }
 
     @Test
-    fun `selection treats a non-desktop required recommendation as optional`() {
+    fun `selection locks exactly the cloud required entries`() {
         val state = InstallUiStateMapper.map(
             selectionSnapshot(
                 listOf(
                     component("desktop", required = true, size = "12 MB"),
                     component("lyrics", required = true, size = "18 MB"),
+                    component("player", required = false, size = "18 MB"),
                 ),
             ),
         ) as InstallUiState.Selection
 
         assertTrue(state.components[0].selected)
         assertTrue(state.components[0].isMandatory())
-        assertFalse(state.components[1].selected)
-        assertFalse(state.components[1].isMandatory())
+        assertTrue(state.components[1].selected)
+        assertTrue(state.components[1].isMandatory())
+        assertFalse(state.components[2].selected)
+        assertFalse(state.components[2].isMandatory())
     }
 
     @Test

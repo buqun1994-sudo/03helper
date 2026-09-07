@@ -144,6 +144,7 @@ fun ArtifactManifest.toComponentDescriptor(
 ): com.ninepointnine.helper.domain.session.ComponentDescriptor =
     com.ninepointnine.helper.domain.session.ComponentDescriptor(
         id = componentId,
+        packageName = packageName,
         displayName = displayName,
         required = required,
         description = description,

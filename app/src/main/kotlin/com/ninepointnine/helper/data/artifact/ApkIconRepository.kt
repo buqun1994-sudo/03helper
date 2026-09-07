@@ -7,10 +7,7 @@ import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import com.ninepointnine.helper.data.download.ArtifactCache
 import com.ninepointnine.helper.domain.artifact.ArtifactManifest
-import com.ninepointnine.helper.domain.artifact.ArtifactReleaseTrack
-import com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
 import com.ninepointnine.helper.domain.artifact.InstallerSelfIdentity
-import com.ninepointnine.helper.domain.artifact.InstallerPublisherTrustRegistry
 import com.ninepointnine.helper.domain.device.InstallableArtifact
 import java.io.File
 import java.io.FileOutputStream
@@ -33,6 +30,7 @@ data class ApkIconRequest(
     val versionCode: Long? = null,
     /** A live car inventory row should prefer the icon captured from its installed APK. */
     val preferPersisted: Boolean = false,
+    val certificateSha256s: Set<String> = certificateSha256?.let(::setOf).orEmpty(),
 )
 
 /**
@@ -44,8 +42,6 @@ class ApkIconRepository(
     context: Context,
     private val artifactCache: ArtifactCache,
     private val metadataReader: ApkMetadataReader = AndroidApkMetadataReader(context.applicationContext),
-    /** The active catalog channel; null is used by isolated tests/legacy callers. */
-    private val preferredTrack: ArtifactReleaseTrack? = null,
 ) {
     private val packageManager = context.applicationContext.packageManager
     private val bitmapCache = ConcurrentHashMap<String, Bitmap>()
@@ -84,7 +80,7 @@ class ApkIconRepository(
             if (digest != null) {
                 val exactRequest = request.copy(
                     packageName = candidate.metadata.packageName,
-                    certificateSha256 = candidate.identity.certificateSha256,
+                    certificateSha256 = candidate.metadata.certificateSha256s.sorted().first(),
                     apkSha256 = digest,
                     versionCode = candidate.metadata.version.code,
                     preferPersisted = true,
@@ -102,7 +98,7 @@ class ApkIconRepository(
                         CacheIdentity(
                             componentId = request.componentId,
                             packageName = candidate.metadata.packageName,
-                            certificateSha256 = candidate.identity.certificateSha256.lowercase(),
+                            certificateSha256 = candidate.metadata.certificateSha256s.sorted().first().lowercase(),
                             versionCode = candidate.metadata.version.code,
                             apkSha256 = digest.lowercase(),
                         ),
@@ -123,7 +119,7 @@ class ApkIconRepository(
             if (!file.isFile) return@forEach
             val metadata = runCatching { metadataReader.read(file) }.getOrNull() ?: return@forEach
             if (metadata.packageName != artifact.manifest.packageName ||
-                metadata.certificateSha256s.none { it.equals(artifact.manifest.certificateSha256, ignoreCase = true) } ||
+                !artifact.manifest.matchesCertificates(metadata.certificateSha256s) ||
                 metadata.version.code != artifact.manifest.apkVersion.code ||
                 runCatching { sha256(file) }.getOrNull()?.equals(artifact.manifest.apkSha256, ignoreCase = true) != true
             ) return@forEach
@@ -139,56 +135,19 @@ class ApkIconRepository(
         }
     }
 
-    private fun findCandidate(
-        request: ApkIconRequest,
-        files: List<File>,
-    ): Candidate? = files.asSequence()
-        .mapNotNull { file ->
+    private fun findCandidate(request: ApkIconRequest, files: List<File>): Candidate? {
+        if (request.packageName.isNullOrBlank() || request.apkSha256.isNullOrBlank() ||
+            request.versionCode == null || request.certificateSha256s.isEmpty()) return null
+        return files.asSequence().mapNotNull { file ->
             val metadata = runCatching { metadataReader.read(file) }.getOrNull() ?: return@mapNotNull null
-            if (request.packageName != null && metadata.packageName != request.packageName) return@mapNotNull null
-            if (request.versionCode != null && metadata.version.code != request.versionCode) return@mapNotNull null
-            if (request.certificateSha256 != null && metadata.certificateSha256s.none { digest ->
-                    digest.equals(request.certificateSha256, ignoreCase = true)
-                }
+            if (metadata.packageName != request.packageName || metadata.version.code != request.versionCode ||
+                metadata.certificateSha256s.map { it.lowercase() }.toSet() !=
+                request.certificateSha256s.map { it.lowercase() }.toSet() ||
+                runCatching { sha256(file) }.getOrNull()?.equals(request.apkSha256, ignoreCase = true) != true
             ) return@mapNotNull null
-            if (request.apkSha256 != null &&
-                runCatching { sha256(file) }.getOrNull()
-                    ?.equals(request.apkSha256, ignoreCase = true) != true
-            ) {
-                return@mapNotNull null
-            }
-
-            val identity = if (request.packageName != null && request.certificateSha256 != null) {
-                InstallerPublisherTrustRegistry.identitiesFor(request.componentId).firstOrNull { trusted ->
-                    trusted.packageName == metadata.packageName &&
-                        trusted.certificateSha256.equals(request.certificateSha256, ignoreCase = true)
-                } ?: com.ninepointnine.helper.domain.artifact.TrustedArtifactIdentity(
-                    componentId = request.componentId,
-                    packageName = metadata.packageName,
-                    certificateSha256 = request.certificateSha256,
-                    track = preferredTrack ?: ArtifactReleaseTrack.DEBUG,
-                )
-            } else {
-                InstallerPublisherTrustRegistry.identitiesFor(request.componentId).firstOrNull { trusted ->
-                    trusted.packageName == metadata.packageName && metadata.certificateSha256s.any { digest ->
-                        digest.equals(trusted.certificateSha256, ignoreCase = true)
-                    }
-                }
-            }
-            // A dynamic component may not have a static publisher entry, but
-            // an exact package/certificate request came from a verified
-            // manifest and is sufficient for this read-only icon operation.
-            identity
-                ?.takeIf { isTrackAllowed(request.componentId, it.track) }
-                ?.let { Candidate(file, metadata, it) }
-        }
-        .sortedWith(
-            compareByDescending<Candidate> { trackPriority(it.identity.track) }
-                .thenByDescending { it.metadata.version.code }
-                .thenByDescending { it.file.lastModified() }
-                .thenBy { it.file.name },
-        )
-        .firstOrNull()
+            Candidate(file, metadata)
+        }.firstOrNull()
+    }
 
     private fun loadBitmap(file: File): Bitmap? {
         val flags = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
@@ -213,20 +172,11 @@ class ApkIconRepository(
 
     private fun loadInstalledIcon(request: ApkIconRequest): Bitmap? {
         val packageName = request.packageName?.takeIf { it.isNotBlank() } ?: return null
-        // Only use an installed package when its identity is one of the
-        // helper's own or already-trusted component identities. This keeps a
-        // maintenance row from turning an arbitrary package name into UI data.
-        val trusted = request.componentId == InstallerSelfIdentity.COMPONENT_ID ||
-            request.componentId == InstallerSelfIdentity.LEGACY_COMPONENT_ID ||
-            InstallerPublisherTrustRegistry.identitiesFor(request.componentId).any { it.packageName == packageName } ||
-            // Dynamic components do not have to be present in the static
-            // registry. An exact package + certificate request is produced
-            // only from a verified manifest or a previously verified install.
-            request.certificateSha256?.let { isDigest(it) } == true
-        if (!trusted) return null
+        if (!InstallerSelfIdentity.isSelfComponentId(request.componentId) &&
+            request.certificateSha256s.isEmpty()) return null
         val applicationInfo = runCatching { packageManager.getApplicationInfo(packageName, 0) }.getOrNull()
             ?: return null
-        val packageInfo = if (request.certificateSha256 != null || request.versionCode != null) {
+        val packageInfo = if (request.certificateSha256s.isNotEmpty() || request.versionCode != null) {
             val flags = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
                 PackageManager.GET_SIGNING_CERTIFICATES
             } else {
@@ -247,7 +197,7 @@ class ApkIconRepository(
             }
             if (actualVersionCode != expectedVersionCode) return null
         }
-        request.certificateSha256?.let { expected ->
+        if (request.certificateSha256s.isNotEmpty()) {
             val info = packageInfo ?: return null
             val signatures = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
                 info.signingInfo?.apkContentsSigners?.toList().orEmpty()
@@ -255,19 +205,12 @@ class ApkIconRepository(
                 @Suppress("DEPRECATION")
                 info.signatures?.toList().orEmpty()
             }
-            if (signatures.none { signature ->
-                    val digest = MessageDigest.getInstance("SHA-256")
-                        .digest(signature.toByteArray())
-                        .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
-                    digest.equals(expected, ignoreCase = true)
-                }
-            ) return null
+            val actual = signatures.map { signature ->
+                MessageDigest.getInstance("SHA-256").digest(signature.toByteArray())
+                    .joinToString("") { byte -> "%02x".format(byte.toInt() and 0xff) }
+            }.toSet()
+            if (actual != request.certificateSha256s.map { it.lowercase() }.toSet()) return null
         }
-        // A live inventory request has already established the installed
-        // package/version. Once its package and certificate match the local
-        // trust root, PackageManager is the authoritative source for the
-        // icon actually shown by Android. Preview-only exact APK requests
-        // still refuse this fallback.
         if (request.apkSha256 != null && !request.preferPersisted) return null
         val drawable = applicationInfo.loadIcon(packageManager)
         val width = drawable.intrinsicWidth.takeIf { it > 0 }?.coerceAtMost(MAX_ICON_EDGE) ?: DEFAULT_ICON_EDGE
@@ -390,18 +333,6 @@ class ApkIconRepository(
         digest,
     ).joinToString("|")
 
-    private fun isTrackAllowed(componentId: String, track: ArtifactReleaseTrack): Boolean = when {
-        preferredTrack == null -> true
-        track == preferredTrack -> true
-        // The current file-manager release is still the audited Fossify Debug
-        // artifact. Its staging config is explicitly allowed to reuse that
-        // identity until a staging certificate is published.
-        componentId == InstallerComponentTrustRegistry.FILE_MANAGER_COMPONENT_ID &&
-            preferredTrack == ArtifactReleaseTrack.STAGING &&
-            track == ArtifactReleaseTrack.DEBUG -> true
-        else -> false
-    }
-
     private fun sha256(file: File): String {
         val digest = MessageDigest.getInstance("SHA-256")
         file.inputStream().use { input ->
@@ -422,16 +353,9 @@ class ApkIconRepository(
 
     private fun isDigest(value: String): Boolean = value.matches(SHA256_PATTERN)
 
-    private fun trackPriority(track: ArtifactReleaseTrack): Int = when (track) {
-        ArtifactReleaseTrack.STAGING -> 3
-        ArtifactReleaseTrack.RELEASE -> 2
-        ArtifactReleaseTrack.DEBUG -> 1
-    }
-
     private data class Candidate(
         val file: File,
         val metadata: ApkMetadata,
-        val identity: com.ninepointnine.helper.domain.artifact.TrustedArtifactIdentity,
     )
 
     private data class CacheIdentity(

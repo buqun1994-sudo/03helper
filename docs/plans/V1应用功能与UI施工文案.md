@@ -2,7 +2,7 @@
 
 ## 1. 文档状态
 
-> 现行版本字段口径：选择行显示 Cloud 提供的 `versionName`（规范化为 `v1.2.3`）与 `apkSizeBytes`（规范化为 `2.6M`）；`catalogVersion` 不得出现在应用行。签名配置的 `versionCode` / `versionName` 是本次准备目标，APK 必须精确匹配并通过包名与发布者证书校验，大小与摘要作为传输证据保留。
+> 现行分发口径：Cloud V5 签名配置决定应用和批准的 APK 身份；选择页显示规范化版本与体积。公共缓存和下载 APK 的包名、完整当前证书集合、versionCode、versionName、字节数及 SHA-256 必须全部精确匹配。详见 `docs/protocols/android-helper-config-contract.md`。
 
 1. 本文是 Android V1 的产品、界面和施工基线；F0 Android 工程、视觉令牌、状态投影和确定性 Debug 场景、F1 唯一安装会话与页面接线、F2 本地下载 / 校验链、F3 LAN ADB 持久在线连接接线已经完成，但 Cloud Android profile、正式签名、车机安装授权和真实网络主测仍未完成。
 2. 当前真实锚点为单 `app` 模块、`applicationId/namespace=com.ninepointnine.helper`、`app/src/main/kotlin/com/ninepointnine/helper/` 源码根与 `Theme.ThreeHelper`；完整 owner 与文件边界以 `docs/architecture/项目长期总纲.md` 第 2 节为准，不得从本文另建包名、状态机或动效参数。
@@ -13,7 +13,7 @@
 ## 2. V1 交付目标
 
 1. 用户只下载并打开“03应用安装助手”，不必预先下载、解压、整理或选择 APK 文件。
-2. 首次使用只让用户完成两件事：连接一台车机，以及选择是否附带其它启用 APP；03桌面始终锁定为唯一必装核心。
+2. 首次使用只让用户连接一台车机并选择应用；必装与可选由云端清单决定。
 3. 用户在组件选择页点击“开始下载并安装”即完成第二步确认，之后下载、校验、发送、安装、授权和验证全部自动推进。
 4. 首次成功后进入维护态，用户可以查看设备状态、检查更新、保留数据重新安装、修复授权、管理当前用户已安装的非系统应用和清理安装缓存。
 5. V1 不做任意 shell、车辆控制、账号体系、支付、车辆数据读取、后台常驻扫描或通用文件浏览器。
@@ -76,7 +76,7 @@
 2. 步骤条固定显示“连接设备 / 选择应用 / 正在安装”，只反映会话位置；连接后的清单读取属于选择页准备阶段，不要求用户逐项处理后台步骤。
 3. 连接成功后先只读取签名配置和蓝奏根目录，快速展示应用列表；此阶段不下载 ZIP、不解析 APK。
 4. 在“选择应用”页点击“开始下载并安装”才确认本次选择；此后除取消、重试或失败恢复外，不要求用户继续点击。
-5. `desktop` 固定显示“必装”，不呈现可取消的开关；其它启用 APP 按服务端排序动态呈现复选框，并显示名称、版本和体积。兼容性继续由会话门禁校验，不在选择行展示“适用于当前车机”。
+5. 云端 required 条目显示“必装”且不可取消，optional 条目显示可选复选框；按服务端顺序显示名称、版本与体积。兼容性留在内部会话校验。
 
 ## 5. 页面与可见文案
 
@@ -95,8 +95,8 @@
 
 ### 5.2 选择应用
 
-1. 页面标题为 `选择要安装的应用`，说明为 `03桌面会作为核心安装；其他应用默认选中，可按需取消。`；组件行前置显示受信的本地 APP logo。
-2. `desktop` 列为唯一必装组件，右侧固定显示 `必装`；其它启用 APP 在同一列右对齐显示 `可选`，首次进入时默认勾选且可取消，最右侧复选框固定对齐。每行只显示应用名、简要版本号和体积；兼容性只在会话内部做门禁，不显示“适用于当前车机”；云端 `description`、目录状态和内部错误原因保留在会话 / 结果证据中，不塞进首次安装选择框。
+1. 页面标题为 `选择要安装的应用`；组件行显示本地图标，未知应用使用通用图标。说明不固定提及桌面必装。
+2. required 条目右侧显示 `必装`；optional 条目显示 `可选`，默认勾选且可取消。每行只显示应用名、简要版本号和体积，复选框固定对齐；目录状态、协议字段和错误详情不进入选择行。
 3. 可选 APP 按服务端 `sortOrder` 稳定排列；默认选中或取消后立即更新本次安装摘要，界面不得根据固定数量或索引生成卡片。
 4. 底部固定主按钮为 `开始下载并安装`。按钮上方只显示本次组件数量和预计下载体积（目录尚未提供体积时显示待准备），不显示蓝奏云、R2、GitHub 或 APK 文件路径。
 5. 连接成功后目录仍在读取时显示独立的 `正在准备安装应用` 进行中状态；只有配置或根目录确实失败时才显示 `暂时无法准备安装应用` 和 `重新获取`。用户确认后才进入下载、校验和安装进度页。
@@ -179,7 +179,7 @@
 
 1. `IDLE -> DISCOVERING` 由连接页进入前台或用户开始查找触发；同一前台周期不重复启动扫描，发现列表必须去重，未确认的设备不能进入 `CONNECTING`。
 2. 用户点击已确认设备后进入 `CONNECTING`，应用层执行第二次 ADB 身份握手；只有 `DeviceConnectionConfirmed` 事件到达后才进入 `CONNECTED`，并保持一个连接租约。
-3. `CONNECTED -> SELECTION_CONFIRMED` 只接受 desktop 必装且已选应用元数据完整的选择；desktop 永远不能被取消，其它应用按需切换。
+3. `CONNECTED -> SELECTION_CONFIRMED` 校验当前清单的 required 选择与已选应用 metadata；required 不可取消，optional 按需切换。
 4. `SELECTION_CONFIRMED` 之后统一进入 `PREPARING_ARTIFACTS`；来源解析、下载、ZIP 校验、解压和 APK 校验是协调器内部步骤，只产生逐组件 `ComponentProgressUpdated`，全部结果通过一次 `ArtifactBatchPrepared` 后进入 `ARTIFACTS_READY`，再由 `INSTALLING`、`AUTHORIZING`、`VERIFYING_DEVICE` 继续推进。单个组件前置结果缺失只记录该组件失败并跳过，批次仍须继续，结构化批次证据缺失才进入 `FAILED`。
 5. 取消、断线和可恢复错误进入 `PAUSED` 并保存会话检查点；重复事件、旧会话事件和未知事件不得覆盖更新后的快照。
 6. 只有安装、授权和可用性三类结构化结果同时成立时，才允许 `SUCCEEDED`；成功动作进入维护态的意图仍由同一会话接收。
@@ -203,7 +203,7 @@
 
 1. 先冻结 `ArtifactManifest`、`ResolvedDownloadRequest`、来源切换结果和结构化错误的最小 schema；清单只能声明签名发布物、哈希、包身份、版本和兼容范围，不能携带任意 shell、动态权限或运行时任意 URL。
 2. 按长期总纲的 owner 建立 `ReleaseSourcePolicy`、`CloudInstallerDistributionConfigAdapter`、`FolderArtifactCatalogAdapter`、`LanzouFolderSourceAdapter`、`LanzouWebSourceAdapter`、`ArtifactDownloader`、`ArchiveIdentityVerifier`、`ArtifactArchiveExtractor` 和 `ArtifactIdentityVerifier`；它们通过端口把结构化结果送入 `InstallationSession`，不直接操作 Compose 状态。
-3. 当前来源固定为“签名配置（含 `versionCode` / `versionName` / `apkSizeBytes`）-> 公共 `Download` 优先 -> 蓝奏密码根文件夹中的声明 ZIP 按需获取”；选择页版本 / 体积只显示 Cloud 字段，公共 APK 或 ZIP 内 APK 必须先通过签名目标版本、包名和发布者证书复核，大小与摘要作为传输证据保留。R2 / GitHub 不参与当前版本判断，密码文件夹、合并 ZIP 和第三方直链转换器不进入自动会话。
+3. 当前来源固定为 V5 签名配置、公共 Download 优先、蓝奏声明 ZIP 按需获取。缓存与下载 APK 必须精确匹配批准的包名、完整证书集合、版本、大小和 SHA-256。密码及短时地址不持久化，R2 / GitHub 不参与当前版本判断。
 4. 隐藏 WebView 使用 Android 默认手机端标识，挂载在当前安装页面背后并由不透明进度层遮挡；完成密码验证、目录枚举和下载回调后立即停止加载并销毁。不启动外部浏览器、不接收用户触摸 / 焦点、不暴露 JavaScript bridge。
 5. 下载器只写入应用私有缓存的 `.zip.part`；ZIP 大小与 SHA-256 通过后才允许受控解压。唯一 APK 的 entry 名称、大小、SHA-256、包名、版本和签名证书全部通过后，才向会话发送产物校验成功，并把 APK 发布到用户公共 `Download` 后删除临时 ZIP；私有目录不得保留完整 APK 的跨会话副本。
 6. F2 实际文件边界固定为 `domain/artifact/`（清单、类型和策略）、`data/catalog/`（Cloud 验签与解析）、`data/web/`（隐藏 WebView）、`data/download/`（私有临时缓存、公共 `Download` 适配与下载）、`data/artifact/`（ZIP / APK 校验）和 `application/artifact/`（事件编排）；事件统一经 `InstallationSessionEventPort` 进入 F1 会话。
@@ -238,7 +238,7 @@ F2 验证门槛：
 ## 8. V1 验收门槛
 
 1. `360 x 800`、`390 x 844`、`412 x 915` 三个手机宽度下，标题、组件名、版本、进度和底部按钮均无截断、重叠或横向溢出。
-2. 冷启动只呈现首次安装入口；连接成功后先快速展示轻量应用列表，desktop 不可取消，其它启用 APP 按目录动态显示为可选，组件行前置显示 logo，点击“开始下载并安装”后自动进入五阶段安装页。
+2. 冷启动进入原安装 / 维护恢复主链；连接后快速展示轻量应用列表，按 Cloud required / optional 投影选择。用户确认后进入现有五阶段安装页。
 3. 每个安装状态都有稳定标题、状态图标、当前组件和下一步；无设备、断网、隐藏 WebView 解析失败、ZIP 校验失败、解压失败、APK 校验失败、暂停、恢复和完成均不能靠日志文本猜测。
 4. 所有下载源、ADB、授权和验证接线完成后，才可把界面中的“正在安装”主路径交给真实设备 smoke；仅截图或页面演示不代表安装能力完成。
 5. V1 不要求用户在蓝奏云网页中输入密码、选择文件、下载 ZIP、解压或手动定位 APK；这些入口只保留在人工离线兜底流程。

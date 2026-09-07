@@ -4,7 +4,6 @@ import com.ninepointnine.helper.data.web.LanzouFolderEntry
 import com.ninepointnine.helper.data.web.LanzouFolderSourceAdapter
 import com.ninepointnine.helper.data.web.LanzouFolderWebViewHost
 import com.ninepointnine.helper.data.web.LanzouFolderWebViewHostFactory
-import com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
 import com.ninepointnine.helper.domain.artifact.ReleaseSourceMode
 import com.ninepointnine.helper.domain.artifact.ReleaseSourcePolicy
 import com.ninepointnine.helper.domain.session.InstallationBatchPlan
@@ -234,46 +233,37 @@ class FolderArtifactCatalogAdapterTest {
     }
 
     private fun configAdapter(config: InstallerDistributionConfig): CloudInstallerDistributionConfigAdapter {
-        val payload = InstallerDistributionConfigPayload(
-            schemaVersion = 3,
+        val payload = InstallerDistributionConfigV5Payload(
+            schemaVersion = 5,
             environment = config.environment,
-            channel = config.channel,
             issuedAtUtc = config.issuedAtUtc.toString(),
             expiresAt = config.expiresAt.toString(),
-            catalogVersion = config.effectiveCatalogVersion(),
             catalogRevision = config.catalogRevision,
             folderUrl = config.folderUrl,
             folderPassword = config.folderPassword,
-            previousVersionsUrl = config.previousVersionsUrl,
-            previousVersionsPassword = config.previousVersionsPassword,
             apps = config.apps.map { component ->
-                InstallerAppSourceDocument(
+                InstallerAppV5Document(
                     appId = component.componentId,
+                    packageName = component.packageName,
+                    certificateSha256s = component.certificateSha256s.toList(),
+                    apkSha256 = component.apkSha256,
                     archiveFileName = component.archiveFileName,
                     displayName = component.displayName,
-                    description = component.description,
                     versionCode = component.versionCode,
                     versionName = component.versionName,
                     apkSizeBytes = component.apkSizeBytes,
                     enabled = component.enabled,
                     installPolicy = if (component.required) "required" else "optional",
                     sortOrder = component.sortOrder,
-                    minClientSchemaVersion = component.minClientSchemaVersion,
-                    trustProfileId = component.trustProfileId,
-                    deviceSetup = InstallerDeviceSetupDocument(),
                 )
             },
         )
         val payloadBytes = CloudReleaseCatalogAdapter.STRICT_JSON.encodeToString(payload).toByteArray()
-        val envelope = SignedInstallerConfigEnvelope(
-            schemaVersion = 3,
-            configVersion = config.configVersion,
+        val envelope = SignedInstallerConfigV5Envelope(
             keyId = config.keyId,
             signatureAlgorithm = config.signatureAlgorithm,
             payloadBase64 = Base64.getEncoder().encodeToString(payloadBytes),
             signatureBase64 = Base64.getEncoder().encodeToString(byteArrayOf(1)),
-            catalogVersion = config.effectiveCatalogVersion(),
-            catalogRevision = config.catalogRevision,
         )
         val body = CloudReleaseCatalogAdapter.STRICT_JSON.encodeToString(envelope).toByteArray()
         return CloudInstallerDistributionConfigAdapter(
@@ -284,7 +274,7 @@ class FolderArtifactCatalogAdapterTest {
     }
 
     private fun config(): InstallerDistributionConfig = InstallerDistributionConfig(
-        configVersion = "debug-test-v1",
+        configVersion = "v5-1",
         channel = "debug",
         expiresAt = Instant.now().plusSeconds(3_600L),
         folderUrl = "https://wwatl.lanzouw.com/b0fqlrcyb",
@@ -293,26 +283,15 @@ class FolderArtifactCatalogAdapterTest {
         signatureAlgorithm = "SHA256withECDSA",
         environment = "staging",
         issuedAtUtc = Instant.now().minusSeconds(60L),
-        catalogVersion = "debug-test-v1",
+        catalogVersion = "v5-1",
         catalogRevision = 1L,
-        apps = InstallerComponentTrustRegistry.components.map { definition ->
+        apps = listOf("desktop", "lyrics").mapIndexed { index, id ->
             InstallerComponentSource(
-                componentId = definition.componentId,
-                archiveFileName = definition.archiveFileName,
-                required = definition.required,
-                displayName = definition.displayName,
-                minAndroidSdk = definition.minAndroidSdk,
-                packageName = when (definition.componentId) {
-                    "desktop" -> "com.ninepointnine.desktop.test"
-                    "lyrics" -> "com.ninepointnine.desktoplyrics.test"
-                    else -> definition.packageName
-                },
-                certificateSha256 = definition.certificateSha256,
-                apkEntryName = definition.apkEntryName,
-                trustProfileId = definition.trustProfileId,
-                versionCode = 1L,
-                versionName = "1.0",
-                apkSizeBytes = 1L,
+                componentId = id, archiveFileName = "03$id-debug.zip", required = id == "desktop",
+                displayName = id, packageName = "org.fixture.$id", sortOrder = index,
+                certificateSha256 = "ab".repeat(32), certificateSha256s = setOf("ab".repeat(32)),
+                apkEntryName = "app.apk", versionCode = 1, versionName = "1.0",
+                apkSizeBytes = 1, apkSha256 = "cd".repeat(32),
             )
         },
     )

@@ -4,15 +4,16 @@ import com.ninepointnine.helper.data.catalog.CatalogHttpResponse
 import com.ninepointnine.helper.data.catalog.DistributionConfigLoadResult
 import com.ninepointnine.helper.data.catalog.JcaCatalogSignatureVerifier
 import com.ninepointnine.helper.data.catalog.ReleaseCatalogTransport
-import com.ninepointnine.helper.data.catalog.SignedInstallerConfigEnvelope
 import com.ninepointnine.helper.data.catalog.TrustedCatalogKeyResolver
 import java.security.MessageDigest
 import java.time.Instant
 import java.util.Base64
 import kotlinx.coroutines.runBlocking
-import kotlinx.serialization.decodeFromString
-import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -28,56 +29,46 @@ class ReleaseCatalogRuntimeConfigTest {
         assertNotNull(publicKey)
         assertEquals(PRODUCTION_PUBLIC_KEY_SHA256, publicKey?.sha256())
         assertNull(ReleaseCatalogRuntimeConfig.resolveTrustedKey("unknown-production-key"))
-        assertEquals(setOf(4), ReleaseCatalogRuntimeConfig.acceptedSchemaVersions)
+        assertEquals(setOf(5), ReleaseCatalogRuntimeConfig.acceptedSchemaVersions)
         assertEquals(setOf("SHA256withECDSA"), ReleaseCatalogRuntimeConfig.acceptedSignatureAlgorithms)
         assertEquals("production", ReleaseCatalogRuntimeConfig.EXPECTED_ENVIRONMENT)
         assertEquals("release", ReleaseCatalogRuntimeConfig.EXPECTED_CHANNEL)
     }
 
     @Test
-    fun `production fixture verifies the original payload bytes and exposes four apps`() = runBlocking {
+    fun `production trust root verifies historical bytes but V5 rejects the historical envelope`() = runBlocking {
         val body = fixtureBytes()
-        val envelope = JSON.decodeFromString<SignedInstallerConfigEnvelope>(body.toString(Charsets.UTF_8))
-        val payload = Base64.getDecoder().decode(envelope.payloadBase64)
-        val signature = Base64.getDecoder().decode(envelope.signatureBase64)
+        val envelope = JSON.parseToJsonElement(body.toString(Charsets.UTF_8)).jsonObject
+        val payload = Base64.getDecoder().decode(envelope.getValue("payloadBase64").jsonPrimitive.content)
+        val signature = Base64.getDecoder().decode(envelope.getValue("signatureBase64").jsonPrimitive.content)
+        val keyId = envelope.getValue("keyId").jsonPrimitive.content
+        val algorithm = envelope.getValue("signatureAlgorithm").jsonPrimitive.content
         val verifier = JcaCatalogSignatureVerifier(
             TrustedCatalogKeyResolver(ReleaseCatalogRuntimeConfig::resolveTrustedKey),
         )
 
         assertEquals(PRODUCTION_PAYLOAD_SHA256, payload.sha256())
-        assertTrue(verifier.verify(envelope.keyId, envelope.signatureAlgorithm, payload, signature))
+        assertTrue(verifier.verify(keyId, algorithm, payload, signature))
         assertFalse(
             verifier.verify(
-                envelope.keyId,
-                envelope.signatureAlgorithm,
+                keyId,
+                algorithm,
                 payload + byteArrayOf('\n'.code.toByte()),
                 signature,
             ),
         )
 
-        val result = adapter(body).load()
-        val config = when (result) {
-            is DistributionConfigLoadResult.Success -> result.config
-            is DistributionConfigLoadResult.Failure -> throw AssertionError(result.reasonCode)
-        }
-        assertEquals("production", config.environment)
-        assertEquals("release", config.channel)
-        assertEquals(5L, config.catalogRevision)
-        assertEquals(listOf("desktop", "lyrics", "cast", "file-manager"), config.apps.map { it.appId })
-        assertEquals("fossify-approved", config.apps.last().trustProfileId)
+        assertEquals("distribution_config_envelope_invalid", failureReason(body))
     }
 
     @Test
-    fun `release composition rejects legacy schema and non production algorithm`() = runBlocking {
-        val envelope = JSON.decodeFromString<SignedInstallerConfigEnvelope>(
-            fixtureBytes().toString(Charsets.UTF_8),
-        )
-        val legacy = JSON.encodeToString(envelope.copy(schemaVersion = 3)).toByteArray()
-        val wrongAlgorithm = JSON.encodeToString(
-            envelope.copy(signatureAlgorithm = "Ed25519"),
-        ).toByteArray()
+    fun `release composition rejects non production algorithm`() = runBlocking {
+        val envelope = JSON.parseToJsonElement(fixtureBytes().toString(Charsets.UTF_8)).jsonObject
+        val wrongAlgorithm = JsonObject(
+            envelope.filterKeys { it in setOf("keyId", "signatureAlgorithm", "payloadBase64", "signatureBase64") } +
+                ("signatureAlgorithm" to JsonPrimitive("Ed25519")),
+        ).toString().toByteArray()
 
-        assertEquals("distribution_config_schema_unsupported", failureReason(legacy))
         assertEquals("distribution_config_envelope_fields_missing", failureReason(wrongAlgorithm))
     }
 

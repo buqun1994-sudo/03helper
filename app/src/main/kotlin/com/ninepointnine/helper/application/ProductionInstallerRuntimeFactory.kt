@@ -117,7 +117,6 @@ object ProductionInstallerRuntimeFactory {
             context = applicationContext,
             artifactCache = artifactCache,
             metadataReader = apkMetadataReader,
-            preferredTrack = catalogRuntime.artifactReleaseTrack,
         )
 
         return InstallerRuntime(
@@ -145,8 +144,7 @@ object ProductionInstallerRuntimeFactory {
                 ).loadSelection()
             },
             loadInitialInventory = { snapshot, connection, eventPort ->
-                // The first-install probe shares the same retained lease and
-                // fixed package inventory reader as maintenance actions.
+                // Probe the approved catalog through the retained device lease.
                 maintenanceController.inspectInitialApplications(snapshot, connection, eventPort)
             },
             prepareInstallationBatch = { batch, eventPort ->

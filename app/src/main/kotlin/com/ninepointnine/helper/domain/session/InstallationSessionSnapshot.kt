@@ -7,7 +7,7 @@ import com.ninepointnine.helper.domain.artifact.ArtifactManifest
 import com.ninepointnine.helper.domain.artifact.AppIconAsset
 import com.ninepointnine.helper.domain.artifact.ArtifactSourceKind
 import com.ninepointnine.helper.domain.artifact.ArtifactVerification
-import com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
+import com.ninepointnine.helper.domain.artifact.KnownApplicationPackages
 import com.ninepointnine.helper.domain.artifact.SourceFailureRecord
 import com.ninepointnine.helper.domain.device.DeviceCapability
 import com.ninepointnine.helper.domain.device.AuthorizationActionEvidence
@@ -94,6 +94,8 @@ data class ComponentDescriptor(
     val description: String = "",
     val status: ComponentStatus = ComponentStatus.READING,
     val errorReason: String? = null,
+    /** Package identity from the authenticated catalog or a verified installed manifest. */
+    val packageName: String = "",
 )
 
 data class InitialApplicationInventory(
@@ -373,23 +375,9 @@ fun InstallationSessionSnapshot.resolveInstallationResult(): InstallationResultS
         hasPostInstallFailure -> InstallationResultFailureStage.POST_INSTALL
         else -> InstallationResultFailureStage.INSTALLATION
     }
-    val desktopParticipates = batch?.let {
-        AuthorizationPlanFactory.DESKTOP_COMPONENT_ID in it.resultComponentIds ||
-            AuthorizationPlanFactory.DESKTOP_COMPONENT_ID in it.reusableComponentIds ||
-            AuthorizationPlanFactory.DESKTOP_COMPONENT_ID in it.preinstalledComponentIds
-    } ?: true
-    val desktopReady = desktopParticipates &&
-        AuthorizationPlanFactory.DESKTOP_COMPONENT_ID in evidence.available &&
-        AuthorizationPlanFactory.DESKTOP_COMPONENT_ID !in pendingIds &&
-        AuthorizationPlanFactory.DESKTOP_COMPONENT_ID !in failedIds
-    // A helper self-update has no vehicle prerequisite by design. It still
-    // uses the same session/result projection, but returns to maintenance after
-    // Android's package-manager installer confirms the new APK.
-    val maintenanceEntryReady = if (installationFlow == InstallationFlow.SELF_UPDATE) {
-        true
-    } else {
-        desktopReady
-    }
+    val maintenanceEntryReady = installationFlow == InstallationFlow.SELF_UPDATE ||
+        evidence.installed.isNotEmpty() || evidence.available.isNotEmpty() ||
+        batch?.preinstalledComponentIds.orEmpty().isNotEmpty()
     return InstallationResultSummary(
         kind = kind,
         componentResults = rows.map { row -> row.copy(status = row.derivedStatus) },
@@ -465,9 +453,9 @@ private fun hasConsistentSuccessEvidence(
     return true
 }
 
-/** Cloud's non-desktop `required` flag is a recommendation, not a lock. */
+/** Selection policy comes from the signed catalog. */
 private fun ComponentDescriptor.isMandatoryForInitialInstall(): Boolean =
-    id == AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
+    required
 
 /** Structured proof collected by the session before it can report success. */
 data class SessionEvidence(
@@ -647,7 +635,7 @@ internal fun MaintenanceSnapshot.toDurableMaintenanceBaseline(): MaintenanceSnap
             val componentId = manifestComponentByPackage[application.packageName]
                 ?: application.componentId.takeIf { it in controlledIds }
                 ?: controlledIds.firstOrNull { candidateId ->
-                    InstallerComponentTrustRegistry.isAllowedPackageName(candidateId, application.packageName)
+                    KnownApplicationPackages.matchesComponent(candidateId, application.packageName)
                 }
             componentId?.let {
                 application.copy(

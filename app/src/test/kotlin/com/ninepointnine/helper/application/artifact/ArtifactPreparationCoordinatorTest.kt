@@ -20,8 +20,6 @@ import com.ninepointnine.helper.data.web.LanzouWebSourceAdapter
 import com.ninepointnine.helper.data.web.LanzouWebViewHost
 import com.ninepointnine.helper.data.web.LanzouWebViewHostFactory
 import com.ninepointnine.helper.domain.artifact.ArtifactSourceKind
-import com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
-import com.ninepointnine.helper.domain.artifact.InstallerPublisherTrustRegistry
 import com.ninepointnine.helper.domain.artifact.ReleaseSourceMode
 import com.ninepointnine.helper.domain.artifact.ReleaseSourcePolicy
 import com.ninepointnine.helper.domain.artifact.ResolvedDownloadRequest
@@ -97,7 +95,8 @@ class ArtifactPreparationCoordinatorTest {
         val root = Files.createTempDirectory("artifact-stale-target").toFile()
         val publicDownload = root.resolve("Download").apply { mkdirs() }
         val baseConfig = config()
-        val target = component(baseConfig, "desktop").copy(versionCode = 2L, versionName = "2.0")
+        val target = component(baseConfig, "desktop").copy(versionCode = 2L, versionName = "2.0",
+            apkSizeBytes = "desktop-target".toByteArray().size.toLong(), apkSha256 = sha256("desktop-target".toByteArray()))
         val targetConfig = baseConfig.copy(
             apps = baseConfig.apps.map { if (it.componentId == target.componentId) target else it },
         )
@@ -164,7 +163,8 @@ class ArtifactPreparationCoordinatorTest {
         val root = Files.createTempDirectory("artifact-remote-version-mismatch").toFile()
         val publicDownload = root.resolve("Download").apply { mkdirs() }
         val baseConfig = config()
-        val target = component(baseConfig, "desktop").copy(versionCode = 2L, versionName = "2.0")
+        val target = component(baseConfig, "desktop").copy(versionCode = 2L, versionName = "2.0",
+            apkSizeBytes = "desktop-target".toByteArray().size.toLong(), apkSha256 = sha256("desktop-target".toByteArray()))
         val targetConfig = baseConfig.copy(
             apps = baseConfig.apps.map { if (it.componentId == target.componentId) target else it },
         )
@@ -385,33 +385,20 @@ class ArtifactPreparationCoordinatorTest {
         issuedAtUtc = Instant.now().minusSeconds(60L),
         catalogVersion = "debug-test-v1",
         catalogRevision = 1L,
-        apps = InstallerComponentTrustRegistry.components.map { definition ->
-            val stagingCertificate = when (definition.componentId) {
-                "desktop" -> "bfb70dc15b54ad2f1b8acd35fa26ecf552bf2ef21d416a44b7eeda5e5e9ebaa9"
-                "lyrics" -> "1eb136fffd3f1e4c204d0933cab66c51ee4536a29e949b9c080925c01563b51d"
-                "cast" -> "98740b95c30064f727b9401a851ecf2e576d5e5c38fcc318284578747ba50e2a"
-                else -> definition.certificateSha256
-            }
+        apps = listOf("desktop", "lyrics").mapIndexed { index, id ->
+            val bytes = if (id == "desktop") byteArrayOf(1, 2, 3, 4) else "lyrics-apk".toByteArray()
             InstallerComponentSource(
-                componentId = definition.componentId,
-                archiveFileName = definition.archiveFileName,
-                required = definition.required,
-                displayName = definition.displayName,
-                minAndroidSdk = definition.minAndroidSdk,
-                packageName = when (definition.componentId) {
-                    "desktop" -> "com.ninepointnine.desktop.test"
-                    "lyrics" -> "com.ninepointnine.desktoplyrics.test"
-                    else -> definition.packageName
-                },
-                certificateSha256 = stagingCertificate,
-                apkEntryName = definition.apkEntryName,
-                trustProfileId = definition.trustProfileId,
-                versionCode = 1L,
-                versionName = "1.0",
-                apkSizeBytes = 1L,
+                componentId = id, archiveFileName = "03$id-debug.zip", required = id == "desktop",
+                displayName = id, packageName = "org.fixture.$id", sortOrder = index,
+                certificateSha256 = "ab".repeat(32), certificateSha256s = setOf("ab".repeat(32)),
+                apkEntryName = "app.apk", versionCode = 1, versionName = "1.0",
+                apkSizeBytes = bytes.size.toLong(), apkSha256 = sha256(bytes),
             )
         },
     )
+
+    private fun sha256(bytes: ByteArray): String = java.security.MessageDigest.getInstance("SHA-256")
+        .digest(bytes).joinToString("") { "%02x".format(it) }
 
     private fun zip(entryName: String, bytes: ByteArray): ByteArray = ByteArrayOutputStream().use { output ->
         ZipOutputStream(output).use { zip ->

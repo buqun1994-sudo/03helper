@@ -40,7 +40,7 @@ import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationResult
 import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationState
 import com.ninepointnine.helper.domain.device.MaintenanceCommandGateway
 import com.ninepointnine.helper.domain.device.MaintenanceDeviceResult
-import com.ninepointnine.helper.domain.artifact.InstallerComponentTrustRegistry
+import com.ninepointnine.helper.domain.artifact.KnownApplicationPackages
 import com.ninepointnine.helper.domain.session.MaintenanceApplicationActionId
 import com.ninepointnine.helper.domain.session.InstallationStrategy
 import android.util.Log
@@ -121,7 +121,7 @@ internal class DadbCommandGateway(
         // write anything rather than install beside or over an unknown app.
         if (strategy == InstallationStrategy.INSTALL_MISSING_ONLY) {
             artifacts.firstOrNull { artifact ->
-                val aliases = (InstallerComponentTrustRegistry.allowedPackageNames(artifact.manifest.componentId) +
+                val aliases = (KnownApplicationPackages.aliasesFor(artifact.manifest.componentId) +
                     artifact.manifest.packageName).toSet()
                 artifact.manifest.packageName !in installedInventory &&
                     aliases.any { it != artifact.manifest.packageName && it in installedInventory }
@@ -1094,7 +1094,7 @@ internal class DadbCommandGateway(
         }
         val componentByPackage = buildMap {
             components.forEach { component ->
-                val aliases = (InstallerComponentTrustRegistry.allowedPackageNames(component.componentId) + component.packageName)
+                val aliases = (KnownApplicationPackages.aliasesFor(component.componentId) + component.packageName)
                     .filter { PACKAGE_NAME_PATTERN.matches(it) }
                 aliases.forEach { packageName ->
                     putIfAbsent(packageName, component)
@@ -1701,7 +1701,7 @@ internal class DadbCommandGateway(
         if (metadata.packageName != artifact.manifest.packageName) {
             return DeviceActionFailure("install_apk_package_mismatch", artifact.manifest.componentId, retryable = false)
         }
-        if (metadata.certificateSha256s.none { it.equals(artifact.manifest.certificateSha256, ignoreCase = true) }) {
+        if (!artifact.manifest.matchesCertificates(metadata.certificateSha256s)) {
             return DeviceActionFailure("install_apk_certificate_mismatch", artifact.manifest.componentId, retryable = false)
         }
         if (
@@ -1774,7 +1774,7 @@ internal class DadbCommandGateway(
                         retryable = false,
                     ),
                 )
-            } else if (certificate == null) {
+            } else if (certificate == null || !manifest.matchesCertificates(metadata.certificateSha256s)) {
                 InstalledArtifactIdentityResult.Failed(
                     DeviceActionFailure(
                         "installation_installed_certificate_mismatch",
@@ -1836,9 +1836,7 @@ internal class DadbCommandGateway(
                         retryable = true,
                     ),
                 )
-            val certificateMatches = metadata.certificateSha256s.any { candidate ->
-                candidate.equals(manifest.certificateSha256, ignoreCase = true)
-            }
+            val certificateMatches = manifest.matchesCertificates(metadata.certificateSha256s)
             if (metadata.packageName != manifest.packageName) {
                 MaintenanceInstalledIdentity.Failed(
                     DeviceActionFailure(
