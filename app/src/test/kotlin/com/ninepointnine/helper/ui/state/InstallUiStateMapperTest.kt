@@ -201,6 +201,57 @@ class InstallUiStateMapperTest {
     }
 
     @Test
+    fun `selection exposes skip only after the catalog and inventory are ready`() {
+        val base = selectionSnapshot(
+            listOf(
+                component("desktop", required = true, size = "12 MB"),
+                component("lyrics", required = false, size = "18 MB"),
+            ),
+        ).copy(
+            artifactCatalogStage = ArtifactCatalogStage.CONTROL_PLANE_READY,
+            initialInventory = InitialApplicationInventory(
+                state = InitialApplicationInventoryState.READY,
+            ),
+        )
+
+        val ready = InstallUiStateMapper.map(base) as InstallUiState.Selection
+        assertTrue(ready.canSkip)
+
+        val loading = InstallUiStateMapper.map(
+            base.copy(initialInventory = InitialApplicationInventory(InitialApplicationInventoryState.LOADING)),
+        ) as InstallUiState.Selection
+        assertFalse(loading.canSkip)
+
+        val failed = InstallUiStateMapper.map(
+            base.copy(
+                initialInventory = InitialApplicationInventory(
+                    state = InitialApplicationInventoryState.FAILED,
+                    failureReason = "initial_inventory_connection_unavailable",
+                ),
+                failure = SessionFailure(
+                    category = FailureCategory.CONNECTION,
+                    reasonCode = "initial_inventory_connection_unavailable",
+                ),
+            ),
+        ) as InstallUiState.Selection
+        assertFalse(failed.canSkip)
+
+        val complete = InstallUiStateMapper.map(
+            base.copy(
+                initialInventory = InitialApplicationInventory(
+                    state = InitialApplicationInventoryState.READY,
+                    applications = listOf(
+                        ManagedApplicationStatus("desktop", "com.ninepointnine.desktop", true),
+                        ManagedApplicationStatus("lyrics", "com.ninepointnine.desktoplyrics", true),
+                    ),
+                ),
+            ),
+        ) as InstallUiState.Selection
+        assertFalse(complete.canSkip)
+        assertTrue(complete.canFinish)
+    }
+
+    @Test
     fun `unlisted catalog rows do not make the selection appear complete`() {
         val state = InstallUiStateMapper.map(
             selectionSnapshot(

@@ -31,6 +31,7 @@
     <string name="selection_complete_summary">已安装 %1$d 个应用</string>
     <string name="selection_start">开始下载并安装</string>
     <string name="selection_finish">完成</string>
+    <string name="selection_skip">稍后安装</string>
     <string name="selection_inventory_failed_title">读取车机应用失败</string>
     <string name="installed_label">已安装</string>
     <string name="selection_prepare_failed_title">安装清单读取失败</string>

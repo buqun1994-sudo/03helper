@@ -10,6 +10,7 @@ import com.ninepointnine.helper.domain.artifact.ArtifactSource
 import com.ninepointnine.helper.domain.artifact.ArtifactSourceKind
 import com.ninepointnine.helper.domain.artifact.ArtifactVersion
 import com.ninepointnine.helper.domain.artifact.CompatibilityRange
+import com.ninepointnine.helper.domain.artifact.KnownApplicationPackages
 import com.ninepointnine.helper.domain.device.AdbCommandGateway
 import com.ninepointnine.helper.domain.device.ApkDeclarationMetadata
 import com.ninepointnine.helper.domain.device.ApkServiceDeclaration
@@ -843,25 +844,28 @@ class DeviceActionsTest {
             pulledDesktopVersion: ArtifactVersion? = null,
             splitPackagePaths: Boolean = false,
             pulledApkHashMismatch: Boolean = false,
+            inventoryPackages: List<String> = listOf(desktop.manifest.packageName),
+            desktopArtifact: PreparedArtifact = desktop,
+            lyricsArtifact: PreparedArtifact = lyrics,
         ): Pair<DadbCommandGateway, MutableList<String>> {
             val metadataReader = com.ninepointnine.helper.data.artifact.ApkMetadataReader { apk ->
                 if (identityMismatch && apk.name.endsWith(".installed.apk")) {
                     ApkMetadata(
                         packageName = "com.example.untrusted",
-                        version = desktop.manifest.apkVersion,
-                        certificateSha256s = setOf(desktop.manifest.certificateSha256),
+                        version = desktopArtifact.manifest.apkVersion,
+                        certificateSha256s = setOf(desktopArtifact.manifest.certificateSha256),
                     )
                 } else if (pulledDesktopVersion != null && apk.name.endsWith(".installed.apk")) {
                     ApkMetadata(
-                        packageName = desktop.manifest.packageName,
+                        packageName = desktopArtifact.manifest.packageName,
                         version = pulledDesktopVersion,
-                        certificateSha256s = setOf(desktop.manifest.certificateSha256),
+                        certificateSha256s = setOf(desktopArtifact.manifest.certificateSha256),
                     )
                 } else {
                     metadata[apk.absolutePath] ?: ApkMetadata(
-                        packageName = if (apk.name.contains("desktop")) desktop.manifest.packageName else lyrics.manifest.packageName,
-                        version = if (apk.name.contains("desktop")) desktop.manifest.apkVersion else lyrics.manifest.apkVersion,
-                        certificateSha256s = setOf(if (apk.name.contains("desktop")) desktop.manifest.certificateSha256 else lyrics.manifest.certificateSha256),
+                        packageName = if (apk.name.contains("desktop")) desktopArtifact.manifest.packageName else lyricsArtifact.manifest.packageName,
+                        version = if (apk.name.contains("desktop")) desktopArtifact.manifest.apkVersion else lyricsArtifact.manifest.apkVersion,
+                        certificateSha256s = setOf(if (apk.name.contains("desktop")) desktopArtifact.manifest.certificateSha256 else lyricsArtifact.manifest.certificateSha256),
                     )
                 }
             }
@@ -880,30 +884,44 @@ class DeviceActionsTest {
                                 } else if (legacyInventory) {
                                     AdbShellResponse("", "unsupported", 1)
                                 } else {
-                                    AdbShellResponse("package:com.tcrrry.desktop versionCode:1\n", "", 0)
+                                    AdbShellResponse(
+                                        inventoryPackages.joinToString("") { packageName ->
+                                            "package:$packageName versionCode:1\n"
+                                        },
+                                        "",
+                                        0,
+                                    )
                                 }
 
                             command == "pm list packages" && inventoryFailure ->
                                 AdbShellResponse("not-a-package-row\n", "", 0)
 
                             command == "pm list packages" && legacyInventory ->
-                                AdbShellResponse("package:com.tcrrry.desktop\n", "", 0)
+                                AdbShellResponse(
+                                    inventoryPackages.joinToString("") { packageName -> "package:$packageName\n" },
+                                    "",
+                                    0,
+                                )
 
-                            command == "pm path com.tcrrry.desktop" -> AdbShellResponse(
+                            command == "pm path ${desktopArtifact.manifest.packageName}" -> AdbShellResponse(
                                 if (splitPackagePaths) {
                                     """
-                                        package:/data/app/~~Desktop==/com.tcrrry.desktop-hash==/base.apk
-                                        package:/data/app/~~Desktop==/com.tcrrry.desktop-hash==/split_config.arm64_v8a.apk
+                                        package:/data/app/~~Desktop==/${desktopArtifact.manifest.packageName}-hash==/base.apk
+                                        package:/data/app/~~Desktop==/${desktopArtifact.manifest.packageName}-hash==/split_config.arm64_v8a.apk
                                     """.trimIndent()
                                 } else {
-                                    "package:/data/app/com.tcrrry.desktop/base.apk\n"
+                                    "package:/data/app/${desktopArtifact.manifest.packageName}/base.apk\n"
                                 },
                                 "",
                                 0,
                             )
 
-                            command == "pm path com.tcrrry.desktoplyrics" ->
-                                AdbShellResponse("package:/data/app/com.tcrrry.desktoplyrics/base.apk\n", "", 0)
+                            command == "pm path ${lyricsArtifact.manifest.packageName}" ->
+                                AdbShellResponse(
+                                    "package:/data/app/${lyricsArtifact.manifest.packageName}/base.apk\n",
+                                    "",
+                                    0,
+                                )
 
                             command.startsWith("pm install -r ") -> {
                                 writes += command
@@ -1109,6 +1127,66 @@ class DeviceActionsTest {
         val observedHashEvidence = (hashMismatchResult as DeviceInstallResult.Installed).evidence.single()
         assertFalse(observedHashEvidence.apkSha256.equals(desktop.manifest.apkSha256, ignoreCase = true))
         assertEquals(1, hashMismatchWrites.count { it.startsWith("pm install -r ") })
+
+        val releaseLyricsFile = root.resolve("release-lyrics.apk").apply {
+            writeBytes(byteArrayOf(4, 5, 6))
+        }
+        val releaseLyrics = prepared(
+            "lyrics",
+            KnownApplicationPackages.CURRENT_LYRICS_PACKAGE_NAME,
+            releaseLyricsFile,
+        ).let { artifact ->
+            artifact.copy(manifest = artifact.manifest.copy(apkSha256 = installedDigest))
+        }
+        val (releaseGateway, releaseWrites) = gatewayFixture(
+            inventoryPackages = listOf(KnownApplicationPackages.CURRENT_LYRICS_TEST_PACKAGE_NAME),
+            lyricsArtifact = releaseLyrics,
+        )
+        val releaseResult = runBlocking {
+            releaseGateway.installBatch(
+                listOf(
+                    com.ninepointnine.helper.domain.device.InstallableArtifact(
+                        releaseLyrics.manifest,
+                        releaseLyrics.finalApk,
+                        releaseLyrics.declarations,
+                    ),
+                ),
+                InstallationStrategy.INSTALL_MISSING_ONLY,
+            )
+        }
+        assertTrue(releaseResult is DeviceInstallResult.Installed)
+        assertEquals(setOf("lyrics"), (releaseResult as DeviceInstallResult.Installed).operationConfirmedComponentIds)
+        assertEquals(1, releaseWrites.count { it.startsWith("push:") })
+        assertEquals(1, releaseWrites.count { it.startsWith("pm install -r ") })
+
+        val stagingLyricsFile = root.resolve("staging-lyrics.apk").apply {
+            writeBytes(byteArrayOf(4, 5, 6))
+        }
+        val stagingLyrics = prepared(
+            "lyrics",
+            KnownApplicationPackages.CURRENT_LYRICS_TEST_PACKAGE_NAME,
+            stagingLyricsFile,
+        )
+        val (stagingGateway, stagingWrites) = gatewayFixture(
+            inventoryPackages = listOf(KnownApplicationPackages.CURRENT_LYRICS_TEST_PACKAGE_NAME),
+            lyricsArtifact = stagingLyrics,
+        )
+        val stagingResult = runBlocking {
+            stagingGateway.installBatch(
+                listOf(
+                    com.ninepointnine.helper.domain.device.InstallableArtifact(
+                        stagingLyrics.manifest,
+                        stagingLyrics.finalApk,
+                        stagingLyrics.declarations,
+                    ),
+                ),
+                InstallationStrategy.INSTALL_MISSING_ONLY,
+            )
+        }
+        assertTrue(stagingResult is DeviceInstallResult.Installed)
+        assertEquals(setOf("lyrics"), (stagingResult as DeviceInstallResult.Installed).operationConfirmedComponentIds)
+        assertTrue(stagingWrites.none { it.startsWith("push:") })
+        assertTrue(stagingWrites.none { it.startsWith("pm install -r ") })
     }
 
     @Test

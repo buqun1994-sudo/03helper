@@ -346,6 +346,17 @@ class InstallerRuntime(
                 beginArtifactPreparation(after)
             }
 
+            InstallationSessionCommand.SkipInitialInstallation -> {
+                if (before.state == InstallationSessionState.CONNECTED &&
+                    after.state == InstallationSessionState.MAINTENANCE
+                ) {
+                    catalogJob?.cancel()
+                    initialInventoryJob?.cancel()
+                    catalogJob = null
+                    initialInventoryJob = null
+                }
+            }
+
             is InstallationSessionCommand.StartMaintenanceComponentUpdate -> {
                 if (before.state == InstallationSessionState.MAINTENANCE &&
                     after.state == InstallationSessionState.SELECTION_CONFIRMED

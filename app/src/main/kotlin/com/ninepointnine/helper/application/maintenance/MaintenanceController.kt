@@ -513,7 +513,10 @@ class MaintenanceController(
             return
         }
         val verifiedManifests = maintenanceCatalogManifests(snapshot)
-        val manifests = verifiedManifests.filter { it.componentId in installedById }
+        val manifests = verifiedManifests.filter { manifest ->
+            val installed = installedById[manifest.componentId]
+            installed != null && installed.packageName == manifest.packageName
+        }
         if (manifests.map { it.componentId }.toSet() != installedById.keys) {
             fail(actionId, "maintenance_manifest_selection_mismatch", retryable = false, eventPort)
             return
@@ -681,22 +684,22 @@ class MaintenanceController(
                 byId.putIfAbsent(component.componentId, component)
             }
         }
-        maintenanceCatalogManifests(snapshot).forEach { manifest ->
-            add(ManagedComponent(manifest.componentId, manifest.packageName, manifest.deviceSetup, manifest.sortOrder))
-        }
+        // The current signed catalog owns the package identity used by every
+        // maintenance probe. Historical installation evidence is never
+        // allowed to replace it with a staging, release, or legacy alias.
         snapshot.maintenance.availableComponents.forEach { descriptor ->
             val packageName = descriptor.packageName.takeIf { it.isNotBlank() } ?: return@forEach
             add(ManagedComponent(descriptor.id, packageName, order = byId.size))
         }
-        snapshot.evidence.installation.forEach { (componentId, evidence) ->
-            val current = byId[componentId]
-            if (current == null) {
-                add(ManagedComponent(componentId, evidence.packageName))
-            } else if (evidence.packageName.isNotBlank()) {
-                // A verified installation record is the most recent package
-                // identity available before the next live inventory read.
-                byId[componentId] = current.copy(packageName = evidence.packageName)
-            }
+        snapshot.components.forEach { descriptor ->
+            val packageName = descriptor.packageName.takeIf { it.isNotBlank() } ?: return@forEach
+            add(ManagedComponent(descriptor.id, packageName, order = byId.size))
+        }
+        // A persisted signed manifest is a compatibility fallback only when
+        // the current snapshot has no descriptor for that component. It never
+        // overrides a package identity supplied by the current catalog.
+        maintenanceCatalogManifests(snapshot).forEach { manifest ->
+            add(ManagedComponent(manifest.componentId, manifest.packageName, manifest.deviceSetup, manifest.sortOrder))
         }
         snapshot.maintenance.managedApplications.forEach { application ->
             val currentEntry = byId.entries.singleOrNull { (_, component) ->
@@ -725,25 +728,12 @@ class MaintenanceController(
         device: com.ninepointnine.helper.domain.session.DeviceSummary?,
         gateway: com.ninepointnine.helper.domain.device.MaintenanceCommandGateway?,
     ): List<MaintenanceUpdateStatus> {
-        val knownPackages = buildMap<String, String> {
-            snapshot.maintenance.managedApplications.forEach { application ->
-                putIfAbsent(application.componentId, application.packageName)
-            }
-            snapshot.evidence.installation.forEach { (componentId, evidence) ->
-                putIfAbsent(componentId, evidence.packageName)
-            }
-            maintenanceCatalogManifests(snapshot).forEach { manifest ->
-                putIfAbsent(manifest.componentId, manifest.packageName)
-            }
-        }
         val candidates = if (catalog.apps.isNotEmpty()) {
             catalog.apps.filter { it.enabled }.map { app ->
                 val packageName = app.packageName.ifBlank {
-                    knownPackages[app.componentId]
-                        ?: InstallerSelfIdentity.PACKAGE_NAME.takeIf {
-                            InstallerSelfIdentity.isSelfComponentId(app.componentId)
-                        }
-                        .orEmpty()
+                    InstallerSelfIdentity.PACKAGE_NAME.takeIf {
+                        InstallerSelfIdentity.isSelfComponentId(app.componentId)
+                    }.orEmpty()
                 }
                 UpdateCandidate(
                     componentId = app.componentId,
@@ -812,7 +802,11 @@ class MaintenanceController(
             emptyMap()
         }
         return selfStatuses + appCandidates.map { candidate ->
+                // A component id is only a local join key. The signed Cloud
+                // package name remains the installation identity, so a
+                // staging/debug probe can never satisfy a release candidate.
                 val current = installed[candidate.componentId]
+                    ?.takeIf { it.packageName == candidate.packageName }
                 val state = when {
                     !inventoryAvailable || !PACKAGE_NAME_PATTERN.matches(candidate.packageName) ->
                         MaintenanceUpdateState.UNAVAILABLE

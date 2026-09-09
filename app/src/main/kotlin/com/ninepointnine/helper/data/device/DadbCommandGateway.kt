@@ -116,26 +116,6 @@ internal class DadbCommandGateway(
             emptyMap()
         }
 
-        // A recognized staging/production alias without the exact manifest
-        // package is an identity conflict, not a missing package. Refuse to
-        // write anything rather than install beside or over an unknown app.
-        if (strategy == InstallationStrategy.INSTALL_MISSING_ONLY) {
-            artifacts.firstOrNull { artifact ->
-                val aliases = (KnownApplicationPackages.aliasesFor(artifact.manifest.componentId) +
-                    artifact.manifest.packageName).toSet()
-                artifact.manifest.packageName !in installedInventory &&
-                    aliases.any { it != artifact.manifest.packageName && it in installedInventory }
-            }?.let { conflict ->
-                return@withLease DeviceInstallResult.Failed(
-                    DeviceActionFailure(
-                        "installation_installed_identity_conflict",
-                        conflict.manifest.componentId,
-                        retryable = false,
-                    ),
-                )
-            }
-        }
-
         val reusableMissingOnlyIds = mutableSetOf<String>()
         // Includes both fresh writes and packages intentionally skipped after
         // a trusted inventory read. It marks the set for which a later
@@ -1075,6 +1055,7 @@ internal class DadbCommandGateway(
         components: List<ManagedComponent>,
     ): ManagedApplicationsResult {
         if (components.map { it.componentId }.toSet().size != components.size ||
+            components.map { it.packageName }.toSet().size != components.size ||
             components.any {
                 !COMPONENT_ID_PATTERN.matches(it.componentId) || !PACKAGE_NAME_PATTERN.matches(it.packageName)
             }
@@ -1092,23 +1073,16 @@ internal class DadbCommandGateway(
         if (discoveredPackages.isEmpty()) {
             return ManagedApplicationsResult.Completed(emptyList())
         }
-        val componentByPackage = buildMap {
-            components.forEach { component ->
-                val aliases = (KnownApplicationPackages.aliasesFor(component.componentId) + component.packageName)
-                    .filter { PACKAGE_NAME_PATTERN.matches(it) }
-                aliases.forEach { packageName ->
-                    putIfAbsent(packageName, component)
-                }
-            }
-        }
+        val componentByPackage = components
+            .groupBy { it.packageName }
+            .mapValues { (_, matches) -> matches.single() }
         val applications = mutableListOf<ManagedApplicationProbe>()
         discoveredPackages.sortedBy { it.packageName }.forEach { entry ->
             val component = componentByPackage[entry.packageName] ?: return@forEach
-            val resolvedComponent = component.copy(packageName = entry.packageName)
             if (entry.versionCode != null) {
                 applications += ManagedApplicationProbe(
-                    componentId = resolvedComponent.componentId,
-                    packageName = entry.packageName,
+                    componentId = component.componentId,
+                    packageName = component.packageName,
                     installed = true,
                     versionCode = entry.versionCode,
                 )
@@ -1117,9 +1091,9 @@ internal class DadbCommandGateway(
             // A legacy package-manager response without versionCode is still
             // usable for presence, but enrich it only on that compatibility
             // path so normal maintenance checks stay one round trip.
-            when (val result = inspectInstalledPackage(resolvedComponent.componentId, entry.packageName)) {
+            when (val result = inspectInstalledPackage(component.componentId, component.packageName)) {
                 is PackageInspection.Completed -> if (result.installed) {
-                    applications += result.toProbe(resolvedComponent)
+                    applications += result.toProbe(component)
                 }
 
                 is PackageInspection.Failed -> return ManagedApplicationsResult.Failed(result.failure)

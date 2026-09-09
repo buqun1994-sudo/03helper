@@ -285,6 +285,12 @@ object InstallUiStateMapper {
                                 it.compatibilityState == ComponentCompatibility.SUPPORTED
                             ))
                 },
+            canSkip = !allInstalled &&
+                snapshot.initialInventory.state ==
+                    com.ninepointnine.helper.domain.session.InitialApplicationInventoryState.READY &&
+                snapshot.artifactCatalogStage == ArtifactCatalogStage.CONTROL_PLANE_READY &&
+                snapshot.failure == null &&
+                snapshot.device?.connectionStatus == DeviceConnectionStatus.CONFIRMED,
             canFinish = allInstalled &&
                 snapshot.failure == null &&
                 snapshot.device?.connectionStatus == DeviceConnectionStatus.CONFIRMED,

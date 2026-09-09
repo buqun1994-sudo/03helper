@@ -7,7 +7,6 @@ import com.ninepointnine.helper.domain.artifact.ArtifactManifest
 import com.ninepointnine.helper.domain.artifact.AppIconAsset
 import com.ninepointnine.helper.domain.artifact.ArtifactSourceKind
 import com.ninepointnine.helper.domain.artifact.ArtifactVerification
-import com.ninepointnine.helper.domain.artifact.KnownApplicationPackages
 import com.ninepointnine.helper.domain.artifact.SourceFailureRecord
 import com.ninepointnine.helper.domain.device.DeviceCapability
 import com.ninepointnine.helper.domain.device.AuthorizationActionEvidence
@@ -491,6 +490,8 @@ data class MaintenanceSnapshot(
     val managedApplications: List<ManagedApplicationStatus> = emptyList(),
     /** The first-install route reached maintenance without manufacturing APK identities. */
     val initialInstallationCompleted: Boolean = false,
+    /** The first-install route was explicitly deferred by the user. */
+    val initialInstallationSkipped: Boolean = false,
     /** Full signed/configured component set used by maintenance installation. */
     val availableComponents: List<ComponentDescriptor> = emptyList(),
     /** Last verified APK identities for applications currently installed on the car. */
@@ -637,9 +638,6 @@ internal fun MaintenanceSnapshot.toDurableMaintenanceBaseline(): MaintenanceSnap
         .mapNotNull { application ->
             val componentId = manifestComponentByPackage[application.packageName]
                 ?: application.componentId.takeIf { it in controlledIds }
-                ?: controlledIds.firstOrNull { candidateId ->
-                    KnownApplicationPackages.matchesComponent(candidateId, application.packageName)
-                }
             componentId?.let {
                 application.copy(
                     componentId = it,
@@ -659,12 +657,18 @@ internal fun MaintenanceSnapshot.toDurableMaintenanceBaseline(): MaintenanceSnap
         .toList()
     val verifiedApplications = durableApplications.filter { it.componentId in verifiedIds }
     return MaintenanceSnapshot(
-        managedApplicationsState = if (normalized.initialInstallationCompleted || verifiedIds.isNotEmpty()) {
+        managedApplicationsState = if (
+            normalized.initialInstallationCompleted ||
+            normalized.initialInstallationSkipped ||
+            verifiedIds.isNotEmpty()
+        ) {
             MaintenanceInventoryState.READY
         } else {
             MaintenanceInventoryState.NOT_STARTED
         },
-        managedApplications = if (normalized.initialInstallationCompleted) {
+        managedApplications = if (
+            normalized.initialInstallationCompleted || normalized.initialInstallationSkipped
+        ) {
             // Initial inventory is durable installation evidence, but not an
             // APK identity that may be reused for a future device write. Keep
             // every trusted installed row when a later single-component batch
@@ -674,6 +678,7 @@ internal fun MaintenanceSnapshot.toDurableMaintenanceBaseline(): MaintenanceSnap
             verifiedApplications
         },
         initialInstallationCompleted = normalized.initialInstallationCompleted,
+        initialInstallationSkipped = normalized.initialInstallationSkipped,
         availableComponents = normalized.availableComponents,
         installedManifests = normalized.installedManifests,
         availableManifests = normalized.availableManifests,

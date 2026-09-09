@@ -290,14 +290,14 @@ class MaintenanceSessionStoreTest {
                 managedApplicationsState = MaintenanceInventoryState.READY,
                 managedApplications = listOf(
                     ManagedApplicationStatus(
-                        componentId = "app-desktop-observed",
-                        packageName = KnownApplicationPackages.CURRENT_DESKTOP_TEST_PACKAGE_NAME,
+                        componentId = "desktop",
+                        packageName = KnownApplicationPackages.DESKTOP_PACKAGE_NAME,
                         installed = true,
                         versionCode = 2L,
                     ),
                     ManagedApplicationStatus(
-                        componentId = "app-lyrics-observed",
-                        packageName = KnownApplicationPackages.CURRENT_LYRICS_TEST_PACKAGE_NAME,
+                        componentId = "lyrics",
+                        packageName = KnownApplicationPackages.LYRICS_PACKAGE_NAME,
                         installed = true,
                         versionCode = 2L,
                     ),
@@ -353,6 +353,52 @@ class MaintenanceSessionStoreTest {
         assertNull(restored.maintenance.applicationAction)
         assertNull(restored.maintenance.applicationDetails)
         assertTrue(restored.maintenance.applicationAuthorizationRequirements.isEmpty())
+    }
+
+    @Test
+    fun `initial installation skip with empty inventory survives a cold start`() {
+        val file = Files.createTempDirectory("maintenance-store-initial-skip")
+            .resolve("session.json")
+            .toFile()
+        val base = maintenanceSnapshot(manifests(1L), emptyList()).copy(
+            artifactManifests = emptyList(),
+            evidence = SessionEvidence(),
+            maintenance = MaintenanceSnapshot(
+                managedApplicationsState = MaintenanceInventoryState.READY,
+                managedApplications = emptyList(),
+                initialInstallationSkipped = true,
+                availableComponents = manifests(1L).map { it.toComponentDescriptor() },
+            ),
+        )
+        val store = MaintenanceSessionStore(file)
+
+        assertTrue(store.save(base))
+        val restored = store.load() ?: error("initial_skip_not_restored")
+
+        assertEquals(InstallationSessionState.MAINTENANCE, restored.state)
+        assertTrue(restored.maintenance.initialInstallationSkipped)
+        assertFalse(restored.maintenance.initialInstallationCompleted)
+        assertEquals(MaintenanceInventoryState.READY, restored.maintenance.managedApplicationsState)
+        assertTrue(restored.maintenance.managedApplications.isEmpty())
+        assertTrue(restored.evidence.installed.isEmpty())
+        assertFalse(MaintenanceBaselineProjector.shouldClear(base))
+    }
+
+    @Test
+    fun `initial completion and skip markers are mutually exclusive`() {
+        val file = Files.createTempDirectory("maintenance-store-initial-markers")
+            .resolve("session.json")
+            .toFile()
+        val base = maintenanceSnapshot(manifests(1L), emptyList())
+        val snapshot = base.copy(
+            maintenance = base.maintenance.copy(
+                initialInstallationCompleted = true,
+                initialInstallationSkipped = true,
+                managedApplicationsState = MaintenanceInventoryState.READY,
+            ),
+        )
+
+        assertFalse(MaintenanceSessionStore(file).save(snapshot))
     }
 
     @Test

@@ -1,3 +1,20 @@
+# 2026-09-09 1.0.16 Release APK / ZIP 导出与源码提交
+
+1. 按用户要求运行唯一版本脚本，将 Release 真值从 `1.0.15 (16)` 升级为 `1.0.16 (17)`；Debug / staging 继续由同一版本文件派生测试身份。
+2. 使用仓库外 production signing properties 完成 `:app:testReleaseUnitTest`、`:app:lintRelease` 和 `:app:assembleRelease`。Release APK 包名为 `com.ninepointnine.helper`，版本 `1.0.16 (17)`，单一 production signer，APK Signature Scheme v2 通过；证书 SHA-256 为 `31ca80dd21a5208eaabd5f3e1440a3db2f7dc79122e03eaa6ba01730fb31f18b`。
+3. 通过 Cloud `android-config:prepare` 从同一 Release APK 生成单 APK ZIP，内部唯一条目为 `app.apk`。正式产物已导出到桌面目录 `03系列正式发布包-中文名称-20260830`：`03车机助手-v1.0.16.apk`（14,329,204 字节，SHA-256 `b303d641a93630746219379e596f734e91a5ecb0c2865d7e27ea7bc526309328`）和 `03车机助手-v1.0.16.zip`（13,513,754 字节，SHA-256 `05ecea7b8244c0f86e4677e19c5d8bb32b97c0971914b0e5b3045e34452a7b96`）；ZIP 内 APK 摘要与外部 Release APK 一致。
+4. Release 版本和导出文件已完成包名、版本、签名、v2、ZIP 单条目及字节摘要核验；项目文档、Skills、差异检查和本机环境检查通过。真实车机未安装 Release，未修改车机数据、未提交 Cloud 线上配置。
+5. 本轮提交仅包含 `03helper` 仓库当前源码、测试、版本与文档变更；未提交、推送或改写已有 Cloud 仓库工作树中的其它变更。
+
+# 2026-09-09 Cloud 包名精确匹配与初始化跳过收口
+
+1. 车机受控应用库存现在只接受当前 Cloud V5 签名配置 `apps[].packageName`：Release 清单只识别正式包名，Debug / staging 清单只识别 `.test` 测试包名。初始化库存、检查更新、修复授权、维护安装和 `INSTALL_MISSING_ONLY` 均要求组件 ID 与完整包名同时匹配；测试包不会阻碍正式包安装，错包名不会触发更新、授权或覆盖安装。
+2. 初始化流程新增“稍后安装”次级动作，固定显示在“开始下载并安装”主按钮下方。仅在清单、确认连接和一次库存读取均成功且仍有未安装组件时可见；跳过直接进入维护首页，不创建安装批次、APK 或授权成功回执。`initialInstallationSkipped` 已纳入维护基线持久化，与 `initialInstallationCompleted` 互斥；空库存跳过也可冷启动恢复。
+3. 新增并通过包名环境矩阵、更新 / 授权精确匹配、正式包缺失继续安装、staging 测试包识别、初始化跳过与存储恢复回归。指定 JDK17 下 Debug JVM `369/369`（0 failures / 0 errors / 0 skipped），Debug / AndroidTest 构建和项目文档、Skills、差异检查均通过。
+4. 最新 Debug APK `app/build/outputs/apk/debug/app-debug.apk` 已在登记测试手机 `adb-RFCX412AN1X-gWfMRD._adb-tls-connect._tcp` 保留数据覆盖安装成功，包名 `com.ninepointnine.helper.test`、版本 `1.0.15-test (16)`，SHA-256 `9ba64578e73beb9936ae6ae4a180a048897ee23ef4a4c07bb13f014f6fcccb23`，入口 `com.ninepointnine.helper.MainActivity`；启动返回 `Status: ok`。手机入口 / Debug 维护 Activity smoke 定向 `2/2` 通过。
+5. 完整 Compose 交互 smoke 在该手机上因 `No compose hierarchies found` 失败，目标 Activity 实际已启动；该条只记录为测试框架运行时阻断，不作为产品链路通过。车机未执行业务写入，当前车机包清单无 `03helper` 测试包；真实 Cloud 下载、车机安装 / 授权和初始化人工主测仍待外部环境。
+6. 本轮源码、文档和产物均未提交、推送或发布；共享 `check-03app-repository.mjs` 仍会因工作树存在未提交改动而报告登记快照不一致，未修改共享登记库。
+
 # 2026-09-08 版本升级与 Release APK / ZIP 桌面导出
 
 1. 按用户要求运行 `node scripts/bump-release-version.mjs`，唯一版本从 `1.0.14 (15)` 升级为 `1.0.15 (16)`；使用既有仓库外 production 签名构建 Release，包含本轮维护单选批次、第三方图标和失败说明修复。Cloud 本地身份、版本与产物登记同步，旧 staging 产物保留为历史记录。

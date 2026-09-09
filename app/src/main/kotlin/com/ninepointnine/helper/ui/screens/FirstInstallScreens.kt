@@ -51,6 +51,7 @@ import com.ninepointnine.helper.ui.components.AnimatedEntry
 import com.ninepointnine.helper.ui.components.ComponentLogo
 import com.ninepointnine.helper.ui.components.InstallStepIndicator
 import com.ninepointnine.helper.ui.components.InstallationResultRow
+import com.ninepointnine.helper.ui.components.IconTextActionButton
 import com.ninepointnine.helper.ui.components.PressableSurface
 import com.ninepointnine.helper.ui.components.PrimaryActionButton
 import com.ninepointnine.helper.ui.components.StatusIcon
@@ -364,6 +365,17 @@ private fun SelectionScreen(
                     .fillMaxWidth()
                     .testTag("start_installation"),
             )
+            if (state.canSkip) {
+                Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
+                IconTextActionButton(
+                    text = stringResource(R.string.selection_skip),
+                    iconName = "clock_3",
+                    onClick = { onIntent(InstallUiIntent.SkipInitialInstallation) },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .testTag("skip_initial_installation"),
+                )
+            }
             Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
         }
     }

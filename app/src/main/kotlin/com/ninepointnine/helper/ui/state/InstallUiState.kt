@@ -34,6 +34,8 @@ sealed interface InstallUiState {
         val summaryCount: Int,
         val summarySizeLabel: String,
         val canStart: Boolean,
+        /** True only after the signed catalog and exact inventory are ready. */
+        val canSkip: Boolean = false,
         /** True when every managed component was found on the vehicle. */
         val canFinish: Boolean = false,
         /** True while the one-time vehicle inventory is being read. */
@@ -277,6 +279,7 @@ sealed interface InstallUiIntent {
     data class SelectDevice(val deviceId: String) : InstallUiIntent
     data class ToggleOptionalComponent(val componentId: String, val selected: Boolean) : InstallUiIntent
     data object StartInstallation : InstallUiIntent
+    data object SkipInitialInstallation : InstallUiIntent
     data class StartMaintenanceComponentUpdate(val componentId: String) : InstallUiIntent
     data object InstallPreparedSelfUpdate : InstallUiIntent
     data object CancelInstallation : InstallUiIntent

@@ -1242,6 +1242,87 @@ class InstallationSessionTest {
     }
 
     @Test
+    fun `initial inventory ignores a debug package when the signed catalog targets release`() {
+        val releaseDesktop = components.first { it.id == "desktop" }.copy(
+            packageName = "com.ninepointnine.desktop",
+        )
+        val releaseLyrics = components.first { it.id == "lyrics" }.copy(
+            packageName = "com.ninepointnine.desktoplyrics",
+        )
+        val session = connectedSession(
+            includeOptional = false,
+            catalog = listOf(releaseLyrics, releaseDesktop),
+        )
+        resolveTrustedCatalog(session)
+
+        session.dispatchEvent(
+            // The device adapter filters the debug identity before publishing
+            // this event, so a release catalog sees an empty controlled list.
+            InstallationSessionEvent.InitialInstalledApplicationsResolved(emptyList()),
+        )
+
+        val snapshot = session.currentSnapshot()
+        assertEquals(InitialApplicationInventoryState.READY, snapshot.initialInventory.state)
+        assertTrue(snapshot.components.all { it.status != ComponentStatus.INSTALLED_LATEST })
+        session.dispatch(InstallationSessionCommand.StartInstallation)
+        assertEquals(InstallationSessionState.SELECTION_CONFIRMED, session.currentSnapshot().state)
+    }
+
+    @Test
+    fun `initial inventory recognizes the staging package declared by the signed catalog`() {
+        val stagingDesktop = components.first { it.id == "desktop" }.copy(
+            packageName = "com.ninepointnine.desktop.test",
+        )
+        val stagingLyrics = components.first { it.id == "lyrics" }.copy(
+            packageName = "com.ninepointnine.desktoplyrics.test",
+        )
+        val session = connectedSession(
+            includeOptional = false,
+            catalog = listOf(stagingLyrics, stagingDesktop),
+        )
+        resolveTrustedCatalog(session)
+        session.dispatchEvent(
+            InstallationSessionEvent.InitialInstalledApplicationsResolved(
+                listOf(
+                    ManagedApplicationStatus(
+                        componentId = "desktop",
+                        packageName = stagingDesktop.packageName,
+                        installed = true,
+                        versionCode = 1L,
+                    ),
+                ),
+            ),
+        )
+
+        val snapshot = session.currentSnapshot()
+        assertEquals(ComponentStatus.INSTALLED_LATEST, snapshot.components.first { it.id == "desktop" }.status)
+        assertEquals(ComponentStatus.READING, snapshot.components.first { it.id == "lyrics" }.status)
+    }
+
+    @Test
+    fun `initial installation can be skipped into durable maintenance without creating a receipt`() {
+        val session = connectedSession(includeOptional = false)
+        resolveTrustedCatalog(session)
+        session.dispatchEvent(
+            InstallationSessionEvent.InitialInstalledApplicationsResolved(emptyList()),
+        )
+
+        session.dispatch(InstallationSessionCommand.SkipInitialInstallation)
+
+        val snapshot = session.currentSnapshot()
+        assertEquals(InstallationSessionState.MAINTENANCE, snapshot.state)
+        assertTrue(snapshot.maintenance.initialInstallationSkipped)
+        assertFalse(snapshot.maintenance.initialInstallationCompleted)
+        assertEquals(InitialApplicationInventoryState.READY, snapshot.initialInventory.state)
+        assertTrue(snapshot.initialInventory.applications.isEmpty())
+        assertTrue(snapshot.maintenance.managedApplications.isEmpty())
+        assertEquals(null, snapshot.installationBatch)
+        assertEquals(null, snapshot.installationBatchReceipt)
+        assertTrue(snapshot.evidence.installed.isEmpty())
+        assertTrue(snapshot.evidence.authorizationActions.isEmpty())
+    }
+
+    @Test
     fun `disconnected maintenance keeps only local actions available`() {
         val session = maintenanceSession(connected = false)
 

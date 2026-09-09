@@ -114,6 +114,7 @@ class InstallationSession(
             InstallationSessionCommand.StartInstallation,
             InstallationSessionCommand.ConfirmSelection,
             -> confirmSelection()
+            InstallationSessionCommand.SkipInitialInstallation -> skipInitialInstallation()
 
             InstallationSessionCommand.BeginPipeline -> beginPipeline()
             is InstallationSessionCommand.StartMaintenanceComponentUpdate ->
@@ -1033,6 +1034,7 @@ class InstallationSession(
                     applicationAction = null,
                     applicationDetails = null,
                     installationSelection = null,
+                    initialInstallationSkipped = false,
                 ),
                 maintenanceReconnectPending = false,
                 installationReconnectPending = false,
@@ -1061,6 +1063,7 @@ class InstallationSession(
             .copy(
                 availableComponents = availableComponents,
                 initialInstallationCompleted = true,
+                initialInstallationSkipped = false,
             )
         publish(
             current.copy(
@@ -1087,6 +1090,74 @@ class InstallationSession(
                     configured = installedIds,
                     available = installedIds,
                 ),
+                selectedSources = emptyMap(),
+                sourceFailures = emptyList(),
+                archiveDownloads = emptyMap(),
+                archiveVerifications = emptyMap(),
+                apkExtractions = emptyMap(),
+                maintenance = maintenance.copy(
+                    activeAction = null,
+                    routeAction = null,
+                    lastAction = null,
+                    applicationAction = null,
+                    applicationDetails = null,
+                    installationSelection = null,
+                ),
+                maintenanceReconnectPending = false,
+                installationReconnectPending = false,
+            ),
+        )
+    }
+
+    /**
+     * Defers the initial install without manufacturing installation evidence.
+     * The signed catalog and exact device inventory remain the only facts
+     * promoted into the maintenance baseline.
+     */
+    private fun skipInitialInstallation() {
+        val current = _snapshot.value
+        if (
+            current.state != InstallationSessionState.CONNECTED ||
+            current.installationFlow != InstallationFlow.INITIAL_INSTALL ||
+            current.initialInventory.state != InitialApplicationInventoryState.READY ||
+            allInitialComponentsInstalled(current) ||
+            catalogIdentity(current) == null ||
+            current.device?.connectionStatus != DeviceConnectionStatus.CONFIRMED ||
+            current.failure != null ||
+            current.installationBatch != null
+        ) {
+            return
+        }
+        val installedIds = initialInstalledComponentIds(current)
+        val availableComponents = current.components
+            .filterNot { InstallerSelfIdentity.isSelfComponentId(it.id) }
+            .filter { it.status != ComponentStatus.UNLISTED }
+        val maintenance = current.maintenance
+            .withInitialInventory(current.initialInventory)
+            .copy(
+                availableComponents = availableComponents,
+                initialInstallationCompleted = false,
+                initialInstallationSkipped = true,
+            )
+        publish(
+            current.copy(
+                state = InstallationSessionState.MAINTENANCE,
+                selectedOptionalComponentIds = emptySet(),
+                currentComponentName = null,
+                progress = null,
+                componentProgress = emptyMap(),
+                failedComponentIds = emptySet(),
+                componentFailureRetryable = emptyMap(),
+                failure = null,
+                componentResults = emptyList(),
+                checkpoint = null,
+                installationBatch = null,
+                installationBatchReceipt = null,
+                artifactManifests = emptyList(),
+                artifactCatalogStage = ArtifactCatalogStage.CONTROL_PLANE_READY,
+                // Inventory presence is retained for display only. It does not
+                // create APK identity, configuration, or authorization proof.
+                evidence = SessionEvidence(installed = installedIds),
                 selectedSources = emptyMap(),
                 sourceFailures = emptyList(),
                 archiveDownloads = emptyMap(),

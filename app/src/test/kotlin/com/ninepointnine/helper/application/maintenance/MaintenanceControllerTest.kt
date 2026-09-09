@@ -161,6 +161,7 @@ class MaintenanceControllerTest {
                                 versionCode = 1L,
                                 versionName = "1.1",
                                 apkSizeBytes = 50L,
+                                packageName = current.packageName,
                             ),
                         ),
                     ),
@@ -183,6 +184,75 @@ class MaintenanceControllerTest {
         assertTrue(refreshed.manifests.isEmpty())
         assertEquals(
             com.ninepointnine.helper.domain.session.MaintenanceUpdateState.CURRENT,
+            refreshed.updateStatuses.single { it.componentId == "desktop" }.state,
+        )
+    }
+
+    @Test
+    fun `update check ignores a staging package for a release candidate`() = runBlocking {
+        val current = manifest("desktop", versionCode = 1)
+        val events = mutableListOf<InstallationSessionEvent>()
+        val gateway = FakeGateway().apply {
+            managedApplications = ManagedApplicationsResult.Completed(
+                listOf(
+                    ManagedApplicationProbe(
+                        componentId = "desktop",
+                        packageName = "com.ninepointnine.desktop.test",
+                        installed = true,
+                        versionCode = 1L,
+                    ),
+                ),
+            )
+        }
+        MaintenanceController(
+            artifactCache = tempCache(),
+            diagnosticStore = tempDiagnostics(),
+            loadDistributionConfig = { distributionConfig(current) },
+        ).execute(
+            actionId = MaintenanceActionId.CHECK_UPDATES,
+            snapshot = maintenanceSnapshot(listOf(current)),
+            connection = lease(gateway),
+            eventPort = InstallationSessionEventPort { events += it },
+        )
+
+        val refreshed = events.filterIsInstance<InstallationSessionEvent.MaintenanceCatalogRefreshed>().single()
+        assertEquals(
+            com.ninepointnine.helper.domain.session.MaintenanceUpdateState.NOT_INSTALLED,
+            refreshed.updateStatuses.single { it.componentId == "desktop" }.state,
+        )
+    }
+
+    @Test
+    fun `update check compares version code only for the exact release package`() = runBlocking {
+        val current = manifest("desktop", versionCode = 1)
+        val updated = manifest("desktop", versionCode = 2)
+        val events = mutableListOf<InstallationSessionEvent>()
+        val gateway = FakeGateway().apply {
+            managedApplications = ManagedApplicationsResult.Completed(
+                listOf(
+                    ManagedApplicationProbe(
+                        componentId = "desktop",
+                        packageName = current.packageName,
+                        installed = true,
+                        versionCode = 1L,
+                    ),
+                ),
+            )
+        }
+        MaintenanceController(
+            artifactCache = tempCache(),
+            diagnosticStore = tempDiagnostics(),
+            loadDistributionConfig = { distributionConfig(updated) },
+        ).execute(
+            actionId = MaintenanceActionId.CHECK_UPDATES,
+            snapshot = maintenanceSnapshot(listOf(current)),
+            connection = lease(gateway),
+            eventPort = InstallationSessionEventPort { events += it },
+        )
+
+        val refreshed = events.filterIsInstance<InstallationSessionEvent.MaintenanceCatalogRefreshed>().single()
+        assertEquals(
+            com.ninepointnine.helper.domain.session.MaintenanceUpdateState.UPDATE_AVAILABLE,
             refreshed.updateStatuses.single { it.componentId == "desktop" }.state,
         )
     }
@@ -373,6 +443,50 @@ class MaintenanceControllerTest {
         )
 
         assertEquals(listOf("desktop", "lyrics"), gateway.repairManifests.map { it.componentId })
+    }
+
+    @Test
+    fun `repair authorization rejects a staging package when the catalog manifest is release`() = runBlocking {
+        val release = manifest("desktop", 1)
+        val stagingPackage = "com.ninepointnine.desktop.test"
+        val gateway = FakeGateway().apply {
+            managedApplications = ManagedApplicationsResult.Completed(
+                listOf(ManagedApplicationProbe("desktop", stagingPackage, true)),
+            )
+            authorizationStatuses = com.ninepointnine.helper.domain.device.MaintenanceAuthorizationResult.Completed(
+                listOf(
+                    com.ninepointnine.helper.domain.device.ManagedApplicationAuthorizationStatus(
+                        componentId = "desktop",
+                        packageName = stagingPackage,
+                        authorized = false,
+                    ),
+                ),
+            )
+        }
+        val events = mutableListOf<InstallationSessionEvent>()
+
+        MaintenanceController(tempCache(), tempDiagnostics()).execute(
+            actionId = MaintenanceActionId.REPAIR_CONFIGURATION,
+            snapshot = maintenanceSnapshot(listOf(release)).copy(
+                maintenance = MaintenanceSnapshot(
+                    authorization = MaintenanceAuthorizationSnapshot(
+                        state = MaintenanceAuthorizationFlowState.REPAIRING,
+                    ),
+                ),
+            ),
+            connection = lease(gateway),
+            eventPort = InstallationSessionEventPort { events += it },
+        )
+
+        assertEquals(emptyList<ArtifactManifest>(), gateway.repairManifests)
+        assertEquals(
+            InstallationSessionEvent.MaintenanceActionFailed(
+                actionId = MaintenanceActionId.REPAIR_CONFIGURATION,
+                reasonCode = "maintenance_manifest_selection_mismatch",
+                retryable = false,
+            ),
+            events.last(),
+        )
     }
 
     @Test

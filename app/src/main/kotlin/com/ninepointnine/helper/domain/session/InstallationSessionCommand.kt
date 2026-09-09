@@ -22,6 +22,8 @@ sealed interface InstallationSessionCommand {
     ) : InstallationSessionCommand
 
     data object StartInstallation : InstallationSessionCommand
+    /** Defers the first-install batch after the signed catalog and inventory are ready. */
+    data object SkipInitialInstallation : InstallationSessionCommand
     data object ConfirmSelection : InstallationSessionCommand
     data object BeginPipeline : InstallationSessionCommand
     /** Starts one explicitly selected maintenance update; never means "all". */
