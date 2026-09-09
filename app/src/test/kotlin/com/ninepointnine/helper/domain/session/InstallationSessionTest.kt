@@ -2060,12 +2060,13 @@ class InstallationSessionTest {
         assertEquals(InstallationSessionState.SELECTION_CONFIRMED, snapshot.state)
         assertEquals(ArtifactCatalogStage.CONTROL_PLANE_READY, snapshot.artifactCatalogStage)
         assertEquals(null, snapshot.failure)
-        assertEquals(setOf("desktop", "file-manager"), snapshot.installationBatch?.selectedComponentIds)
+        assertEquals(setOf("file-manager"), snapshot.installationBatch?.selectedComponentIds)
+        assertEquals(setOf("desktop"), snapshot.installationBatch?.preinstalledComponentIds)
         assertEquals(setOf("file-manager"), snapshot.installationBatch?.preparationComponentIds)
     }
 
     @Test
-    fun `installed optional with unknown version stays non-selectable but enters verification batch`() {
+    fun `installed optional with unknown version never enters an unselected batch`() {
         val desktop = fullManifest("desktop", versionCode = 1)
         val lyrics = fullManifest("lyrics", versionCode = 1)
         val descriptors = listOf(desktop, lyrics).map { it.toComponentDescriptor() }
@@ -2113,11 +2114,131 @@ class InstallationSessionTest {
         session.dispatch(InstallationSessionCommand.StartMaintenanceInstallation)
 
         val started = session.currentSnapshot()
-        assertEquals(InstallationSessionState.SELECTION_CONFIRMED, started.state)
-        assertTrue(
-            "an installed component with unknown version must be verified in the batch",
+        assertEquals(InstallationSessionState.MAINTENANCE, started.state)
+        assertFalse(
+            "missing identity evidence must not expand the user's selection",
             "lyrics" in started.selectedOptionalComponentIds,
         )
+        assertEquals(null, started.installationBatch)
+    }
+
+    @Test
+    fun `maintenance selection owns preparation receipt and retry despite unselected inventory and old evidence`() {
+        val desktop = fullManifest("desktop", versionCode = 1)
+        val traffic = fullManifest("traffic-light", versionCode = 1).copy(packageName = "com.mojoxing.light")
+        val bilibili = fullManifest("bilibili", versionCode = 1).copy(packageName = "blbl.cat3399")
+        val manifests = listOf(desktop, traffic, bilibili)
+        val descriptors = manifests.map { it.toComponentDescriptor() }
+        val oldVerification = ArtifactVerification(
+            componentId = desktop.componentId,
+            sourceKind = ArtifactSourceKind.LANZOU_SHARE,
+            archiveSizeBytes = desktop.archiveSizeBytes,
+            archiveSha256 = desktop.archiveSha256,
+            apkSizeBytes = desktop.apkSizeBytes,
+            apkSha256 = desktop.apkSha256,
+            packageName = desktop.packageName,
+            apkVersion = desktop.apkVersion,
+            certificateSha256 = desktop.certificateSha256,
+            archiveDeleted = true,
+        )
+        for (trafficInstalled in listOf(false, true)) {
+            val session = InstallationSession(
+                initialSnapshot = InstallationSessionSnapshot(
+                    state = InstallationSessionState.MAINTENANCE,
+                    device = confirmedDevice.copy(
+                        androidSdk = 28,
+                        capabilities = setOf(DeviceCapability.ADB_TCP, DeviceCapability.IDENTITY_READ),
+                    ),
+                    components = descriptors,
+                    selectedOptionalComponentIds = setOf(traffic.componentId),
+                    evidence = SessionEvidence(
+                        artifactsVerified = setOf(desktop.componentId),
+                        artifactVerifications = mapOf(desktop.componentId to oldVerification),
+                        installed = setOf(desktop.componentId),
+                        configured = setOf(desktop.componentId),
+                        available = setOf(desktop.componentId),
+                    ),
+                    maintenance = MaintenanceSnapshot(
+                        availableComponents = descriptors,
+                        availableManifests = manifests,
+                        installedManifests = listOf(desktop),
+                    ),
+                ),
+            )
+            session.dispatch(InstallationSessionCommand.MaintenanceAction(MaintenanceActionId.INSTALL_APPLICATIONS))
+            session.dispatchEvent(
+                InstallationSessionEvent.MaintenanceApplicationsResolved(
+                    applications = buildList {
+                        add(ManagedApplicationStatus(
+                            componentId = desktop.componentId,
+                            packageName = desktop.packageName,
+                            installed = true,
+                            versionCode = desktop.apkVersion.code,
+                        ))
+                        if (trafficInstalled) add(ManagedApplicationStatus(
+                            componentId = traffic.componentId,
+                            packageName = traffic.packageName,
+                            installed = true,
+                            versionCode = null,
+                        ))
+                    },
+                ),
+            )
+            session.dispatch(InstallationSessionCommand.ToggleMaintenanceInstallationComponent("bilibili", true))
+            for (preparationFails in listOf(true, false)) {
+                session.dispatch(InstallationSessionCommand.StartMaintenanceInstallation)
+                val started = session.currentSnapshot()
+                val batch = checkNotNull(started.installationBatch)
+                assertEquals(setOf("bilibili"), batch.selectedComponentIds)
+                assertEquals(setOf("bilibili"), batch.preparationComponentIds)
+                assertEquals(setOf("bilibili"), batch.resultComponentIds)
+                assertEquals(setOf("desktop"), batch.preinstalledComponentIds)
+                assertTrue(batch.reusableComponentIds.isEmpty())
+                assertTrue(started.evidence.artifactVerifications.isEmpty())
+                assertTrue(started.evidence.artifactsVerified.isEmpty())
+                assertTrue(started.evidence.installed.contains("desktop"))
+                session.dispatch(InstallationSessionCommand.StartMaintenanceInstallation)
+                assertEquals(started, session.currentSnapshot())
+                session.dispatch(InstallationSessionCommand.BeginPipeline)
+                if (preparationFails) {
+                    session.dispatchEvent(artifactBatchFailureEvent(session, "bilibili", "download_not_zip"))
+                } else {
+                    dispatchArtifactBatchPrepared(session)
+                }
+                session.dispatchEvent(InstallationSessionEvent.InstallationStarted())
+                assertEquals(InstallationSessionState.INSTALLING, session.currentSnapshot().state)
+                val receipt = if (preparationFails) InstallationBatchReceipt(
+                    batchId = batch.batchId,
+                    components = listOf(InstallationComponentReceipt(
+                        componentId = "bilibili",
+                        installation = InstallationStageReceipt(
+                            status = InstallationStageReceiptStatus.NOT_ATTEMPTED,
+                            reasonCode = "download_not_zip",
+                        ),
+                        authorization = AuthorizationStageReceipt(
+                            status = AuthorizationStageReceiptStatus.NOT_ATTEMPTED,
+                            reasonCode = "authorization_not_attempted_preparation_failed",
+                        ),
+                        availability = AvailabilityStageReceipt(
+                            status = AvailabilityStageReceiptStatus.NOT_ATTEMPTED,
+                            reasonCode = "availability_not_attempted_preparation_failed",
+                        ),
+                    )),
+                ) else successfulReceipt(session)
+                session.dispatchEvent(InstallationSessionEvent.InstallationBatchCompleted(receipt))
+                val completed = session.currentSnapshot()
+                assertEquals(receipt, completed.installationBatchReceipt)
+                val result = completed.resolveInstallationResult().componentResults.single()
+                assertEquals("bilibili", result.componentId)
+                assertEquals(if (preparationFails) "download_not_zip" else null, result.failureReason)
+                if (preparationFails) {
+                    session.dispatch(InstallationSessionCommand.ReturnToMaintenanceInstallationSelection)
+                    assertEquals(setOf("bilibili"), session.currentSnapshot().maintenance.installationSelection?.selectedComponentIds)
+                } else {
+                    assertEquals(InstallationSessionState.SUCCEEDED, completed.state)
+                }
+            }
+        }
     }
 
     @Test

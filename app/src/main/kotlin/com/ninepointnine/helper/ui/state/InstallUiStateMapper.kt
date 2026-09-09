@@ -340,7 +340,9 @@ object InstallUiStateMapper {
 
     private fun resultState(snapshot: InstallationSessionSnapshot): InstallUiState.Result {
         val result = snapshot.resolveInstallationResult()
-        val hasVisibleReason = result.componentResults.any { it.failureReason != null }
+        val repeatsRowReason = result.componentResults.any {
+            it.failureReason != null && it.failureReason == result.failureReasonCode
+        }
         return InstallUiState.Result(
             kind = result.kind,
             componentResults = result.componentResults.map {
@@ -362,11 +364,9 @@ object InstallUiStateMapper {
             },
             canContinue = result.canContinue,
             canEnterMaintenance = result.canEnterMaintenance,
-            // A component row owns its concrete reason. Keeping the same
-            // reason in the page header creates the duplicate warning that
-            // previously looked like a second independent failure.
+            // Suppress an exact duplicate, not a distinct batch-wide failure.
             failureReason = result.failureReasonCode
-                ?.takeIf { !hasVisibleReason }
+                ?.takeIf { !repeatsRowReason }
                 ?.toUserMessage(),
             installationFlow = result.installationFlow,
             failureStage = result.failureStage,

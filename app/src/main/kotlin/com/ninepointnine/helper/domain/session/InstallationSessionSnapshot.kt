@@ -360,7 +360,10 @@ fun InstallationSessionSnapshot.resolveInstallationResult(): InstallationResultS
     val visibleFailureReason = rows.asSequence().mapNotNull { it.failureReason }.firstOrNull()
     val batchFailureApplies = batch == null || failure?.componentName == null ||
         rows.any { it.componentId == failure.componentName || it.componentName == failure.componentName }
-    val failureReasonCode = visibleFailureReason
+    // A batch-wide failure can explain why the remaining rows never ran.
+    // Preserve it even when one component already has its own concrete error.
+    val failureReasonCode = failure?.reasonCode?.takeIf { failure.componentName == null }
+        ?: visibleFailureReason
         ?: failure?.reasonCode?.takeIf { batchFailureApplies }
         // Keep hidden reusable prerequisites out of the page header. A
         // structural fallback is useful only when there is no visible row

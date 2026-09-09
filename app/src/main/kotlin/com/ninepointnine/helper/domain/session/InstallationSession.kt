@@ -1333,7 +1333,20 @@ class InstallationSession(
             return
         }
         if (command.actionId == MaintenanceActionId.REINSTALL) {
-            startMaintenanceInstallation(command.actionId)
+            val updateIds = current.maintenance.updateStatuses
+                .filter {
+                    !it.isSelf && it.state in setOf(
+                        MaintenanceUpdateState.UPDATE_AVAILABLE,
+                        MaintenanceUpdateState.NOT_INSTALLED,
+                    )
+                }
+                .mapTo(linkedSetOf()) { it.componentId }
+            startMaintenanceInstallation(
+                actionId = command.actionId,
+                requestedComponentIds = updateIds.ifEmpty { current.selectedOptionalComponentIds } +
+                    current.maintenance.availableComponents.ifEmpty { current.components }
+                        .filter(::isMandatory).map { it.id },
+            )
             return
         }
         val authorization = if (command.actionId == MaintenanceActionId.REPAIR_CONFIGURATION) {
@@ -1427,8 +1440,7 @@ class InstallationSession(
         } else {
             startMaintenanceInstallation(
                 actionId = MaintenanceActionId.CHECK_UPDATES,
-                selectedOptionalOverride = setOf(targetId),
-                targetComponentId = targetId,
+                requestedComponentIds = setOf(targetId),
             )
         }
     }
@@ -1641,38 +1653,18 @@ class InstallationSession(
 
     private fun startMaintenanceInstallation(
         actionId: MaintenanceActionId,
-        selectedOptionalOverride: Set<String>? = null,
-        targetComponentId: String? = null,
+        requestedComponentIds: Set<String>,
     ) {
         val current = _snapshot.value
         val strategy = when (actionId) {
-            MaintenanceActionId.REINSTALL -> InstallationStrategy.REINSTALL_SELECTED
+            MaintenanceActionId.REINSTALL,
+            MaintenanceActionId.CHECK_UPDATES -> InstallationStrategy.REINSTALL_SELECTED
             MaintenanceActionId.INSTALL_APPLICATIONS,
             MaintenanceActionId.INSTALL_FILE_MANAGER -> InstallationStrategy.INSTALL_MISSING_ONLY
-            else -> if (targetComponentId != null) {
-                InstallationStrategy.REINSTALL_SELECTED
-            } else {
-                return
-            }
+            else -> return
         }
-        val requestedOptional = (selectedOptionalOverride ?: when (actionId) {
-            MaintenanceActionId.REINSTALL -> current.maintenance.updateStatuses
-                .filter {
-                    !it.isSelf && it.state in setOf(
-                        MaintenanceUpdateState.UPDATE_AVAILABLE,
-                        MaintenanceUpdateState.NOT_INSTALLED,
-                    )
-                }
-                .map { it.componentId }
-                .toSet()
-                .ifEmpty { current.selectedOptionalComponentIds }
-            MaintenanceActionId.INSTALL_APPLICATIONS ->
-                current.selectedOptionalComponentIds
-            MaintenanceActionId.INSTALL_FILE_MANAGER ->
-                current.selectedOptionalComponentIds + AuthorizationPlanFactory.FILE_MANAGER_COMPONENT_ID
-
-            else -> targetComponentId?.let { setOf(it) } ?: return
-        }).toSet()
+        val selectedIds = requestedComponentIds.toSet()
+        if (selectedIds.isEmpty()) return
         // The maintenance catalog is the only source for a new maintenance
         // batch. The current batch manifests are not a catalog cache and must
         // never silently repopulate a newer control-plane selection.
@@ -1701,7 +1693,17 @@ class InstallationSession(
             catalogKeyId = current.maintenance.availableCatalogKeyId ?: current.catalogKeyId,
             catalogSignatureAlgorithm = current.maintenance.availableCatalogSignatureAlgorithm
                 ?: current.catalogSignatureAlgorithm,
-            selectedOptionalComponentIds = requestedOptional,
+            selectedOptionalComponentIds = selectedIds - candidateComponents.filter(::isMandatory).map { it.id }.toSet(),
+            failedComponentIds = emptySet(),
+            componentFailureRetryable = emptyMap(),
+            componentProgress = emptyMap(),
+            selectedSources = emptyMap(),
+            sourceFailures = emptyList(),
+            archiveDownloads = emptyMap(),
+            archiveVerifications = emptyMap(),
+            apkExtractions = emptyMap(),
+            installationBatchReceipt = null,
+            failure = null,
             maintenance = current.maintenance.copy(
                 routeAction = actionId,
                 activeAction = null,
@@ -1720,38 +1722,24 @@ class InstallationSession(
             ),
             installationBatch = null,
         )
-        // An installed row is intentionally not selectable in the UI. If its
-        // version is unavailable, however, presence alone is not enough to
-        // reuse it safely. Keep that component in the internal batch so the
-        // unified preparation path can prepare a verified APK; exact identity
-        // matches are still removed later by [reusableInstalledComponentIds].
-        val unverifiedInstalledOptionalIds = if (
-            strategy == InstallationStrategy.INSTALL_MISSING_ONLY && targetComponentId == null
-        ) {
-            val availableIds = candidateBase.components
-                .filterNot { it.status == ComponentStatus.UNLISTED }
-                .map { it.id }
-                .toSet()
-            current.maintenance.managedApplications
-                .asSequence()
-                .filter { it.installed }
-                .map { it.componentId }
-                .filter { it in availableIds }
-                .toSet() - reusableInstalledComponentIds(candidateBase)
-        } else {
-            emptySet()
-        }
-        val selectedOptional = (requestedOptional + unverifiedInstalledOptionalIds) -
-            candidateBase.components.filter(::isMandatory).map { it.id }.toSet()
-        val candidateWithSelection = candidateBase.copy(selectedOptionalComponentIds = selectedOptional)
-        val selectedIdsForCoverage = targetComponentId?.let(::setOf)
-            ?: selectedComponents(candidateWithSelection).map { it.id }.toSet()
-        val reusableIdsForCoverage = if (targetComponentId == null) {
-            reusableInstalledComponentIds(candidateWithSelection)
-        } else {
-            emptySet()
-        }
-        val unresolvedManifestIds = (selectedIdsForCoverage - reusableIdsForCoverage) -
+        val preinstalledIds = selectedIds.flatMap { componentId ->
+            preinstalledMaintenancePrerequisiteIds(candidateBase, componentId)
+        }.toSet() - selectedIds
+        val nextBatchId = nextSessionId(current.sessionId)
+        // Freeze the user's complete choice before validation or projection.
+        // Inventory can supply prerequisites, never additional device targets.
+        val batchPlan = InstallationBatchPlan(
+            batchId = nextBatchId,
+            flow = InstallationFlow.MAINTENANCE_INSTALL,
+            strategy = strategy,
+            selectedComponentIds = selectedIds,
+            reusableComponentIds = emptySet(),
+            preinstalledComponentIds = preinstalledIds,
+            preparationComponentIds = selectedIds,
+            resultComponentIds = selectedIds,
+            catalogIdentity = catalogIdentity(candidateBase),
+        )
+        val unresolvedManifestIds = batchPlan.preparationComponentIds -
             effectiveCandidateManifests.map { it.componentId }.toSet()
         val candidateStage = when {
             controlPlaneOnly -> ArtifactCatalogStage.CONTROL_PLANE_READY
@@ -1759,7 +1747,11 @@ class InstallationSession(
             effectiveCandidateManifests.isNotEmpty() -> ArtifactCatalogStage.CONTROL_PLANE_READY
             else -> ArtifactCatalogStage.NOT_LOADED
         }
-        val candidate = candidateWithSelection.copy(artifactCatalogStage = candidateStage)
+        val candidate = candidateBase.copy(
+            artifactCatalogStage = candidateStage,
+            artifactManifests = effectiveCandidateManifests.filter { it.componentId in selectedIds },
+            installationBatch = batchPlan,
+        )
         val validationFailure = validateSelection(candidate)
         if (validationFailure != null) {
             publish(
@@ -1778,40 +1770,13 @@ class InstallationSession(
             )
             return
         }
-        val selected = if (targetComponentId == null) {
-            selectedComponents(candidate)
-        } else {
-            candidate.components.filter { it.id == targetComponentId }
-        }
-        val reusableIds = if (targetComponentId == null) reusableInstalledComponentIds(candidate) else emptySet()
-        val selectedIds = selected.map { it.id }.toSet()
-        val preinstalledIds = if (
-            targetComponentId != null && targetComponentId != AuthorizationPlanFactory.DESKTOP_COMPONENT_ID
-        ) {
-            preinstalledMaintenancePrerequisiteIds(candidate, targetComponentId)
-        } else {
-            emptySet()
-        }
-        // Starting a maintenance install is a new device-work generation. The
-        // batch id and the checkpoint token must be created from that same
-        // next generation so events from the previous maintenance action
-        // cannot be accepted by the new batch.
-        val nextBatchId = nextSessionId(current.sessionId)
-        val batchPlan = InstallationBatchPlan(
-            batchId = nextBatchId,
-            flow = InstallationFlow.MAINTENANCE_INSTALL,
-            strategy = strategy,
-            selectedComponentIds = selectedIds,
-            reusableComponentIds = reusableIds intersect selectedIds,
-            preinstalledComponentIds = preinstalledIds,
-            preparationComponentIds = selectedIds - reusableIds,
-            resultComponentIds = selectedIds - reusableIds,
-            catalogIdentity = catalogIdentity(candidate),
-        )
-        val retainedBaselineIds = reusableIds + preinstalledIds
+        val selected = selectedComponents(candidate)
+        val retainedBaselineIds = preinstalledIds
         val baselineEvidence = current.evidence.copy(
-            artifactsVerified = current.evidence.artifactsVerified intersect retainedBaselineIds,
-            artifactVerifications = current.evidence.artifactVerifications.filterKeys { it in retainedBaselineIds },
+            // APK preparation evidence belongs only to this attempt. Installed
+            // identity and authorization baselines are retained independently.
+            artifactsVerified = emptySet(),
+            artifactVerifications = emptyMap(),
             installed = current.evidence.installed intersect retainedBaselineIds,
             // A write receipt proves only the previous attempt's device call;
             // it cannot be reused as identity proof for this new batch.
@@ -1840,14 +1805,10 @@ class InstallationSession(
                     status = ComponentProgressStatus.PENDING,
                 )
             },
-            failedComponentIds = emptySet(),
-            componentFailureRetryable = emptyMap(),
-            failure = null,
             evidence = baselineEvidence,
             componentResults = buildComponentResults(baselineEvidence, candidate),
             maintenance = candidate.maintenance,
             installationBatch = batchPlan,
-            installationBatchReceipt = null,
         )
         // [startNewGeneration] increments the live session id. Seed the
         // snapshot with the same value before creating its checkpoint so the
@@ -1940,15 +1901,15 @@ class InstallationSession(
 
     private fun startSelectedMaintenanceInstallation() {
         val current = _snapshot.value
+        if (current.state != InstallationSessionState.MAINTENANCE) return
         val selection = current.maintenance.installationSelection ?: return
-        val selectedOptional = selection.selectedComponentIds
-            .filter { componentId ->
-                selection.options.firstOrNull { it.componentId == componentId }?.installed != true
-            }
-            .toSet()
+        val selectedIds = selection.options.asSequence()
+            .filter { !it.installed && it.componentId in selection.selectedComponentIds }
+            .mapTo(linkedSetOf()) { it.componentId }
+        if (selectedIds.isEmpty()) return
         startMaintenanceInstallation(
             actionId = selection.actionId,
-            selectedOptionalOverride = selectedOptional,
+            requestedComponentIds = selectedIds,
         )
     }
 

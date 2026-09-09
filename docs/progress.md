@@ -1,3 +1,27 @@
+# 2026-09-08 版本升级与 Release APK / ZIP 桌面导出
+
+1. 按用户要求运行 `node scripts/bump-release-version.mjs`，唯一版本从 `1.0.14 (15)` 升级为 `1.0.15 (16)`；使用既有仓库外 production 签名构建 Release，包含本轮维护单选批次、第三方图标和失败说明修复。Cloud 本地身份、版本与产物登记同步，旧 staging 产物保留为历史记录。
+2. 桌面已导出 `03车机助手-v1.0.15.apk`（14,328,800 字节，SHA-256 `ee6c76eff7fbd3e9eed0ae032cec46b9b5b6ead0892d19612f45764523ad31d7`）和 `03车机助手-v1.0.15.zip`（13,511,519 字节，SHA-256 `cea1e723ff54a72aeda5c80ee9b3f4cc01965cfee2456550d000171637ce47cf`）。ZIP 由 Cloud `android-config:prepare` 生成，仅含 `app.apk`，CRC 与解压摘要校验通过，内外 APK 字节一致。
+3. Release 构建与内置 Lint Vital 通过；实际包名 `com.ninepointnine.helper`、版本 `1.0.15 / 16`、单 signer、APK v2 和既有 production 证书摘要 `31ca80dd21a5208eaabd5f3e1440a3db2f7dc79122e03eaa6ba01730fb31f18b` 全部核验通过。复用本轮业务代码已通过的 Debug JVM `360/360`、手机 instrumentation `3/3` 和最终 Debug 覆盖安装证据，本次仅升级版本与导出产物，未重复安装或运行真实车机流程。
+4. 版本、文档、Skills 与 Cloud 登记测试 `10/10` 通过；共享客户端检查仍仅报告登记快照为 clean、当前工作树为 dirty，未改写历史快照或为消除此提示提交代码。源码与 Cloud 台账均未提交、推送或发布，未安装 Release；真实下载和车机安装的环境阻断仍见下方记录。
+
+# 2026-09-08 失败说明根因补充与最终 Debug 更新
+
+1. 继续审计确认了“其它应用只显示安装失败”的独立缺陷：`resolveInstallationResult` 优先取行错误，`InstallUiStateMapper` 又按任意行错误隐藏批次原因；首次 / 维护结果页还重复执行同样判断。因此某应用的目录缺失可能遮住另一层的批次证据校验错误。现由原领域汇总保留独立批次原因，映射只消除相同原因码，两个页面只展示统一结论；已提交收据优先级保持不变，不把一个应用错误复制到其它应用。
+2. 新增 JVM 回归验证批次与行错误同时存在时原因不丢失、相同原因不重复；手机单选回归追加不同的批次错误，确认说明可见且没有未选应用。Debug JVM `360/360`、Debug / AndroidTest 构建、Lint 与手机 instrumentation `3/3` 均通过；截图核对错误说明、唯一结果行和重试勾选。一次旧包 instrumentation 停在运行器启动阶段，读取活动进程确认后定向强停测试助手，安装新包重跑通过；未清数据或卸载。
+3. 继续只读检查公网：哔哩哔哩 ZIP 页面与 iframe 下载链接均存在，电脑端随后进入下载源“网络异常，需要验证后下载”的页面，点击其既有验证下载入口后仍停留在验证页，未取得 ZIP 字节。该结果只证明当前电脑网络受源站验证阻挡，不能作为手机 WebView 同样失败或发布 ZIP 损坏的证据。staging V5 仍返回 `android_config_v5_not_ready`，车机不在线，原始失败日志未留存，故真实下载 / 车机安装仍未宣称通过。
+4. 所有测试后再次保留数据覆盖安装最新 Debug，系统返回 `Success`；身份继续为 `com.ninepointnine.helper.test`、`1.0.14-test (15)`，APK SHA-256 为 `77414047214169a3d6ac34ce466edb709ff3ea3bfa14ac3796183d1e89189523`，单一开发证书和 APK v2 校验通过。本段取代下方较早的 Debug 包摘要；未提交、推送、部署、发布或操作车机。
+
+# 2026-09-08 维护单选批次与第三方图标修复（客户端已验证，真实安装待环境恢复）
+
+1. 代码根因：维护安装把版本 / 身份未知的已安装库存和必选项重新加入内部批次，突破用户选择；旧批次 `artifactVerifications` 又可能被保留，与新批次准备集合的严格校验冲突。修复位于唯一 owner `InstallationSession`：三个维护入口显式提交完整选择，确认时立即冻结 `InstallationBatchPlan`；准备、执行与结果只来自该批次，已验证前置独立保存，新批次清空旧制品证据、归档记录、失败和收据。未放宽 APK 身份或证据集合校验。
+2. 图标沿现有 `InstallerIcon.bundledLogo` 接线，资源从桌面实际第三方 APK 提取，作为下载前展示；已核验 APK 图标仍优先。哔哩哔哩来源为 `blbl.cat3399` 的 `res/mipmap-xxxhdpi-v4/ic_launcher.png`，领航来源为 `com.mojoxing.light` 的 `res/Vd.webp`。两个源 APK 的 SHA-256 分别为 `43846774323ca35054b477ed9d9adbf4ff16aeec534d8a6e63e26dd131847fd0`、`e4e5ce85ba11d0f46d87fd0f6542ef123a043a619155def27c0bdf39a5da0884`，与本轮正式配置批准值一致；未新增远程图标协议或第三方准入表。
+3. 已通过 Debug JVM `359/359`、Debug / AndroidTest 构建和 Debug Lint。领域回归覆盖未选领航的不同库存状态、历史制品证据、重复点击、失败恢复和下一批成功；运行时回归验证已安装前置不进入设备执行集合。真实测试手机 instrumentation `3/3` 通过：生产 Activity 启动、Debug 维护场景启动、维护单选失败与返回重试。UI 测试由 Compose 测试库同步重组及动画，截图确认两图标正常、只勾选哔哩哔哩、结果仅一项并保留注入的具体失败原因；这是确定性适配器事件场景，不是公网下载或车机安装成功证据。
+4. 发布资料核对：早先保存的正式 V5 配置声明 `红绿灯领航v2.7.1.zip`，与当时目录的 `红绿领航v2.7.1.zip` 不一致。收尾重新读取发现正式配置已经更新为 revision `15`，名称和文件名改为 `红绿D领航v2.7.1` / `红绿D领航v2.7.1.zip`；使用客户端固定 production 公钥验证原始 payload 签名通过，当前目录中该 ZIP 与哔哩哔哩 ZIP 均精确存在。配置 / 目录变化不是本轮写入，旧冲突不再记作当前阻断。
+5. 当前真实链路阻断：Debug 对应的 staging V5 接口实测为 HTTP `503`、`android_config_v5_not_ready`；测试手机可用但车机已离线。本轮未取得用户最初失败批次的完整下载及设备收据，因此不将代码缺陷、目录名历史冲突或模拟失败扩写成哔哩哔哩原始请求的全部实证。需先按 Cloud 既有 V5 运维主链恢复 staging 签名配置，再在车机可用时只选哔哩哔哩一次，核对真实 ZIP / APK 校验、唯一执行包和最终回读；出现多目标、校验失败仍写入或结果无具体原因时立即停止。
+6. 全部 instrumentation 结束后，已再次保留数据覆盖安装 Debug `com.ninepointnine.helper.test`、`1.0.14-test (15)`，系统返回 `Success`，Launcher 回读为 `MainActivity`；APK SHA-256 为 `f62a0888e0d8ad136d1fbd20d0bd8fd3c3e201223b0df3a1c83197d4432416e5`，单一开发证书及 APK v2 验证通过。该包是本地 Debug，不冒充 staging 发布包。
+7. 最终 `MainActivity` 冷启动返回 `Status: ok` 且处于 resumed；项目文档、Skills、版本及 `git diff --check` 均通过。共享 `check-03app-repository.mjs` 仅报告登记工作树为 clean、当前源码为 dirty；未修改 Cloud 台账掩盖待提交差异。本轮不修改线上配置、不对车机写入、不清数据、不卸载、不降级、不重启、不提交、不推送、不发布。
+
 # 2026-09-07 助手 1.0.14 staging 包导出
 
 1. 按用户要求由唯一版本脚本递增到 `1.0.14 / versionCode=15`，Cloud 双轨身份同步；staging 使用 `com.ninepointnine.helper.test`、`1.0.14-test (15)` 和独立 staging 证书。长期文档移除过期版本数字，实际版本统一引用根版本文件和本进度记录。

@@ -104,6 +104,8 @@ private fun bundledLogo(iconKey: String): Int = when (iconKey) {
     "lyrics" -> R.drawable.lyrics_logo
     "cast" -> R.drawable.cast_logo
     "file-manager" -> R.drawable.file_manager_logo
+    "traffic-light" -> R.drawable.traffic_light_logo
+    "bilibili" -> R.drawable.bilibili_logo
     else -> 0
 }
 

@@ -38,6 +38,8 @@ import com.ninepointnine.helper.domain.session.ManagedApplicationStatus
 import com.ninepointnine.helper.domain.session.ResultKind
 import com.ninepointnine.helper.domain.session.SessionFailure
 import com.ninepointnine.helper.domain.session.SessionProgress
+import com.ninepointnine.helper.domain.session.ComponentResult
+import com.ninepointnine.helper.domain.session.resolveInstallationResult
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -45,6 +47,29 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class InstallUiStateMapperTest {
+    @Test
+    fun `batch failure remains visible alongside a different component failure`() {
+        val componentReason = "lanzou_folder_missing"
+        val snapshot = InstallationSessionSnapshot(
+            state = InstallationSessionState.FAILED,
+            componentResults = listOf(
+                ComponentResult("traffic-light", false, false, false, componentId = "traffic-light", failureReason = componentReason),
+                ComponentResult("bilibili", false, false, false, componentId = "bilibili"),
+            ),
+            failure = SessionFailure(FailureCategory.VERIFICATION, reasonCode = "artifact_identity_evidence_missing"),
+        )
+        assertEquals("artifact_identity_evidence_missing", snapshot.resolveInstallationResult().failureReasonCode)
+        val result = InstallUiStateMapper.map(snapshot) as InstallUiState.Result
+        assertEquals(failureReasonToUserMessage("artifact_identity_evidence_missing"), result.failureReason)
+        assertEquals(failureReasonToUserMessage(componentReason, "traffic-light"), result.componentResults[0].errorReason)
+        assertNull(result.componentResults[1].errorReason)
+
+        val duplicate = InstallUiStateMapper.map(snapshot.copy(
+            failure = SessionFailure(FailureCategory.DOWNLOAD, reasonCode = componentReason),
+        )) as InstallUiState.Result
+        assertNull(duplicate.failureReason)
+    }
+
     @Test
     fun `idle and discovery map to one connection screen`() {
         val idle = InstallUiStateMapper.map(InstallationSessionSnapshot(InstallationSessionState.IDLE))

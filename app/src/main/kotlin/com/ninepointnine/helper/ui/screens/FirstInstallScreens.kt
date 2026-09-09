@@ -821,7 +821,6 @@ private fun ResultScreen(
                 )
             }
             state.failureReason
-                ?.takeIf { state.componentResults.none { result -> result.errorReason != null } }
                 ?.let { reason ->
                 Text(
                     text = reason,

@@ -754,7 +754,7 @@ class InstallerRuntimeTest {
     }
 
     @Test
-    fun `maintenance runtime prepares only missing apps and passes installed prerequisite without an apk`() = runTest {
+    fun `maintenance runtime executes only the selection and retains prerequisites outside device work`() = runTest {
         val desktop = manifest("desktop")
         val lyrics = manifest("lyrics")
         val manifests = listOf(desktop, lyrics)
@@ -860,11 +860,12 @@ class InstallerRuntimeTest {
         assertEquals(listOf("lyrics"), preparedIds)
         assertEquals(InstallationStrategy.INSTALL_MISSING_ONLY, executedStrategy)
         assertEquals(InstallationFlow.MAINTENANCE_INSTALL, executedBatch?.flow)
-        assertEquals(setOf("desktop", "lyrics"), executedBatch?.selectedComponentIds)
-        assertEquals(setOf("desktop"), executedBatch?.reusableComponentIds)
+        assertEquals(setOf("lyrics"), executedBatch?.selectedComponentIds)
+        assertEquals(emptySet<String>(), executedBatch?.reusableComponentIds)
+        assertEquals(setOf("desktop"), executedBatch?.preinstalledComponentIds)
         assertEquals(setOf("lyrics"), executedBatch?.preparationComponentIds)
-        assertEquals(setOf("desktop", "lyrics"), executedArtifacts.map { it.manifest.componentId }.toSet())
-        assertTrue(executedArtifacts.single { it.manifest.componentId == "desktop" }.finalApk == null)
+        assertEquals(setOf("lyrics"), executedBatch?.resultComponentIds)
+        assertEquals(setOf("lyrics"), executedArtifacts.map { it.manifest.componentId }.toSet())
         assertTrue(executedArtifacts.single { it.manifest.componentId == "lyrics" }.finalApk != null)
         runtime.close()
     }
@@ -924,8 +925,9 @@ class InstallerRuntimeTest {
             createConnectionAdapter = { port -> fakeConnectionAdapter(port) },
             loadCatalog = {},
             prepareInstallationBatch = { batch, _ ->
-                assertEquals(setOf(desktop.componentId, cast.componentId), batch.selectedComponentIds)
-                assertEquals(setOf(desktop.componentId), batch.reusableComponentIds)
+                assertEquals(setOf(cast.componentId), batch.selectedComponentIds)
+                assertEquals(emptySet<String>(), batch.reusableComponentIds)
+                assertEquals(setOf(desktop.componentId), batch.preinstalledComponentIds)
                 assertEquals(setOf(cast.componentId), batch.preparationComponentIds)
                 ArtifactPreparationResult.Failed(
                     ArtifactFailure(
