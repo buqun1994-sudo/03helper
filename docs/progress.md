@@ -1,3 +1,11 @@
+# 2026-09-20 1.0.18 Release APK / ZIP 与正式目录清单（未部署）
+
+1. 按用户要求将唯一 Release 版本从 `1.0.17 (18)` 递增为 `1.0.18 (19)`，Cloud 双环境身份同步为 production `com.ninepointnine.helper / 1.0.18 (19)` 与 staging `com.ninepointnine.helper.test / 1.0.18-test (19)`；包名、namespace、证书与配置签名根均未改变。
+2. 使用仓库外 production signing properties 完成 `:app:assembleRelease`。指定正式目录内 APK 为 `14,426,940` 字节、SHA-256 `32be10234904cb69636c9e291d09965828c7b46629b65a1d6a5006838f4ca5e1`；实际包名、版本、Launcher、单一 production signer 与 APK Signature Scheme v2 均核对通过，证书 SHA-256 为 `31ca80dd21a5208eaabd5f3e1440a3db2f7dc79122e03eaa6ba01730fb31f18b`。
+3. Cloud `android-config:prepare` 从同一不可变 APK 副本生成 `03车机助手-v1.0.18.zip`，大小 `13,616,985` 字节、SHA-256 `49fc3d65859a388bcc81dcc9e0e1c1e19d85a3091904185bcefea5c473e79e9c`；ZIP 仅含同名 APK，解压摘要与外部 APK 一致。正式目录既有 `android-app-releases.json` 只更新 `03helper` 条目，保留目录 URL、有效期与其它应用，文件 SHA-256 为 `2abc74e5862dee81baa9d4fd54b19cf22e16ad05e09529ab0ed30c9d03851e9a`，V5 production 输入检查通过并保持 `local-only`。
+4. Release JVM 单测 `399/399`、Release Lint、Cloud 登记与发布资料测试 `12/12`、项目文档、Skills、本机环境和差异格式检查通过。源码、版本与进度记录已提交并推送，Cloud 仓库同步真实提交快照后将对应产物登记为可发布。
+5. 本轮未安装 Release、未上传蓝奏、未导入后台、未部署或切换线上配置；旧版本桌面产物保留不删除。
+
 # 2026-09-20 1.0.17 staging 测试包与后台导入清单
 
 1. 按用户要求运行唯一版本脚本，将 Release 真值从 `1.0.16 (17)` 升级为 `1.0.17 (18)`；staging 由同一版本派生为 `com.ninepointnine.helper.test`、`1.0.17-test (18)`。Cloud 统一登记、助手身份档案和本机产物索引已同步；产物与本轮源码同批收口，保持 `releaseEligible=false`。
