@@ -145,6 +145,7 @@ class SourceHostPolicy(
                 if (host !in githubHosts) "github_host_forbidden" else null
 
             ArtifactSourceKind.LOCAL_DOWNLOAD -> "local_source_requires_local_manifest"
+            ArtifactSourceKind.USER_SELECTED_APK -> "user_selected_source_forbidden"
         }
     }
 

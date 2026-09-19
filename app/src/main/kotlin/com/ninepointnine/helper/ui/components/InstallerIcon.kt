@@ -126,6 +126,7 @@ private fun lucideDrawable(name: String): Int = when (name) {
     "download" -> LucideR.drawable.lucide_ic_download
     "eraser" -> LucideR.drawable.lucide_ic_eraser
     "file_down" -> LucideR.drawable.lucide_ic_file_down
+    "file_plus" -> LucideR.drawable.lucide_ic_file_plus
     "folder_plus" -> LucideR.drawable.lucide_ic_folder_plus
     "layout_grid" -> LucideR.drawable.lucide_ic_layout_grid
     "loader_circle" -> LucideR.drawable.lucide_ic_loader_circle

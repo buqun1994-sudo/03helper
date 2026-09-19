@@ -8,6 +8,8 @@ enum class ArtifactSourceKind(val wireName: String) {
     GITHUB_RELEASES("github"),
     /** A verified APK already present in the user's public Download folder. */
     LOCAL_DOWNLOAD("local-download"),
+    /** An APK explicitly selected through Android's document picker for this one operation. */
+    USER_SELECTED_APK("user-selected-apk"),
     ;
 
     companion object {
@@ -99,8 +101,12 @@ data class ArtifactVerification(
     val apkVersion: ArtifactVersion,
     val certificateSha256: String,
     val archiveDeleted: Boolean,
+    /** Complete current APK signer set; the primary digest remains a stable display field. */
+    val certificateSha256s: Set<String> = setOf(certificateSha256),
     /** True when the APK was verified from public Download without a ZIP. */
     val localDownload: Boolean = false,
+    /** True only for an APK explicitly selected by the user for this one operation. */
+    val userSelected: Boolean = false,
 )
 
 /** In-memory only context returned by a source adapter to the downloader. */

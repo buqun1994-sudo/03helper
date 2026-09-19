@@ -66,6 +66,8 @@ enum class InstallationStrategy {
 enum class InstallationFlow {
     INITIAL_INSTALL,
     MAINTENANCE_INSTALL,
+    /** Installs exactly one APK explicitly selected from the phone. */
+    LOCAL_APK_INSTALL,
     /** Downloads and validates the helper APK, then delegates the write to Android's installer. */
     SELF_UPDATE,
 }
@@ -115,6 +117,7 @@ enum class MaintenanceActionId {
     REPAIR_CONFIGURATION,
     MANAGE_APPS,
     INSTALL_APPLICATIONS,
+    INSTALL_LOCAL_APPLICATION,
     /** Legacy persisted name; new UI and flows use [INSTALL_APPLICATIONS]. */
     INSTALL_FILE_MANAGER,
     LAUNCH_LYRICS,
@@ -139,6 +142,7 @@ val MaintenanceActionId.requiresConnectedDevice: Boolean
         MaintenanceActionId.REPAIR_CONFIGURATION,
         MaintenanceActionId.MANAGE_APPS,
         MaintenanceActionId.INSTALL_APPLICATIONS,
+        MaintenanceActionId.INSTALL_LOCAL_APPLICATION,
         MaintenanceActionId.INSTALL_FILE_MANAGER,
         MaintenanceActionId.LAUNCH_LYRICS,
         MaintenanceActionId.LAUNCH_DESKTOP,

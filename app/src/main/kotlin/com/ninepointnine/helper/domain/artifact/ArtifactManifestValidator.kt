@@ -36,11 +36,9 @@ object ArtifactManifestValidator {
             invalid("source_count_invalid")
         manifest.sources.map { it.kind }.toSet().size != manifest.sources.size ->
             invalid("source_duplicate")
-        manifest.localOnly && (
-            manifest.sources.size != 1 ||
-                manifest.sources.singleOrNull()?.kind != ArtifactSourceKind.LOCAL_DOWNLOAD ||
-                manifest.sources.singleOrNull()?.url != LOCAL_DOWNLOAD_URL
-            ) -> invalid("local_source_invalid")
+        manifest.localOnly && !isValidLocalSource(manifest.sources) -> invalid("local_source_invalid")
+        !manifest.localOnly && manifest.sources.any { it.kind == ArtifactSourceKind.USER_SELECTED_APK } ->
+            invalid("user_selected_source_requires_local_manifest")
         !manifest.localOnly && manifest.sources.any { it.url.isBlank() } -> invalid("source_url_missing")
         else -> ManifestValidation.Valid
     }
@@ -82,10 +80,20 @@ object ArtifactManifestValidator {
             value != "." &&
             value != ".."
 
+    private fun isValidLocalSource(sources: List<ArtifactSource>): Boolean {
+        val source = sources.singleOrNull() ?: return false
+        return when (source.kind) {
+            ArtifactSourceKind.LOCAL_DOWNLOAD -> source.url == LOCAL_DOWNLOAD_URL
+            ArtifactSourceKind.USER_SELECTED_APK -> source.url == USER_SELECTED_APK_URL
+            else -> false
+        }
+    }
+
     private fun invalid(reasonCode: String): ManifestValidation.Invalid =
         ManifestValidation.Invalid(reasonCode)
 
     const val LOCAL_DOWNLOAD_URL = "content://public-download"
+    const val USER_SELECTED_APK_URL = "content://user-selected-apk"
 }
 
 sealed interface ManifestValidation {

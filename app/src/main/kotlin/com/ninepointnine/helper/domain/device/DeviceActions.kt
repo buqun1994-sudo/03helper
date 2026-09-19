@@ -27,6 +27,25 @@ interface AdbCommandGateway {
         strategy: InstallationStrategy,
     ): DeviceInstallResult
 
+    /** Builds the versioned plan from the verified installed APK Manifest and target capabilities. */
+    suspend fun buildAuthorizationPlan(
+        artifacts: List<InstallableArtifact>,
+        requireDesktop: Boolean,
+    ): AuthorizationPlanBuildResult = AuthorizationPlanFactory.createForComponents(
+        components = artifacts.map { artifact ->
+            ManagedComponent(
+                componentId = artifact.manifest.componentId,
+                packageName = artifact.manifest.packageName,
+                setup = artifact.manifest.deviceSetup,
+                order = artifact.manifest.sortOrder,
+            )
+        },
+        requireDesktop = requireDesktop,
+        declarationsByComponent = artifacts.mapNotNull { artifact ->
+            artifact.declarations?.let { artifact.manifest.componentId to it }
+        }.toMap(),
+    )
+
     /** Runs the one versioned authorization plan for the selected components. */
     suspend fun runShortcut(
         shortcut: DeviceShortcut,
@@ -251,6 +270,8 @@ data class DeclaredApplicationAuthorizationRequirement(
     val declaration: String,
     val kind: ApplicationAuthorizationRequirementKind,
     val actions: List<DeclaredApplicationAuthorizationAction>,
+    /** Semantic keys bind UI rows to the exact typed actions in the batch plan. */
+    val actionKeys: List<String>,
     val automaticallyActionable: Boolean = true,
 )
 
@@ -269,19 +290,22 @@ sealed interface DeclaredApplicationAuthorizationAction {
     ) : DeclaredApplicationAuthorizationAction
 }
 
-/** Compiles installed APK declarations into the finite operations supported by maintenance. */
+/** Compiles target-resolved declarations into the finite operations supported by maintenance. */
 object DeclaredApplicationAuthorizationPlanFactory {
     fun create(
+        componentId: String,
         packageName: String,
         declarations: ApkDeclarationMetadata,
     ): List<DeclaredApplicationAuthorizationRequirement> {
+        if (!COMPONENT_ID_PATTERN.matches(componentId)) return emptyList()
         val permissionRequirements = declarations.requestedPermissions
             .filter(PERMISSION_PATTERN::matches)
             .distinct()
             .sorted()
-            .map { permission ->
+            .mapNotNull { permission ->
                 val appOp = APP_OP_BY_PERMISSION[permission]
                 val runtimeGrant = permission in runtimeGrantPermissions(declarations)
+                if (appOp == null && !runtimeGrant) return@mapNotNull null
                 val actions = buildList {
                     if (permission in RUNTIME_PERMISSION_WITH_APP_OP && runtimeGrant) {
                         add(DeclaredApplicationAuthorizationAction.GrantRuntimePermission(permission))
@@ -290,21 +314,18 @@ object DeclaredApplicationAuthorizationPlanFactory {
                         add(DeclaredApplicationAuthorizationAction.AllowAppOp(appOp))
                     } else if (runtimeGrant) {
                         add(DeclaredApplicationAuthorizationAction.GrantRuntimePermission(permission))
-                    } else {
-                        add(DeclaredApplicationAuthorizationAction.InspectPermission(permission))
                     }
                 }
                 DeclaredApplicationAuthorizationRequirement(
                     declaration = permission,
                     kind = if (appOp == null && runtimeGrant) {
                         ApplicationAuthorizationRequirementKind.RUNTIME_PERMISSION
-                    } else if (appOp != null) {
-                        ApplicationAuthorizationRequirementKind.APP_OP
                     } else {
-                        ApplicationAuthorizationRequirementKind.DECLARED_PERMISSION
+                        ApplicationAuthorizationRequirementKind.APP_OP
                     },
                     actions = actions,
-                    automaticallyActionable = appOp != null || runtimeGrant,
+                    actionKeys = actions.map { declaredAuthorizationActionSemanticKey(packageName, it) },
+                    automaticallyActionable = true,
                 )
             }
         val serviceRequirements = declarations.services
@@ -324,6 +345,10 @@ object DeclaredApplicationAuthorizationPlanFactory {
                                 ManagedSecureFlag.ACCESSIBILITY_ENABLED,
                             ),
                         ),
+                        actionKeys = listOf(
+                            "component:enabled_accessibility_services:${service.componentName}",
+                            "flag:accessibility_enabled",
+                        ),
                     )
 
                     BIND_NOTIFICATION_LISTENER_SERVICE -> DeclaredApplicationAuthorizationRequirement(
@@ -334,6 +359,9 @@ object DeclaredApplicationAuthorizationPlanFactory {
                                 ManagedSecureComponentList.ENABLED_NOTIFICATION_LISTENERS,
                                 service.componentName,
                             ),
+                        ),
+                        actionKeys = listOf(
+                            "component:enabled_notification_listeners:${service.componentName}",
                         ),
                     )
 
@@ -347,10 +375,8 @@ object DeclaredApplicationAuthorizationPlanFactory {
         componentName.substringBefore('/', missingDelimiterValue = "") == packageName &&
             COMPONENT_PATTERN.matches(componentName)
 
-    private fun runtimeGrantPermissions(declarations: ApkDeclarationMetadata): Set<String> =
-        declarations.runtimeGrantPermissions ?: declarations.requestedPermissions.filter { permission ->
-            permission in DEFAULT_DANGEROUS_PERMISSIONS
-        }.toSet()
+    fun runtimeGrantPermissions(declarations: ApkDeclarationMetadata): Set<String> =
+        declarations.runtimeGrantPermissions.orEmpty().intersect(SUPPORTED_RUNTIME_PERMISSIONS)
 
     private val APP_OP_BY_PERMISSION = mapOf(
         "android.permission.SYSTEM_ALERT_WINDOW" to ManagedAppOp.SYSTEM_ALERT_WINDOW,
@@ -364,7 +390,7 @@ object DeclaredApplicationAuthorizationPlanFactory {
         "android.permission.READ_EXTERNAL_STORAGE",
         "android.permission.WRITE_EXTERNAL_STORAGE",
     )
-    private val DEFAULT_DANGEROUS_PERMISSIONS = setOf(
+    private val SUPPORTED_RUNTIME_PERMISSIONS = setOf(
         "android.permission.READ_CALENDAR",
         "android.permission.WRITE_CALENDAR",
         "android.permission.CAMERA",
@@ -404,6 +430,22 @@ object DeclaredApplicationAuthorizationPlanFactory {
     private const val BIND_ACCESSIBILITY_SERVICE = "android.permission.BIND_ACCESSIBILITY_SERVICE"
     private const val BIND_NOTIFICATION_LISTENER_SERVICE =
         "android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
+    private val COMPONENT_ID_PATTERN = Regex("^[a-z][a-z0-9-]{0,63}$")
+}
+
+private fun declaredAuthorizationActionSemanticKey(
+    packageName: String,
+    action: DeclaredApplicationAuthorizationAction,
+): String = when (action) {
+    is DeclaredApplicationAuthorizationAction.InspectPermission ->
+        "runtime:$packageName:${action.permission}"
+    is DeclaredApplicationAuthorizationAction.GrantRuntimePermission ->
+        "runtime:$packageName:${action.permission}"
+    is DeclaredApplicationAuthorizationAction.AllowAppOp ->
+        "appop:$packageName:${action.operation.wireName}"
+    is DeclaredApplicationAuthorizationAction.EnableSecureFlag -> "flag:${action.setting.wireName}"
+    is DeclaredApplicationAuthorizationAction.AppendSecureComponent ->
+        "component:${action.setting.wireName}:${action.componentName}"
 }
 
 data class InstallableArtifact(
@@ -599,6 +641,8 @@ data class AuthorizationPlan(
     val actions: List<AuthorizationAction>,
     /** APK-derived service identities used for this one authorization transaction. */
     val runtimeServiceOverrides: Map<String, List<String>> = emptyMap(),
+    /** Target-resolved declarations that produced dynamic authorization actions. */
+    val declarationsByComponent: Map<String, ApkDeclarationMetadata> = emptyMap(),
 )
 
 data class ManagedComponent(
@@ -626,6 +670,14 @@ sealed interface AuthorizationAction {
         override val componentId: String,
         val packageName: String,
         val permission: ManagedRuntimePermission,
+    ) : AuthorizationAction
+
+    /** A target-confirmed dangerous permission that is not part of the fixed catalog schema. */
+    data class EnsureDeclaredRuntimePermissionGranted(
+        override val id: String,
+        override val componentId: String,
+        val packageName: String,
+        val permission: String,
     ) : AuthorizationAction
 
     data class EnsureSecureSettingEnabled(
@@ -730,6 +782,9 @@ object AuthorizationPlanFactory {
                     order = artifact.manifest.sortOrder,
                 )
             },
+            declarationsByComponent = artifacts.mapNotNull { artifact ->
+                artifact.declarations?.let { artifact.manifest.componentId to it }
+            }.toMap(),
         )
 
     fun createForManifests(
@@ -752,10 +807,12 @@ object AuthorizationPlanFactory {
         components: List<ManagedComponent>,
         requireDesktop: Boolean = false,
         declaredServicesByComponent: Map<String, Set<ApkServiceDeclaration>> = emptyMap(),
+        declarationsByComponent: Map<String, ApkDeclarationMetadata> = emptyMap(),
     ): AuthorizationPlanBuildResult = createComponents(
         components,
         requireDesktop = requireDesktop,
         declaredServicesByComponent = declaredServicesByComponent,
+        declarationsByComponent = declarationsByComponent,
     )
 
     /**
@@ -822,6 +879,9 @@ object AuthorizationPlanFactory {
                 is AuthorizationAction.EnsureRuntimePermissionGranted ->
                     item.after == AuthorizationValueState.GRANTED && item.preservedEntryCount == null
 
+                is AuthorizationAction.EnsureDeclaredRuntimePermissionGranted ->
+                    item.after == AuthorizationValueState.GRANTED && item.preservedEntryCount == null
+
                 is AuthorizationAction.EnsureSecureSettingEnabled ->
                     item.after == AuthorizationValueState.ENABLED && item.preservedEntryCount == null
 
@@ -853,6 +913,7 @@ object AuthorizationPlanFactory {
         components: List<ManagedComponent>,
         requireDesktop: Boolean = false,
         declaredServicesByComponent: Map<String, Set<ApkServiceDeclaration>> = emptyMap(),
+        declarationsByComponent: Map<String, ApkDeclarationMetadata> = emptyMap(),
     ): AuthorizationPlanBuildResult {
         if (components.isEmpty()) return AuthorizationPlanBuildResult.Rejected("authorization_artifacts_missing")
         if (components.map { it.componentId }.toSet().size != components.size) {
@@ -860,7 +921,28 @@ object AuthorizationPlanFactory {
         }
         val componentIds = components.mapTo(linkedSetOf()) { it.componentId }
         if (declaredServicesByComponent.keys.any { it !in componentIds } ||
+            declarationsByComponent.keys.any { it !in componentIds } ||
             declaredServicesByComponent.any { (componentId, services) ->
+                val packageName = components.firstOrNull { it.componentId == componentId }?.packageName
+                packageName == null || services.any { !serviceBelongsToPackage(it.componentName, packageName) }
+            }
+        ) {
+            return AuthorizationPlanBuildResult.Rejected("authorization_service_component_mismatch")
+        }
+        if (declarationsByComponent.any { (componentId, declarations) ->
+                val explicitServices = declaredServicesByComponent[componentId].orEmpty()
+                explicitServices.isNotEmpty() && declarations.services.isNotEmpty() &&
+                    explicitServices != declarations.services
+            }
+        ) {
+            return AuthorizationPlanBuildResult.Rejected("authorization_declaration_metadata_mismatch")
+        }
+        val effectiveServices = componentIds.associateWith { componentId ->
+            declarationsByComponent[componentId]?.services
+                ?.takeIf { it.isNotEmpty() }
+                ?: declaredServicesByComponent[componentId].orEmpty()
+        }.filterValues { it.isNotEmpty() }
+        if (effectiveServices.any { (componentId, services) ->
                 val packageName = components.firstOrNull { it.componentId == componentId }?.packageName
                 packageName == null || services.any { !serviceBelongsToPackage(it.componentName, packageName) }
             }
@@ -870,7 +952,7 @@ object AuthorizationPlanFactory {
         if (components.any { component -> !isAllowedDynamicComponent(component) }) {
             return AuthorizationPlanBuildResult.Rejected("authorization_component_unapproved")
         }
-        if (declaredServicesByComponent.any { (componentId, services) ->
+        if (effectiveServices.any { (componentId, services) ->
                 val requiredComponent = components.firstOrNull { it.componentId == componentId } ?: return@any true
                 val accessibilityCount = services.count {
                     it.permission == "android.permission.BIND_ACCESSIBILITY_SERVICE" &&
@@ -897,14 +979,19 @@ object AuthorizationPlanFactory {
                 version = CURRENT_VERSION,
                 components = orderedComponents,
                 actions = orderedComponents.flatMap { component ->
-                    actionsFor(component, declaredServicesByComponent[component.componentId].orEmpty())
+                    actionsFor(
+                        component = component,
+                        declaredServices = effectiveServices[component.componentId].orEmpty(),
+                        declarations = declarationsByComponent[component.componentId],
+                    )
                 },
                 runtimeServiceOverrides = orderedComponents.mapNotNull { component ->
                     val contract = managedComponent(component) ?: return@mapNotNull null
-                    val declared = declaredServicesByComponent[component.componentId].orEmpty()
+                    val declared = effectiveServices[component.componentId].orEmpty()
                     if (declared.isEmpty()) return@mapNotNull null
                     component.componentId to runtimeServicesFor(component, contract, declared)
                 }.toMap().filterValues { it.isNotEmpty() },
+                declarationsByComponent = declarationsByComponent,
             ),
         )
     }
@@ -920,10 +1007,14 @@ object AuthorizationPlanFactory {
                 services.isEmpty() || services.distinct().size != services.size ||
                     services.any { service -> !serviceBelongsToPackage(service, component.packageName) }
             }) return false
+        if (plan.declarationsByComponent.keys.any { it !in plan.components.map { component -> component.componentId }.toSet() }) {
+            return false
+        }
         return plan.actions == expectedComponents.flatMap { component ->
             actionsFor(
                 component,
                 runtimeServiceOverride = plan.runtimeServiceOverrides[component.componentId],
+                declarations = plan.declarationsByComponent[component.componentId],
             )
         }
     }
@@ -949,11 +1040,13 @@ object AuthorizationPlanFactory {
         component: ManagedComponent,
         declaredServices: Set<ApkServiceDeclaration> = emptySet(),
         runtimeServiceOverride: List<String>? = null,
+        declarations: ApkDeclarationMetadata? = null,
     ): List<AuthorizationAction> {
         val contract = managedComponent(component)
-        if (contract == null) return component.setup?.let { compileSetupActions(component, it) }.orEmpty()
-        val runtimeServices = runtimeServiceOverride ?: runtimeServicesFor(component, contract, declaredServices)
-        val fixed = when (component.componentId) {
+        val runtimeServices = contract?.let {
+            runtimeServiceOverride ?: runtimeServicesFor(component, it, declaredServices)
+        }.orEmpty()
+        val fixed = if (contract == null) emptyList() else when (component.componentId) {
         LYRICS_COMPONENT_ID -> listOf(
             AuthorizationAction.EnsureAppOpAllowed(
                 id = "lyrics-overlay-v1",
@@ -1035,10 +1128,67 @@ object AuthorizationPlanFactory {
         )
         else -> emptyList()
         }
-        val declared = component.setup?.let { compileSetupActions(component, it) }.orEmpty()
-        if (declared.isEmpty()) return fixed
+        val configured = component.setup?.let { compileSetupActions(component, it) }.orEmpty()
         val fixedIds = fixed.map { it.id }.toSet()
-        return fixed + declared.filter { it.id !in fixedIds }
+        val approved = fixed + configured.filter { it.id !in fixedIds }
+        val semanticKeys = approved.mapTo(linkedSetOf(), ::semanticKey)
+        val dynamic = declarations?.let { declaredActionsFor(component, it) }.orEmpty()
+            .filter { semanticKeys.add(semanticKey(it)) }
+        return approved + dynamic
+    }
+
+    private fun declaredActionsFor(
+        component: ManagedComponent,
+        declarations: ApkDeclarationMetadata,
+    ): List<AuthorizationAction> = DeclaredApplicationAuthorizationPlanFactory
+        .create(component.componentId, component.packageName, declarations)
+        .flatMapIndexed { requirementIndex, requirement ->
+            requirement.actions.mapIndexedNotNull { actionIndex, action ->
+                val id = "${component.componentId}-declared-$requirementIndex-$actionIndex-v1"
+                when (action) {
+                    is DeclaredApplicationAuthorizationAction.InspectPermission -> null
+                    is DeclaredApplicationAuthorizationAction.GrantRuntimePermission ->
+                        AuthorizationAction.EnsureDeclaredRuntimePermissionGranted(
+                            id = id,
+                            componentId = component.componentId,
+                            packageName = component.packageName,
+                            permission = action.permission,
+                        )
+                    is DeclaredApplicationAuthorizationAction.AllowAppOp ->
+                        AuthorizationAction.EnsureAppOpAllowed(
+                            id = id,
+                            componentId = component.componentId,
+                            packageName = component.packageName,
+                            operation = action.operation,
+                        )
+                    is DeclaredApplicationAuthorizationAction.EnableSecureFlag ->
+                        AuthorizationAction.EnsureSecureSettingEnabled(
+                            id = id,
+                            componentId = component.componentId,
+                            setting = action.setting,
+                        )
+                    is DeclaredApplicationAuthorizationAction.AppendSecureComponent ->
+                        AuthorizationAction.AppendSecureComponent(
+                            id = id,
+                            componentId = component.componentId,
+                            setting = action.setting,
+                            targetComponent = action.componentName,
+                        )
+                }
+            }
+        }
+
+    /** Stable semantic identity shared by plan deduplication and requirement projection. */
+    fun semanticKey(action: AuthorizationAction): String = when (action) {
+        is AuthorizationAction.EnsureAppOpAllowed ->
+            "appop:${action.packageName}:${action.operation.wireName}"
+        is AuthorizationAction.EnsureRuntimePermissionGranted ->
+            "runtime:${action.packageName}:${action.permission.wireName}"
+        is AuthorizationAction.EnsureDeclaredRuntimePermissionGranted ->
+            "runtime:${action.packageName}:${action.permission}"
+        is AuthorizationAction.EnsureSecureSettingEnabled -> "flag:${action.setting.wireName}"
+        is AuthorizationAction.AppendSecureComponent ->
+            "component:${action.setting.wireName}:${action.targetComponent}"
     }
 
     /** Prefer the APK's actual declared service names; suffix compatibility is the fallback. */
@@ -1313,6 +1463,20 @@ object AuthorizationDeclarationValidator {
                     if (action.permission.wireName !in declarations.requestedPermissions) {
                         return DeviceActionFailure(
                             "authorization_permission_not_declared",
+                            action.componentId,
+                            retryable = false,
+                        )
+                    }
+                }
+
+                is AuthorizationAction.EnsureDeclaredRuntimePermissionGranted -> {
+                    val runtimeGrantPermissions =
+                        DeclaredApplicationAuthorizationPlanFactory.runtimeGrantPermissions(declarations)
+                    if (action.permission !in declarations.requestedPermissions ||
+                        action.permission !in runtimeGrantPermissions
+                    ) {
+                        return DeviceActionFailure(
+                            "authorization_permission_not_grantable",
                             action.componentId,
                             retryable = false,
                         )

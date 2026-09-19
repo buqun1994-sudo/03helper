@@ -15,6 +15,7 @@ import com.ninepointnine.helper.application.maintenance.MaintenanceController
 import com.ninepointnine.helper.application.maintenance.MaintenanceDiagnosticStore
 import com.ninepointnine.helper.application.maintenance.MaintenanceSessionStore
 import com.ninepointnine.helper.data.artifact.AndroidApkMetadataReader
+import com.ninepointnine.helper.data.artifact.AndroidUserSelectedApkPreparer
 import com.ninepointnine.helper.data.artifact.ApkIconRepository
 import com.ninepointnine.helper.data.artifact.ArchiveIdentityVerifier
 import com.ninepointnine.helper.data.artifact.ArtifactArchiveExtractor
@@ -227,6 +228,11 @@ object ProductionInstallerRuntimeFactory {
                 context = applicationContext,
                 metadataReader = apkMetadataReader,
             ),
+            userSelectedApkPreparer = AndroidUserSelectedApkPreparer(
+                contentResolver = applicationContext.contentResolver,
+                metadataReader = apkMetadataReader,
+                workspace = File(applicationContext.cacheDir, LOCAL_APK_WORKSPACE_DIRECTORY),
+            ),
         )
     }
 
@@ -235,6 +241,7 @@ object ProductionInstallerRuntimeFactory {
     private const val DIAGNOSTIC_CACHE_DIRECTORY = "maintenance-diagnostics"
     private const val MAINTENANCE_SESSION_FILE = "maintenance-session.json"
     private const val CATALOG_REVISION_FILE = "android-catalog-revisions.properties"
+    private const val LOCAL_APK_WORKSPACE_DIRECTORY = "install-artifacts/user-selected-apk"
     private const val DISCOVERY_READ_TIMEOUT_MILLIS = 900
     private const val INSTALLATION_READ_TIMEOUT_MILLIS = 60_000
 

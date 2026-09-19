@@ -2,8 +2,11 @@ package com.ninepointnine.helper.application
 
 import com.ninepointnine.helper.application.artifact.ArtifactPreparationResult
 import com.ninepointnine.helper.application.artifact.PreparedArtifact
+import com.ninepointnine.helper.application.artifact.UserSelectedApkPreparer
+import com.ninepointnine.helper.application.artifact.UserSelectedApkPreparationResult
 import com.ninepointnine.helper.application.device.DeviceDiscoverySessionAdapter
 import com.ninepointnine.helper.application.device.DeviceConnectionSessionAdapter
+import com.ninepointnine.helper.application.device.DeviceInstallationCoordinator
 import com.ninepointnine.helper.application.device.toDeviceSummary
 import com.ninepointnine.helper.application.maintenance.MaintenanceController
 import com.ninepointnine.helper.application.maintenance.MaintenanceDiagnosticStore
@@ -16,6 +19,7 @@ import com.ninepointnine.helper.domain.artifact.ApkExtractionEvidence
 import com.ninepointnine.helper.domain.artifact.ArchiveDownloadEvidence
 import com.ninepointnine.helper.domain.artifact.ArchiveVerificationEvidence
 import com.ninepointnine.helper.domain.artifact.ArtifactManifest
+import com.ninepointnine.helper.domain.artifact.ArtifactManifestValidator
 import com.ninepointnine.helper.domain.artifact.ArtifactFailure
 import com.ninepointnine.helper.domain.artifact.ArtifactFailurePhase
 import com.ninepointnine.helper.domain.artifact.ArtifactSource
@@ -28,7 +32,13 @@ import com.ninepointnine.helper.domain.artifact.SourceSelectionEvidence
 import com.ninepointnine.helper.domain.artifact.toComponentDescriptor
 import com.ninepointnine.helper.domain.device.ConnectedDevice
 import com.ninepointnine.helper.domain.device.AdbCommandGateway
+import com.ninepointnine.helper.domain.device.ApkDeclarationMetadata
+import com.ninepointnine.helper.domain.device.AuthorizationAction
+import com.ninepointnine.helper.domain.device.AuthorizationActionEvidence
 import com.ninepointnine.helper.domain.device.AuthorizationPlan
+import com.ninepointnine.helper.domain.device.AuthorizationPlanBuildResult
+import com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
+import com.ninepointnine.helper.domain.device.AuthorizationValueState
 import com.ninepointnine.helper.domain.device.DeviceCapability
 import com.ninepointnine.helper.domain.device.DeviceActionConnectionLease
 import com.ninepointnine.helper.domain.device.DeviceConnectionAttempt
@@ -74,6 +84,7 @@ import com.ninepointnine.helper.domain.session.MaintenanceInstallationOption
 import com.ninepointnine.helper.domain.session.MaintenanceInstallationSelection
 import com.ninepointnine.helper.domain.session.MaintenanceInventoryState
 import com.ninepointnine.helper.domain.session.MaintenanceActionId
+import com.ninepointnine.helper.domain.session.MaintenanceActionStatus
 import com.ninepointnine.helper.domain.session.MaintenanceApplicationActionId
 import com.ninepointnine.helper.domain.session.MaintenanceSnapshot
 import com.ninepointnine.helper.domain.session.MaintenanceUpdateState
@@ -871,6 +882,201 @@ class InstallerRuntimeTest {
     }
 
     @Test
+    fun `local apk preparation installs and authorizes declarations through the shared coordinator`() = runTest {
+        val apkFile = Files.createTempFile("selected-local", ".apk").toFile().apply {
+            writeBytes("local-apk".toByteArray())
+        }
+        val declarations = ApkDeclarationMetadata(
+            requestedPermissions = setOf("android.permission.ACCESS_FINE_LOCATION"),
+            runtimeGrantPermissions = setOf("android.permission.ACCESS_FINE_LOCATION"),
+        )
+        val certificates = setOf("11".repeat(32), "22".repeat(32))
+        val manifest = localApkManifest(apkFile).copy(
+            certificateSha256 = certificates.sorted().first(),
+            certificateSha256s = certificates,
+        )
+        val artifact = PreparedArtifact(
+            manifest = manifest,
+            sourceKind = ArtifactSourceKind.USER_SELECTED_APK,
+            finalApk = apkFile,
+            declarations = declarations,
+        )
+        val verification = ArtifactVerification(
+            componentId = manifest.componentId,
+            sourceKind = ArtifactSourceKind.USER_SELECTED_APK,
+            archiveSizeBytes = 0L,
+            archiveSha256 = "",
+            apkSizeBytes = manifest.apkSizeBytes,
+            apkSha256 = manifest.apkSha256,
+            packageName = manifest.packageName,
+            apkVersion = manifest.apkVersion,
+            certificateSha256 = manifest.certificateSha256,
+            archiveDeleted = true,
+            certificateSha256s = certificates,
+            userSelected = true,
+        )
+        var prepareCount = 0
+        var clearCount = 0
+        var shortcutCount = 0
+        var observedFlow: InstallationFlow? = null
+        val preparer = object : UserSelectedApkPreparer {
+            override suspend fun prepare(
+                uri: String,
+                targetAndroidSdk: Int,
+            ): UserSelectedApkPreparationResult {
+                assertEquals("content://phone/maps.apk", uri)
+                assertEquals(28, targetAndroidSdk)
+                prepareCount += 1
+                return UserSelectedApkPreparationResult.Ready(artifact, verification)
+            }
+
+            override fun clear(artifact: PreparedArtifact) {
+                assertEquals(manifest.componentId, artifact.manifest.componentId)
+                clearCount += 1
+            }
+        }
+        val gateway = object : AdbCommandGateway {
+            override suspend fun installBatch(
+                artifacts: List<InstallableArtifact>,
+                strategy: InstallationStrategy,
+            ): DeviceInstallResult {
+                assertEquals(InstallationStrategy.REINSTALL_SELECTED, strategy)
+                assertEquals(listOf(manifest.componentId), artifacts.map { it.manifest.componentId })
+                assertEquals(declarations, artifacts.single().declarations)
+                return DeviceInstallResult.Installed(
+                    listOf(
+                        InstalledArtifactEvidence(
+                            componentId = manifest.componentId,
+                            packageName = manifest.packageName,
+                            version = manifest.apkVersion,
+                            apkSizeBytes = manifest.apkSizeBytes,
+                            apkSha256 = manifest.apkSha256,
+                            certificateSha256 = manifest.certificateSha256,
+                            declarations = declarations,
+                        ),
+                    ),
+                )
+            }
+
+            override suspend fun runShortcut(
+                shortcut: DeviceShortcut,
+                selectedComponentIds: Set<String>,
+                authorizationPlan: AuthorizationPlan,
+            ): DeviceShortcutResult {
+                shortcutCount += 1
+                assertEquals(DeviceShortcut.CONFIGURE_SELECTED_APPS, shortcut)
+                assertEquals(setOf(manifest.componentId), selectedComponentIds)
+                assertEquals(
+                    listOf("android.permission.ACCESS_FINE_LOCATION"),
+                    authorizationPlan.actions
+                        .filterIsInstance<AuthorizationAction.EnsureDeclaredRuntimePermissionGranted>()
+                        .map { it.permission },
+                )
+                return DeviceShortcutResult.Completed(
+                    configuredComponentIds = selectedComponentIds,
+                    skippedComponentIds = emptySet(),
+                    authorizationEvidence = validAuthorizationEvidence(authorizationPlan),
+                    availabilityEvidence = emptyList(),
+                )
+            }
+        }
+        val runtime = InstallerRuntime(
+            session = InstallationSession(
+                InstallationSessionSnapshot(
+                    state = InstallationSessionState.MAINTENANCE,
+                    device = fakeVehicle().toDeviceSummary().copy(
+                        connectionStatus = DeviceConnectionStatus.DISCONNECTED,
+                    ),
+                ),
+            ),
+            createDiscoveryAdapter = { port -> DeviceDiscoverySessionAdapter(fakeDiscovery(), port) },
+            createConnectionAdapter = { port -> fakeActionConnectionAdapter(port, gateway) },
+            loadCatalog = {},
+            executeDeviceInstallationWithBatch = { connection, artifacts, batch, failures, port ->
+                observedFlow = batch.flow
+                DeviceInstallationCoordinator(port).executeBatch(connection, artifacts, batch, failures)
+            },
+            userSelectedApkPreparer = preparer,
+            coroutineContext = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        runtime.dispatch(InstallationSessionCommand.Reconnect)
+        advanceUntilIdle()
+        runtime.dispatch(
+            InstallationSessionCommand.StartLocalApkInstallation("content://phone/maps.apk"),
+        )
+        advanceUntilIdle()
+
+        val completed = runtime.session.currentSnapshot()
+        assertEquals(1, prepareCount)
+        assertEquals(1, clearCount)
+        assertEquals(1, shortcutCount)
+        assertEquals(InstallationFlow.LOCAL_APK_INSTALL, observedFlow)
+        assertEquals(InstallationSessionState.SUCCEEDED, completed.state)
+        assertEquals(AuthorizationStageReceiptStatus.VERIFIED, completed.installationBatchReceipt
+            ?.components?.single()?.authorization?.status)
+        assertEquals(manifest.componentId, completed.installationBatchReceipt
+            ?.authorizationPlan?.components?.single()?.componentId)
+
+        runtime.dispatch(InstallationSessionCommand.EnterMaintenance)
+        val maintenance = runtime.session.currentSnapshot()
+        assertEquals(InstallationSessionState.MAINTENANCE, maintenance.state)
+        assertTrue(maintenance.maintenance.installedManifests.isEmpty())
+        assertTrue(maintenance.maintenance.availableManifests.isEmpty())
+        assertTrue(maintenance.components.none { it.id == manifest.componentId })
+
+        runtime.close()
+        apkFile.delete()
+        Unit
+    }
+
+    @Test
+    fun `local apk preparation failure does not invoke the device executor`() = runTest {
+        var executionCount = 0
+        val runtime = InstallerRuntime(
+            session = InstallationSession(
+                InstallationSessionSnapshot(
+                    state = InstallationSessionState.MAINTENANCE,
+                    device = fakeVehicle().toDeviceSummary().copy(
+                        connectionStatus = DeviceConnectionStatus.DISCONNECTED,
+                    ),
+                ),
+            ),
+            createDiscoveryAdapter = { port -> DeviceDiscoverySessionAdapter(fakeDiscovery(), port) },
+            createConnectionAdapter = { port -> fakeConnectionAdapter(port) },
+            loadCatalog = {},
+            executeDeviceInstallationWithBatch = { _, _, _, _, _ -> executionCount += 1 },
+            userSelectedApkPreparer = object : UserSelectedApkPreparer {
+                override suspend fun prepare(
+                    uri: String,
+                    targetAndroidSdk: Int,
+                ): UserSelectedApkPreparationResult = UserSelectedApkPreparationResult.Failed(
+                    reasonCode = "local_apk_metadata_unreadable",
+                    retryable = false,
+                )
+
+                override fun clear(artifact: PreparedArtifact) = error("no artifact may be retained")
+            },
+            coroutineContext = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        runtime.dispatch(InstallationSessionCommand.Reconnect)
+        advanceUntilIdle()
+        runtime.dispatch(
+            InstallationSessionCommand.StartLocalApkInstallation("content://phone/broken.apk"),
+        )
+        advanceUntilIdle()
+
+        val failed = runtime.session.currentSnapshot()
+        assertEquals(0, executionCount)
+        assertEquals(InstallationSessionState.MAINTENANCE, failed.state)
+        assertEquals(MaintenanceActionStatus.FAILED, failed.maintenance.lastAction?.status)
+        assertEquals("local_apk_metadata_unreadable", failed.maintenance.lastAction?.reasonCode)
+        assertEquals(false, failed.maintenance.lastAction?.retryable)
+        runtime.close()
+    }
+
+    @Test
     fun `maintenance runtime terminal artifact failure contains only the current batch`() = runTest {
         val desktop = manifest("desktop")
         val cast = manifest("cast")
@@ -1184,6 +1390,11 @@ class InstallerRuntimeTest {
                                     ),
                                 ),
                             ),
+                            authorizationPlan = if (executionCount == 1) {
+                                null
+                            } else {
+                                emptyAuthorizationPlan(cast)
+                            },
                         ),
                     ),
                 )
@@ -1797,14 +2008,15 @@ class InstallerRuntimeTest {
 
     private fun fakeActionConnectionAdapter(
         eventPort: InstallationSessionEventPort,
-        gateway: UpdateInventoryGateway,
+        gateway: AdbCommandGateway,
     ): DeviceConnectionSessionAdapter = DeviceConnectionSessionAdapter(
         connectionFactory = DeviceConnectionFactory {
             DeviceConnectionAttempt.Connected(
                 object : DeviceActionConnectionLease {
                     override val device: ConnectedDevice = fakeVehicle()
                     override val commandGateway: AdbCommandGateway = gateway
-                    override val maintenanceGateway: MaintenanceCommandGateway = gateway
+                    override val maintenanceGateway: MaintenanceCommandGateway? =
+                        gateway as? MaintenanceCommandGateway
 
                     override suspend fun check(): DeviceConnectionCheck = DeviceConnectionCheck(true)
 
@@ -1995,7 +2207,11 @@ class InstallerRuntimeTest {
                 componentId = componentId,
                 installation = installation,
                 authorization = AuthorizationStageReceipt(
-                    status = AuthorizationStageReceiptStatus.NOT_ATTEMPTED,
+                    status = if (preparationFailure == null) {
+                        AuthorizationStageReceiptStatus.FAILED
+                    } else {
+                        AuthorizationStageReceiptStatus.NOT_ATTEMPTED
+                    },
                     reasonCode = "authorization_not_attempted",
                 ),
                 availability = AvailabilityStageReceipt(
@@ -2013,6 +2229,21 @@ class InstallerRuntimeTest {
             ),
         )
     }
+
+    private fun emptyAuthorizationPlan(manifest: ArtifactManifest): AuthorizationPlan =
+        (
+            AuthorizationPlanFactory.createForComponents(
+                components = listOf(
+                    ManagedComponent(
+                        componentId = manifest.componentId,
+                        packageName = manifest.packageName,
+                        setup = manifest.deviceSetup,
+                        order = manifest.sortOrder,
+                    ),
+                ),
+                declarationsByComponent = mapOf(manifest.componentId to ApkDeclarationMetadata()),
+            ) as AuthorizationPlanBuildResult.Ready
+            ).plan
 
     private fun createSelfUpdateRuntime(
         self: ArtifactManifest,
@@ -2163,4 +2394,71 @@ class InstallerRuntimeTest {
             ArtifactSource(ArtifactSourceKind.GITHUB_RELEASES, "https://github.com/example/repo/releases/download/v1/$componentId.zip"),
         ),
     )
+
+    private fun localApkManifest(apkFile: File): ArtifactManifest = ArtifactManifest(
+        schemaVersion = ArtifactManifestValidator.SUPPORTED_SCHEMA_VERSION,
+        componentId = "local-0123456789abcdef01234567",
+        displayName = "Maps",
+        required = false,
+        version = ArtifactVersion("2.4.1", 24L),
+        compatibility = CompatibilityRange(minAndroidSdk = 26),
+        archiveFileName = "local-selected.zip",
+        archiveSizeBytes = 0L,
+        archiveSha256 = "",
+        apkEntryName = "selected.apk",
+        apkSizeBytes = apkFile.length(),
+        apkSha256 = "44".repeat(32),
+        packageName = "com.example.maps",
+        apkVersion = ArtifactVersion("2.4.1", 24L),
+        certificateSha256 = "33".repeat(32),
+        certificateSha256s = setOf("33".repeat(32)),
+        sources = listOf(
+            ArtifactSource(
+                ArtifactSourceKind.USER_SELECTED_APK,
+                ArtifactManifestValidator.USER_SELECTED_APK_URL,
+            ),
+        ),
+        localOnly = true,
+    )
+
+    private fun validAuthorizationEvidence(
+        plan: AuthorizationPlan,
+    ): List<AuthorizationActionEvidence> = plan.actions.map { action ->
+        when (action) {
+            is AuthorizationAction.EnsureAppOpAllowed -> AuthorizationActionEvidence(
+                componentId = action.componentId,
+                actionId = action.id,
+                before = AuthorizationValueState.DEFAULT,
+                writeApplied = true,
+                after = AuthorizationValueState.ALLOWED,
+            )
+
+            is AuthorizationAction.EnsureRuntimePermissionGranted,
+            is AuthorizationAction.EnsureDeclaredRuntimePermissionGranted,
+            -> AuthorizationActionEvidence(
+                componentId = action.componentId,
+                actionId = action.id,
+                before = AuthorizationValueState.DENIED,
+                writeApplied = true,
+                after = AuthorizationValueState.GRANTED,
+            )
+
+            is AuthorizationAction.EnsureSecureSettingEnabled -> AuthorizationActionEvidence(
+                componentId = action.componentId,
+                actionId = action.id,
+                before = AuthorizationValueState.DISABLED,
+                writeApplied = true,
+                after = AuthorizationValueState.ENABLED,
+            )
+
+            is AuthorizationAction.AppendSecureComponent -> AuthorizationActionEvidence(
+                componentId = action.componentId,
+                actionId = action.id,
+                before = AuthorizationValueState.COMPONENT_ABSENT,
+                writeApplied = true,
+                after = AuthorizationValueState.COMPONENT_PRESENT,
+                preservedEntryCount = 0,
+            )
+        }
+    }
 }

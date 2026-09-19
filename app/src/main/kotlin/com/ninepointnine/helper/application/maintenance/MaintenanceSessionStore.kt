@@ -136,13 +136,25 @@ internal object MaintenanceBaselineProjector {
         )
         if (!durableState) return null
 
-        val declaredSource = snapshot.maintenance.availableComponents
+        val operationScopedIds = snapshot.artifactManifests
+            .filter { it.sources.singleOrNull()?.kind == ArtifactSourceKind.USER_SELECTED_APK }
+            .mapTo(linkedSetOf()) { it.componentId }
+        val durableMaintenanceSource = snapshot.maintenance.copy(
+            installedManifests = snapshot.maintenance.installedManifests.filterNot {
+                it.sources.singleOrNull()?.kind == ArtifactSourceKind.USER_SELECTED_APK
+            },
+            availableManifests = snapshot.maintenance.availableManifests.filterNot {
+                it.sources.singleOrNull()?.kind == ArtifactSourceKind.USER_SELECTED_APK
+            },
+        )
+        val declaredSource = durableMaintenanceSource.availableComponents
             .ifEmpty { snapshot.components }
             .filterNot { InstallerSelfIdentity.isSelfComponentId(it.id) }
             .filterNot { it.status == ComponentStatus.UNLISTED }
+            .filterNot { it.id in operationScopedIds }
         val declaredById = linkedMapOf<String, ComponentDescriptor>()
         declaredSource.forEach { component -> declaredById[component.id] = component.toBaselineComponent() }
-        snapshot.maintenance.installedManifests.forEach { manifest ->
+        durableMaintenanceSource.installedManifests.forEach { manifest ->
             if (manifest.componentId !in declaredById) {
                 declaredById[manifest.componentId] = manifest
                     .toComponentDescriptor(device.androidSdk)
@@ -158,12 +170,13 @@ internal object MaintenanceBaselineProjector {
             snapshot.maintenance.managedApplicationsState != MaintenanceInventoryState.READY
         val verifiedCurrentBatch = if (mayMigrateLegacyBatch) {
             snapshot.artifactManifests.filter { manifest ->
-                manifest.componentId in snapshot.evidence.installed
+                manifest.componentId in snapshot.evidence.installed &&
+                    manifest.sources.singleOrNull()?.kind != ArtifactSourceKind.USER_SELECTED_APK
             }
         } else {
             emptyList()
         }
-        val maintenance = snapshot.maintenance
+        val maintenance = durableMaintenanceSource
             .copy(availableComponents = availableComponents)
             .withVerifiedInstallations(verifiedCurrentBatch)
             .toDurableMaintenanceBaseline()

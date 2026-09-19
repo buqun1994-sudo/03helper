@@ -18,10 +18,22 @@ data class ApkMetadata(
     val certificateSha256s: Set<String>,
     val declarations: ApkDeclarationMetadata = ApkDeclarationMetadata(),
     val minAndroidSdk: Int? = null,
+    val displayName: String? = null,
+    val splitName: String? = null,
 )
+
+data class ApkManifestMetadata(
+    val packageName: String,
+    val declarations: ApkDeclarationMetadata,
+)
+
+const val MAX_APK_MANIFEST_BYTES: Int = 1 shl 20
 
 fun interface ApkMetadataReader {
     fun read(apk: File): ApkMetadata?
+
+    /** Parses bounded raw AndroidManifest.xml bytes without platform compatibility expansion. */
+    fun readManifest(manifestBytes: ByteArray): ApkManifestMetadata? = null
 }
 
 data class VerifiedApk(
@@ -89,6 +101,7 @@ class ArtifactIdentityVerifier(
                     apkVersion = metadata.version,
                     certificateSha256 = manifest.certificateSha256.lowercase(),
                     archiveDeleted = true,
+                    certificateSha256s = metadata.certificateSha256s.mapTo(linkedSetOf()) { it.lowercase() },
                     localDownload = true,
                 ),
                 metadata = metadata,
@@ -183,6 +196,7 @@ class ArtifactIdentityVerifier(
                     apkVersion = metadata.version,
                     certificateSha256 = manifest.certificateSha256.lowercase(),
                     archiveDeleted = true,
+                    certificateSha256s = metadata.certificateSha256s.mapTo(linkedSetOf()) { it.lowercase() },
                 ),
                 metadata = metadata,
             ),

@@ -158,7 +158,17 @@ fun MaintenanceHome(
                     columns = columns,
                     onReconnect = { onIntent(InstallUiIntent.Reconnect) },
                     onDisconnect = { onIntent(InstallUiIntent.DisconnectDevice) },
-                    onAction = { onIntent(InstallUiIntent.MaintenanceAction(it)) },
+                    onAction = {
+                        if (it == MaintenanceActionId.INSTALL_LOCAL_APPLICATION) {
+                            // The local APK action is a source picker, not a
+                            // maintenance adapter route. The selected URI is
+                            // handed back to the domain only after the picker
+                            // returns successfully.
+                            onIntent(InstallUiIntent.PickLocalApk)
+                        } else {
+                            onIntent(InstallUiIntent.MaintenanceAction(it))
+                        }
+                    },
                     scrollState = overviewScrollState,
                 )
             } else {
@@ -198,8 +208,14 @@ fun MaintenanceHome(
                         MaintenanceActionPage(
                             action = action,
                             state = state,
-                            onRetry = { onIntent(InstallUiIntent.MaintenanceAction(action)) },
-                        onBack = leaveAction,
+                            onRetry = {
+                                if (action == MaintenanceActionId.INSTALL_LOCAL_APPLICATION) {
+                                    onIntent(InstallUiIntent.PickLocalApk)
+                                } else {
+                                    onIntent(InstallUiIntent.MaintenanceAction(action))
+                                }
+                            },
+                            onBack = leaveAction,
                         )
                     }
                 }
@@ -1000,16 +1016,51 @@ private fun applicationActionIcon(actionId: MaintenanceApplicationActionId): Str
 private fun authorizationRequirementLabel(
     requirement: ApplicationAuthorizationRequirement,
 ): String {
-    val shortName = requirement.permission
-        .substringAfterLast('/')
-        .substringAfterLast('.')
     return when (requirement.kind) {
         ApplicationAuthorizationRequirementKind.ACCESSIBILITY_SERVICE ->
-            stringResource(R.string.maintenance_authorization_accessibility, shortName)
+            stringResource(R.string.maintenance_authorization_accessibility)
         ApplicationAuthorizationRequirementKind.NOTIFICATION_LISTENER_SERVICE ->
-            stringResource(R.string.maintenance_authorization_notification, shortName)
-        else -> shortName
+            stringResource(R.string.maintenance_authorization_notification)
+        else -> authorizationPermissionLabel(requirement.permission)
     }
+}
+
+/** User-facing names for the complete local automatic-authorization whitelist. */
+private fun authorizationPermissionLabel(permission: String): String = when (permission) {
+    "android.permission.READ_CALENDAR" -> "读取日历"
+    "android.permission.WRITE_CALENDAR" -> "修改日历"
+    "android.permission.CAMERA" -> "使用相机"
+    "android.permission.READ_CONTACTS" -> "读取联系人"
+    "android.permission.WRITE_CONTACTS" -> "修改联系人"
+    "android.permission.GET_ACCOUNTS" -> "读取设备账号"
+    "android.permission.ACCESS_FINE_LOCATION" -> "精确位置信息"
+    "android.permission.ACCESS_COARSE_LOCATION" -> "大致位置信息"
+    "android.permission.RECORD_AUDIO" -> "使用麦克风"
+    "android.permission.READ_PHONE_STATE" -> "读取手机状态"
+    "android.permission.READ_PHONE_NUMBERS" -> "读取本机号码"
+    "android.permission.CALL_PHONE" -> "拨打电话"
+    "android.permission.ANSWER_PHONE_CALLS" -> "接听电话"
+    "android.permission.ADD_VOICEMAIL" -> "添加语音信箱"
+    "android.permission.USE_SIP" -> "使用网络电话"
+    "android.permission.PROCESS_OUTGOING_CALLS" -> "读取拨出电话"
+    "android.permission.BODY_SENSORS" -> "读取身体传感器"
+    "android.permission.BODY_SENSORS_BACKGROUND" -> "后台读取身体传感器"
+    "android.permission.SEND_SMS" -> "发送短信"
+    "android.permission.RECEIVE_SMS" -> "接收短信"
+    "android.permission.READ_SMS" -> "读取短信"
+    "android.permission.RECEIVE_WAP_PUSH" -> "接收服务消息"
+    "android.permission.RECEIVE_MMS" -> "接收彩信"
+    "android.permission.READ_EXTERNAL_STORAGE" -> "读取文件"
+    "android.permission.WRITE_EXTERNAL_STORAGE" -> "保存和修改文件"
+    "android.permission.ACTIVITY_RECOGNITION" -> "识别身体活动"
+    "android.permission.READ_MEDIA_IMAGES" -> "读取照片"
+    "android.permission.READ_MEDIA_VIDEO" -> "读取视频"
+    "android.permission.READ_MEDIA_AUDIO" -> "读取音频"
+    "android.permission.SYSTEM_ALERT_WINDOW" -> "在其他应用上层显示"
+    "android.permission.REQUEST_INSTALL_PACKAGES" -> "安装其他应用"
+    "android.permission.PACKAGE_USAGE_STATS" -> "查看应用使用情况"
+    "android.permission.WRITE_SETTINGS" -> "修改系统设置"
+    else -> "应用所需权限"
 }
 
 private data class AuthorizationRequirementStatus(
@@ -1547,12 +1598,15 @@ private fun MaintenanceInstallResult(
     onBack: () -> Unit,
     actionId: MaintenanceActionId,
 ) {
-    val retryIntent = if (state.installationFlow == com.ninepointnine.helper.domain.session.InstallationFlow.MAINTENANCE_INSTALL) {
-        InstallUiIntent.ReturnToMaintenanceInstallationSelection
-    } else if (state.installationFlow == com.ninepointnine.helper.domain.session.InstallationFlow.SELF_UPDATE) {
-        InstallUiIntent.EnterMaintenance
-    } else {
-        InstallUiIntent.ReturnToSelection
+    val retryIntent = when (state.installationFlow) {
+        com.ninepointnine.helper.domain.session.InstallationFlow.MAINTENANCE_INSTALL ->
+            InstallUiIntent.ReturnToMaintenanceInstallationSelection
+        com.ninepointnine.helper.domain.session.InstallationFlow.LOCAL_APK_INSTALL ->
+            InstallUiIntent.PickLocalApk
+        com.ninepointnine.helper.domain.session.InstallationFlow.SELF_UPDATE ->
+            InstallUiIntent.EnterMaintenance
+        com.ninepointnine.helper.domain.session.InstallationFlow.INITIAL_INSTALL ->
+            InstallUiIntent.ReturnToSelection
     }
     val (title, description, icon, tint, actionText, action) = when (state.kind) {
         ResultKind.SUCCESS -> ResultFlowCopy(
@@ -2030,19 +2084,7 @@ private fun MaintenanceGroup(
     busy: Boolean,
     onAction: (MaintenanceActionId) -> Unit,
 ) {
-    val actions = when (group) {
-        MaintenanceGroupId.COMMON -> listOf(
-            MaintenanceActionId.CHECK_UPDATES,
-            MaintenanceActionId.REPAIR_CONFIGURATION,
-        )
-        MaintenanceGroupId.APPS -> listOf(
-            MaintenanceActionId.MANAGE_APPS,
-            MaintenanceActionId.INSTALL_APPLICATIONS,
-        )
-        MaintenanceGroupId.STORAGE -> listOf(
-            MaintenanceActionId.EXPORT_DIAGNOSTICS,
-        )
-    }
+    val actions = maintenanceActions(group)
     Column(
         modifier = Modifier.fillMaxWidth(),
         verticalArrangement = Arrangement.spacedBy(12.dp),
@@ -2056,8 +2098,7 @@ private fun MaintenanceGroup(
                         MaintenanceActionCard(
                             action = action,
                             onClick = { onAction(action) },
-                            enabled = maintenanceActionEnabled(action, connected, busy) ||
-                                (!connected && !busy && action == MaintenanceActionId.REPAIR_CONFIGURATION),
+                            enabled = maintenanceActionEnabled(action, connected, busy),
                             modifier = Modifier.weight(1f),
                             index = rowIndex * columns + columnIndex,
                         )
@@ -2068,6 +2109,21 @@ private fun MaintenanceGroup(
         }
     }
 }
+
+internal fun maintenanceActions(group: MaintenanceGroupId): List<MaintenanceActionId> =
+    when (group) {
+        MaintenanceGroupId.COMMON -> listOf(
+            MaintenanceActionId.CHECK_UPDATES,
+        )
+        MaintenanceGroupId.APPS -> listOf(
+            MaintenanceActionId.MANAGE_APPS,
+            MaintenanceActionId.INSTALL_APPLICATIONS,
+            MaintenanceActionId.INSTALL_LOCAL_APPLICATION,
+        )
+        MaintenanceGroupId.STORAGE -> listOf(
+            MaintenanceActionId.EXPORT_DIAGNOSTICS,
+        )
+    }
 
 private const val MAINTENANCE_TWO_COLUMN_MIN_WIDTH_DP = 600f
 
@@ -2130,6 +2186,7 @@ private fun actionTitle(action: MaintenanceActionId): Int = when (action) {
     MaintenanceActionId.INSTALL_APPLICATIONS,
     MaintenanceActionId.INSTALL_FILE_MANAGER,
     -> R.string.maintenance_install_file_manager
+    MaintenanceActionId.INSTALL_LOCAL_APPLICATION -> R.string.maintenance_install_local_application
     MaintenanceActionId.LAUNCH_LYRICS -> R.string.maintenance_launch_lyrics
     MaintenanceActionId.LAUNCH_DESKTOP -> R.string.maintenance_launch_desktop
     MaintenanceActionId.CLEANUP -> R.string.maintenance_cleanup
@@ -2144,6 +2201,7 @@ private fun actionDescription(action: MaintenanceActionId): Int = when (action) 
     MaintenanceActionId.INSTALL_APPLICATIONS,
     MaintenanceActionId.INSTALL_FILE_MANAGER,
     -> R.string.maintenance_install_file_manager_description
+    MaintenanceActionId.INSTALL_LOCAL_APPLICATION -> R.string.maintenance_install_local_application_description
     MaintenanceActionId.LAUNCH_LYRICS -> R.string.maintenance_launch_lyrics_description
     MaintenanceActionId.LAUNCH_DESKTOP -> R.string.maintenance_launch_desktop_description
     MaintenanceActionId.CLEANUP -> R.string.maintenance_cleanup_description
@@ -2158,6 +2216,7 @@ private fun actionIcon(action: MaintenanceActionId): String = when (action) {
     MaintenanceActionId.INSTALL_APPLICATIONS,
     MaintenanceActionId.INSTALL_FILE_MANAGER,
     -> "folder_plus"
+    MaintenanceActionId.INSTALL_LOCAL_APPLICATION -> "file_plus"
     MaintenanceActionId.LAUNCH_LYRICS -> "music_2"
     MaintenanceActionId.LAUNCH_DESKTOP -> "panels_top_left"
     MaintenanceActionId.CLEANUP -> "trash_2"

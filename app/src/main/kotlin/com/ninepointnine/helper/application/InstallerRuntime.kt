@@ -16,6 +16,8 @@ import com.ninepointnine.helper.domain.artifact.ArtifactVersion
 import com.ninepointnine.helper.domain.artifact.InstallerSelfIdentity
 import com.ninepointnine.helper.application.artifact.ArtifactPreparationResult
 import com.ninepointnine.helper.application.artifact.PreparedArtifact
+import com.ninepointnine.helper.application.artifact.UserSelectedApkPreparer
+import com.ninepointnine.helper.application.artifact.UserSelectedApkPreparationResult
 import com.ninepointnine.helper.domain.device.ConnectedDevice
 import com.ninepointnine.helper.domain.device.DeviceActionFailure
 import com.ninepointnine.helper.domain.device.DeviceConnectionLease
@@ -26,6 +28,7 @@ import com.ninepointnine.helper.domain.session.InstallationSessionCommand
 import com.ninepointnine.helper.domain.session.InstallationSessionEvent
 import com.ninepointnine.helper.domain.session.InstallationSessionSnapshot
 import com.ninepointnine.helper.domain.session.InstallationSessionState
+import com.ninepointnine.helper.domain.session.InstallationFlow
 import com.ninepointnine.helper.domain.session.InstallationBatchPlan
 import com.ninepointnine.helper.domain.session.ArtifactCatalogStage
 import com.ninepointnine.helper.domain.session.MaintenanceActionStatus
@@ -170,6 +173,8 @@ class InstallerRuntime(
     private val executeDeviceInstallationWithBatch: InstallationBatchExecutor? = null,
     /** Optional Android package-installer endpoint for [InstallationFlow.SELF_UPDATE]. */
     private val selfUpdateInstaller: SelfUpdateInstaller? = null,
+    /** Optional one-operation source for an APK selected through Android's document picker. */
+    private val userSelectedApkPreparer: UserSelectedApkPreparer? = null,
 ) : AutoCloseable {
     private val runtimeJob = SupervisorJob(coroutineContext[Job])
     private val scope = CoroutineScope(coroutineContext + runtimeJob)
@@ -185,6 +190,7 @@ class InstallerRuntime(
     private var initialInventoryJob: Job? = null
     private var artifactJob: Job? = null
     private var maintenanceJob: Job? = null
+    private var localApkJob: Job? = null
     /** Best-effort icon hydration never owns the foreground maintenance action. */
     private var maintenanceIconJob: Job? = null
     private var eventDispatcherSessionId: Long? = null
@@ -468,6 +474,26 @@ class InstallerRuntime(
                     beginArtifactPreparation(after)
                 }
             }
+
+            is InstallationSessionCommand.StartLocalApkInstallation -> {
+                if (
+                    (before.state == InstallationSessionState.MAINTENANCE ||
+                        (before.installationFlow == InstallationFlow.LOCAL_APK_INSTALL &&
+                            before.state in setOf(
+                                InstallationSessionState.COMPLETED_WITH_ERRORS,
+                                InstallationSessionState.FAILED,
+                            ))) &&
+                    after.state == InstallationSessionState.MAINTENANCE &&
+                    after.sessionId != before.sessionId &&
+                    after.maintenance.activeAction ==
+                    com.ninepointnine.helper.domain.session.MaintenanceActionId.INSTALL_LOCAL_APPLICATION
+                ) {
+                    cancelTransferWork()
+                    launchLocalApkPreparation(after, effectiveCommand.uri)
+                }
+            }
+
+            InstallationSessionCommand.CancelLocalApkSelection -> Unit
 
             is InstallationSessionCommand.ToggleMaintenanceInstallationComponent -> Unit
 
@@ -1243,6 +1269,19 @@ class InstallerRuntime(
             )
             return
         }
+        if (actionId == com.ninepointnine.helper.domain.session.MaintenanceActionId.INSTALL_LOCAL_APPLICATION) {
+            // The visible entry opens Android's document picker directly. A
+            // stale/legacy caller must not silently run a different maintenance
+            // action or leave the session in RUNNING forever.
+            port.emit(
+                InstallationSessionEvent.MaintenanceActionFailed(
+                    actionId = actionId,
+                    reasonCode = "local_apk_picker_required",
+                    retryable = false,
+                ),
+            )
+            return
+        }
         val connection = activeConnection
         maintenanceJob = deviceWorkOwner.replace {
             try {
@@ -1324,6 +1363,141 @@ class InstallerRuntime(
         }
     }
 
+    /**
+     * Prepares one user-selected APK in the private cache, then hands the
+     * resulting artifact to the same device batch executor used by catalog
+     * installs. File paths never cross the session boundary.
+     */
+    private fun launchLocalApkPreparation(
+        snapshot: InstallationSessionSnapshot,
+        uri: String,
+    ) {
+        localApkJob?.cancel()
+        val preparer = userSelectedApkPreparer
+        val executor = executeDeviceInstallationWithBatch
+        val connection = activeConnection
+        val targetSdk = snapshot.device?.androidSdk
+        val port = eventPortFor(snapshot)
+        if (preparer == null || executor == null || connection == null || targetSdk == null) {
+            port.emit(
+                InstallationSessionEvent.MaintenanceActionFailed(
+                    actionId = com.ninepointnine.helper.domain.session.MaintenanceActionId.INSTALL_LOCAL_APPLICATION,
+                    reasonCode = when {
+                        preparer == null -> "local_apk_preparer_unavailable"
+                        executor == null -> "device_action_gateway_unavailable"
+                        connection == null -> "device_disconnected"
+                        else -> "local_apk_target_sdk_unknown"
+                    },
+                    retryable = true,
+                ),
+            )
+            return
+        }
+        localApkJob = deviceWorkOwner.replace {
+            var preparedArtifact: PreparedArtifact? = null
+            try {
+                when (val result = preparer.prepare(uri, targetSdk)) {
+                    is UserSelectedApkPreparationResult.Failed -> {
+                        port.emit(
+                            InstallationSessionEvent.MaintenanceActionFailed(
+                                actionId = com.ninepointnine.helper.domain.session.MaintenanceActionId.INSTALL_LOCAL_APPLICATION,
+                                reasonCode = result.reasonCode,
+                                retryable = result.retryable,
+                            ),
+                        )
+                    }
+
+                    is UserSelectedApkPreparationResult.Ready -> {
+                        preparedArtifact = result.artifact
+                        val current = session.currentSnapshot()
+                        if (
+                            current.sessionId != snapshot.sessionId ||
+                            current.state != InstallationSessionState.MAINTENANCE ||
+                            current.maintenance.activeAction !=
+                            com.ninepointnine.helper.domain.session.MaintenanceActionId.INSTALL_LOCAL_APPLICATION
+                        ) {
+                            return@replace
+                        }
+                        port.emit(
+                            InstallationSessionEvent.LocalApkPrepared(
+                                manifest = result.artifact.manifest,
+                                verification = result.verification,
+                            ),
+                        )
+                        val prepared = session.currentSnapshot()
+                        val batch = prepared.installationBatch
+                        val active = activeConnection
+                        if (
+                            prepared.sessionId != snapshot.sessionId ||
+                            prepared.state != InstallationSessionState.ARTIFACTS_READY ||
+                            batch == null ||
+                            active == null
+                        ) {
+                            if (prepared.sessionId == snapshot.sessionId) {
+                                if (prepared.state == InstallationSessionState.MAINTENANCE) {
+                                    port.emit(
+                                        InstallationSessionEvent.MaintenanceActionFailed(
+                                            actionId = com.ninepointnine.helper.domain.session.MaintenanceActionId.INSTALL_LOCAL_APPLICATION,
+                                            reasonCode = "local_apk_preparation_invalid",
+                                            retryable = false,
+                                        ),
+                                    )
+                                } else if (prepared.state == InstallationSessionState.ARTIFACTS_READY) {
+                                    port.emit(
+                                        InstallationSessionEvent.FatalError(
+                                            category = FailureCategory.INSTALLATION,
+                                            reasonCode = if (active == null) {
+                                                "device_action_gateway_unavailable"
+                                            } else {
+                                                "local_apk_preparation_invalid"
+                                            },
+                                        ),
+                                    )
+                                }
+                            }
+                            return@replace
+                        }
+                        executor.execute(
+                            connection = active,
+                            artifacts = listOf(result.artifact),
+                            batchPlan = batch,
+                            preparationFailures = emptyMap(),
+                            eventPort = port,
+                        )
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                val current = session.currentSnapshot()
+                if (current.sessionId == snapshot.sessionId) {
+                    if (current.state == InstallationSessionState.MAINTENANCE) {
+                        port.emit(
+                            InstallationSessionEvent.MaintenanceActionFailed(
+                                actionId = com.ninepointnine.helper.domain.session.MaintenanceActionId.INSTALL_LOCAL_APPLICATION,
+                                reasonCode = "local_apk_install_failed",
+                                retryable = true,
+                            ),
+                        )
+                    } else {
+                        port.emit(
+                            InstallationSessionEvent.FatalError(
+                                category = FailureCategory.INSTALLATION,
+                                reasonCode = "local_apk_install_failed",
+                            ),
+                        )
+                    }
+                }
+            } finally {
+                preparedArtifact?.let { artifact ->
+                    withContext(NonCancellable) {
+                        runCatching { preparer.clear(artifact) }
+                    }
+                }
+            }
+        }
+    }
+
     private fun launchMaintenanceIconHydration(
         controller: MaintenanceController,
         packageNames: List<String>,
@@ -1380,12 +1554,14 @@ class InstallerRuntime(
         artifactJob?.cancel()
         cancelMaintenanceIconHydration()
         maintenanceJob?.cancel()
+        localApkJob?.cancel()
         deviceWorkOwner.cancel()
         catalogJob = null
         connectionHealthJob = null
         artifactJob = null
         initialInventoryJob = null
         maintenanceJob = null
+        localApkJob = null
         clearPendingSelfUpdate()
     }
 

@@ -145,6 +145,8 @@ class InstallationSession(
             is InstallationSessionCommand.ToggleMaintenanceInstallationComponent ->
                 toggleMaintenanceInstallationComponent(command)
             InstallationSessionCommand.StartMaintenanceInstallation -> startSelectedMaintenanceInstallation()
+            is InstallationSessionCommand.StartLocalApkInstallation -> startLocalApkInstallation()
+            InstallationSessionCommand.CancelLocalApkSelection -> Unit
             is InstallationSessionCommand.AdapterEvent -> applyAdapterEvent(command)
         }
         _snapshot.value
@@ -954,7 +956,14 @@ class InstallationSession(
             enterMaintenanceFromInitialInventory(current)
             return
         }
-        if (current.state != InstallationSessionState.SUCCEEDED &&
+        val localApkTerminal = current.installationFlow == InstallationFlow.LOCAL_APK_INSTALL &&
+            current.state in setOf(
+                InstallationSessionState.SUCCEEDED,
+                InstallationSessionState.COMPLETED_WITH_ERRORS,
+                InstallationSessionState.FAILED,
+            )
+        if (!localApkTerminal &&
+            current.state != InstallationSessionState.SUCCEEDED &&
             current.state != InstallationSessionState.COMPLETED_WITH_ERRORS &&
             !(current.installationFlow == InstallationFlow.SELF_UPDATE &&
                 current.state == InstallationSessionState.FAILED)
@@ -968,21 +977,26 @@ class InstallationSession(
             returnToMaintenanceAfterSelfUpdate(current)
             return
         }
-        if (current.evidence.installed.isEmpty() ||
+        if (!localApkTerminal && (current.evidence.installed.isEmpty() ||
             (current.state == InstallationSessionState.SUCCEEDED && !hasCompleteSuccessEvidence(current))
-        ) {
+        )) {
             fail(
                 category = FailureCategory.VERIFICATION,
                 reasonCode = "success_evidence_incomplete",
             )
             return
         }
+        // A user-selected APK is an operation-scoped artifact. Its successful
+        // installation must not make it part of the signed catalog baseline or
+        // eligible for a later trusted reinstall/update batch.
+        val operationScopedIds = localApkOperationComponentIds(current)
         val installedBaseline = current.artifactManifests
-            .filter { it.componentId in current.evidence.installed }
+            .filter { it.componentId in current.evidence.installed && it.componentId !in operationScopedIds }
         val availableComponents = current.maintenance.availableComponents.ifEmpty {
             current.components.filter { component ->
                 !InstallerSelfIdentity.isSelfComponentId(component.id) &&
-                    component.status != ComponentStatus.UNLISTED
+                    component.status != ComponentStatus.UNLISTED &&
+                    component.id !in operationScopedIds
             }
         }
         val maintenanceBaseline = current.maintenance
@@ -992,6 +1006,11 @@ class InstallationSession(
         publish(
             current.copy(
                 state = InstallationSessionState.MAINTENANCE,
+                components = if (current.installationFlow == InstallationFlow.LOCAL_APK_INSTALL) {
+                    availableComponents
+                } else {
+                    current.components
+                },
                 selectedOptionalComponentIds = emptySet(),
                 currentComponentName = null,
                 progress = null,
@@ -1014,9 +1033,9 @@ class InstallationSession(
                 // PackageManager write receipts are scoped to the completed
                 // batch and are not part of the durable maintenance baseline.
                 evidence = SessionEvidence(
-                    installed = current.evidence.installed,
-                    configured = current.evidence.configured,
-                    available = current.evidence.available,
+                    installed = current.evidence.installed - operationScopedIds,
+                    configured = current.evidence.configured - operationScopedIds,
+                    available = current.evidence.available - operationScopedIds,
                 ),
                 selectedSources = emptyMap(),
                 sourceFailures = emptyList(),
@@ -1034,7 +1053,13 @@ class InstallationSession(
                     applicationAction = null,
                     applicationDetails = null,
                     installationSelection = null,
-                    initialInstallationSkipped = false,
+                    initialInstallationSkipped = if (
+                        current.installationFlow == InstallationFlow.LOCAL_APK_INSTALL
+                    ) {
+                        maintenanceBaseline.initialInstallationSkipped
+                    } else {
+                        false
+                    },
                 ),
                 maintenanceReconnectPending = false,
                 installationReconnectPending = false,
@@ -1984,6 +2009,103 @@ class InstallationSession(
         )
     }
 
+    private fun startLocalApkInstallation() {
+        val current = _snapshot.value
+        val retryingTerminalAttempt = current.installationFlow == InstallationFlow.LOCAL_APK_INSTALL &&
+            current.state in setOf(
+                InstallationSessionState.COMPLETED_WITH_ERRORS,
+                InstallationSessionState.FAILED,
+            )
+        if ((current.state != InstallationSessionState.MAINTENANCE && !retryingTerminalAttempt) ||
+            current.maintenance.activeAction != null
+        ) {
+            return
+        }
+        val operationScopedIds = localApkOperationComponentIds(current)
+        val baselineComponents = current.maintenance.availableComponents.ifEmpty {
+            current.components.filterNot { it.id in operationScopedIds }
+        }
+        val baseline = current.copy(
+            state = InstallationSessionState.MAINTENANCE,
+            components = baselineComponents,
+            selectedOptionalComponentIds = emptySet(),
+            currentComponentName = null,
+            progress = null,
+            componentProgress = emptyMap(),
+            failedComponentIds = emptySet(),
+            componentFailureRetryable = emptyMap(),
+            failure = null,
+            checkpoint = null,
+            evidence = SessionEvidence(
+                installed = current.evidence.installed - operationScopedIds,
+                configured = current.evidence.configured - operationScopedIds,
+                available = current.evidence.available - operationScopedIds,
+            ),
+            componentResults = emptyList(),
+            artifactManifests = emptyList(),
+            artifactCatalogStage = if (catalogIdentity(current) != null) {
+                ArtifactCatalogStage.CONTROL_PLANE_READY
+            } else {
+                ArtifactCatalogStage.NOT_LOADED
+            },
+            installationBatch = null,
+            installationBatchReceipt = null,
+            selectedSources = emptyMap(),
+            sourceFailures = emptyList(),
+            archiveDownloads = emptyMap(),
+            archiveVerifications = emptyMap(),
+            apkExtractions = emptyMap(),
+            maintenanceReconnectPending = false,
+            installationReconnectPending = false,
+            maintenance = current.maintenance.toDurableMaintenanceBaseline(),
+        )
+        if (current.device?.connectionStatus != DeviceConnectionStatus.CONFIRMED) {
+            startNewGeneration(
+                baseline.copy(
+                    maintenance = baseline.maintenance.copy(
+                        routeAction = MaintenanceActionId.INSTALL_LOCAL_APPLICATION,
+                        lastAction = MaintenanceActionRecord(
+                            actionId = MaintenanceActionId.INSTALL_LOCAL_APPLICATION,
+                            status = MaintenanceActionStatus.FAILED,
+                            reasonCode = "device_disconnected",
+                            retryable = true,
+                        ),
+                    ),
+                ),
+            )
+            return
+        }
+        startNewGeneration(
+            baseline.copy(
+                maintenance = baseline.maintenance.copy(
+                    routeAction = MaintenanceActionId.INSTALL_LOCAL_APPLICATION,
+                    activeAction = MaintenanceActionId.INSTALL_LOCAL_APPLICATION,
+                    lastAction = MaintenanceActionRecord(
+                        actionId = MaintenanceActionId.INSTALL_LOCAL_APPLICATION,
+                        status = MaintenanceActionStatus.RUNNING,
+                    ),
+                    applicationAction = null,
+                    applicationDetails = null,
+                    installationSelection = null,
+                ),
+            ),
+        )
+    }
+
+    private fun localApkOperationComponentIds(
+        snapshot: InstallationSessionSnapshot,
+    ): Set<String> = buildSet {
+        snapshot.artifactManifests
+            .filter {
+                it.localOnly &&
+                    it.sources.singleOrNull()?.kind == ArtifactSourceKind.USER_SELECTED_APK
+            }
+            .mapTo(this) { it.componentId }
+        if (snapshot.installationFlow == InstallationFlow.LOCAL_APK_INSTALL) {
+            addAll(snapshot.installationBatch?.selectedComponentIds.orEmpty())
+        }
+    }
+
     private fun applyAdapterEvent(command: InstallationSessionCommand.AdapterEvent) {
         val current = _snapshot.value
         if (command.sessionId != current.sessionId) {
@@ -2034,6 +2156,7 @@ class InstallationSession(
             is InstallationSessionEvent.DeviceConnectionFailed -> handleDeviceConnectionFailed(event)
             is InstallationSessionEvent.DistributionConfigResolved -> handleDistributionConfigResolved(event)
             is InstallationSessionEvent.ArtifactBatchPrepared -> handleArtifactBatchPrepared(event)
+            is InstallationSessionEvent.LocalApkPrepared -> handleLocalApkPrepared(event)
             is InstallationSessionEvent.CatalogFailed -> handleCatalogFailed(event.reasonCode, event.retryable)
             is InstallationSessionEvent.ComponentProgressUpdated -> handleComponentProgressUpdated(event)
             is InstallationSessionEvent.InstallationStarted -> handleInstallationStarted(event.componentIds)
@@ -2081,6 +2204,109 @@ class InstallationSession(
                 reasonCode = "unknown_event",
             )
         }
+    }
+
+    private fun handleLocalApkPrepared(event: InstallationSessionEvent.LocalApkPrepared) {
+        val current = _snapshot.value
+        val manifest = event.manifest
+        val verification = event.verification
+        val source = manifest.sources.singleOrNull()
+        val deviceSdk = current.device?.androidSdk
+        val invalid = current.state != InstallationSessionState.MAINTENANCE ||
+            current.maintenance.activeAction != MaintenanceActionId.INSTALL_LOCAL_APPLICATION ||
+            current.device?.connectionStatus != DeviceConnectionStatus.CONFIRMED ||
+            deviceSdk == null ||
+            ArtifactManifestValidator.validate(manifest) !is ManifestValidation.Valid ||
+            !manifest.localOnly ||
+            source?.kind != ArtifactSourceKind.USER_SELECTED_APK ||
+            source?.url != ArtifactManifestValidator.USER_SELECTED_APK_URL ||
+            deviceSdk < manifest.compatibility.minAndroidSdk ||
+            manifest.compatibility.maxAndroidSdk?.let { deviceSdk > it } == true ||
+            verification.componentId != manifest.componentId ||
+            verification.sourceKind != ArtifactSourceKind.USER_SELECTED_APK ||
+            !verification.userSelected ||
+            verification.localDownload ||
+            verification.archiveSizeBytes != 0L ||
+            verification.archiveSha256.isNotBlank() ||
+            verification.apkSizeBytes != manifest.apkSizeBytes ||
+            !verification.apkSha256.equals(manifest.apkSha256, ignoreCase = true) ||
+            verification.packageName != manifest.packageName ||
+            verification.apkVersion != manifest.apkVersion ||
+            !verification.certificateSha256.equals(manifest.certificateSha256, ignoreCase = true) ||
+            !manifest.matchesCertificates(verification.certificateSha256s)
+        if (invalid) {
+            failMaintenanceAction("local_apk_preparation_invalid", retryable = false)
+            return
+        }
+
+        val component = manifest.toComponentDescriptor(deviceSdk)
+        val batch = InstallationBatchPlan(
+            batchId = current.sessionId,
+            flow = InstallationFlow.LOCAL_APK_INSTALL,
+            strategy = InstallationStrategy.REINSTALL_SELECTED,
+            selectedComponentIds = setOf(manifest.componentId),
+            reusableComponentIds = emptySet(),
+            preparationComponentIds = setOf(manifest.componentId),
+            resultComponentIds = setOf(manifest.componentId),
+        )
+        val evidence = current.evidence.copy(
+            artifactsVerified = setOf(manifest.componentId),
+            artifactVerifications = mapOf(manifest.componentId to verification),
+            writeConfirmed = emptySet(),
+            confirmationPending = emptySet(),
+            installation = current.evidence.installation.filterKeys { it != manifest.componentId },
+            authorizationActions = current.evidence.authorizationActions.filter {
+                it.componentId != manifest.componentId
+            },
+            availability = current.evidence.availability.filterKeys { it != manifest.componentId },
+        )
+        val progress = mapOf(
+            manifest.componentId to ComponentProgress(
+                componentId = manifest.componentId,
+                phase = InstallPhase.CHECK,
+                status = ComponentProgressStatus.COMPLETED,
+                bytesWritten = manifest.apkSizeBytes,
+                totalBytes = manifest.apkSizeBytes,
+                fraction = 1f,
+                indeterminate = false,
+            ),
+        )
+        val prepared = current.copy(
+            state = InstallationSessionState.ARTIFACTS_READY,
+            installationStrategy = InstallationStrategy.REINSTALL_SELECTED,
+            installationFlow = InstallationFlow.LOCAL_APK_INSTALL,
+            components = current.components.filterNot { it.id == component.id } + component,
+            currentComponentName = manifest.displayName,
+            progress = SessionProgress(1, 1, 0.6f, false),
+            componentProgress = progress,
+            failedComponentIds = emptySet(),
+            componentFailureRetryable = emptyMap(),
+            failure = null,
+            evidence = evidence,
+            artifactManifests = listOf(manifest),
+            artifactCatalogStage = ArtifactCatalogStage.PREPARED,
+            installationBatch = batch,
+            installationBatchReceipt = null,
+            selectedSources = mapOf(manifest.componentId to ArtifactSourceKind.USER_SELECTED_APK),
+            sourceFailures = emptyList(),
+            archiveDownloads = emptyMap(),
+            archiveVerifications = emptyMap(),
+            apkExtractions = emptyMap(),
+            maintenance = current.maintenance.copy(
+                activeAction = null,
+                lastAction = MaintenanceActionRecord(
+                    actionId = MaintenanceActionId.INSTALL_LOCAL_APPLICATION,
+                    status = MaintenanceActionStatus.SUCCEEDED,
+                    resultCode = "local_apk_ready",
+                ),
+            ),
+        )
+        publish(
+            withCheckpoint(
+                prepared.copy(componentResults = buildComponentResults(evidence, prepared)),
+            ),
+            acceptedEventSequence,
+        )
     }
 
     private fun handleDeviceDiscovered(device: DeviceSummary) {
@@ -2495,6 +2721,7 @@ class InstallationSession(
                     verification.packageName == manifest.packageName &&
                     verification.apkVersion == manifest.apkVersion &&
                     verification.certificateSha256.equals(manifest.certificateSha256, ignoreCase = true) &&
+                    manifest.matchesCertificates(verification.certificateSha256s) &&
                     if (manifest.localOnly) {
                         verification.localDownload &&
                             verification.sourceKind == ArtifactSourceKind.LOCAL_DOWNLOAD &&
@@ -2806,9 +3033,16 @@ class InstallationSession(
         val installedIds = receipt.components
             .filter { it.installation.status == InstallationStageReceiptStatus.VERIFIED }
             .mapTo(linkedSetOf()) { it.componentId }
-        val maintenance = current.maintenance.withVerifiedInstallations(
-            trustedManifests(current).values.filter { it.componentId in installedIds },
-        )
+        val maintenance = if (current.installationFlow == InstallationFlow.LOCAL_APK_INSTALL) {
+            current.maintenance
+        } else {
+            current.maintenance.withVerifiedInstallations(
+                trustedManifests(current).values.filter {
+                    it.componentId in installedIds &&
+                        it.sources.singleOrNull()?.kind != ArtifactSourceKind.USER_SELECTED_APK
+                },
+            )
+        }
         val completedUpdateIds = results.asSequence()
             .filter { it.status == ComponentResultStatus.READY }
             .mapNotNull { it.componentId }

@@ -70,8 +70,9 @@ fun InstallApp(
             {
                 onIntent(
                     if (state.installationFlow in setOf(
-                            InstallationFlow.MAINTENANCE_INSTALL,
-                            InstallationFlow.SELF_UPDATE,
+                        InstallationFlow.MAINTENANCE_INSTALL,
+                        InstallationFlow.LOCAL_APK_INSTALL,
+                        InstallationFlow.SELF_UPDATE,
                         )
                     ) {
                         maintenanceResultBackIntent(routedMaintenanceAction, state)
@@ -211,10 +212,12 @@ fun InstallApp(
 private fun InstallUiState.ownsMaintenanceInstallation(): Boolean = when (this) {
     is InstallUiState.Installing -> installationFlow in setOf(
         InstallationFlow.MAINTENANCE_INSTALL,
+        InstallationFlow.LOCAL_APK_INSTALL,
         InstallationFlow.SELF_UPDATE,
     )
     is InstallUiState.Result -> installationFlow in setOf(
         InstallationFlow.MAINTENANCE_INSTALL,
+        InstallationFlow.LOCAL_APK_INSTALL,
         InstallationFlow.SELF_UPDATE,
     )
     else -> false
@@ -230,6 +233,7 @@ internal fun maintenanceResultBackIntent(
     // from sending an initial failure into the maintenance recovery command.
     if (state.installationFlow !in setOf(
             InstallationFlow.MAINTENANCE_INSTALL,
+            InstallationFlow.LOCAL_APK_INSTALL,
             InstallationFlow.SELF_UPDATE,
         )
     ) {
@@ -245,6 +249,9 @@ internal fun maintenanceResultBackIntent(
         }
     }
     if (state.installationFlow == InstallationFlow.SELF_UPDATE) {
+        return InstallUiIntent.EnterMaintenance
+    }
+    if (state.installationFlow == InstallationFlow.LOCAL_APK_INSTALL) {
         return InstallUiIntent.EnterMaintenance
     }
     return when {

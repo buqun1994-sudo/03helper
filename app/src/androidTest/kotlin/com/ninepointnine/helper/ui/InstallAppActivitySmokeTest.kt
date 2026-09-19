@@ -67,10 +67,11 @@ class InstallAppActivitySmokeTest {
                 activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 activity.setContent {
                     InstallApp(session.snapshots.collectAsState().value, onIntent = { intent ->
-                        val command = intent.toInstallationSessionCommand()
-                        session.dispatch(command)
-                        if (command is InstallationSessionCommand.MaintenanceAction) {
-                            session.dispatchEvent(InstallationSessionEvent.MaintenanceApplicationsResolved(emptyList()))
+                        intent.toInstallationSessionCommand()?.let { command ->
+                            session.dispatch(command)
+                            if (command is InstallationSessionCommand.MaintenanceAction) {
+                                session.dispatchEvent(InstallationSessionEvent.MaintenanceApplicationsResolved(emptyList()))
+                            }
                         }
                     })
                 }

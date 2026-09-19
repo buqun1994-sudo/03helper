@@ -2,7 +2,8 @@ package com.ninepointnine.helper.domain.session
 
 import com.ninepointnine.helper.domain.artifact.ArtifactManifest
 import com.ninepointnine.helper.domain.device.AuthorizationActionEvidence
-import com.ninepointnine.helper.domain.device.AuthorizationPlanBuildResult
+import com.ninepointnine.helper.domain.device.AuthorizationDeclarationValidator
+import com.ninepointnine.helper.domain.device.AuthorizationPlan
 import com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
 import com.ninepointnine.helper.domain.device.DeviceAvailabilityEvidence
 import com.ninepointnine.helper.domain.device.DeviceInstallWarning
@@ -13,6 +14,8 @@ data class InstallationBatchReceipt(
     val batchId: Long,
     val components: List<InstallationComponentReceipt>,
     val warnings: List<DeviceInstallWarning> = emptyList(),
+    /** The exact locally compiled plan that produced this batch's authorization evidence. */
+    val authorizationPlan: AuthorizationPlan? = null,
 ) {
     /** Validates the complete receipt before any terminal session fact is changed. */
     fun validationFailure(
@@ -58,25 +61,43 @@ data class InstallationBatchReceipt(
             }
         }
 
-        // Authorization is a component-local contract. A malformed optional
-        // setup must be recorded on that component without invalidating a
-        // different component whose identity and authorization are complete.
-        // Reusable components are stricter: their preserved baseline must
-        // still resolve to a valid local plan.
-        val authorizationPlansByComponent = linkedMapOf<String, com.ninepointnine.helper.domain.device.AuthorizationPlan?>()
-        for (component in components) {
-            val manifest = manifests[component.componentId] ?: continue
-            when (val result = AuthorizationPlanFactory.createForManifests(
-                manifests = listOf(manifest),
-                requireDesktop = false,
-            )) {
-                is AuthorizationPlanBuildResult.Ready ->
-                    authorizationPlansByComponent[component.componentId] = result.plan
-                is AuthorizationPlanBuildResult.Rejected -> {
-                    if (component.componentId in plan.reusableComponentIds) {
-                        return "installation_batch_receipt_authorization_plan_invalid"
-                    }
-                    authorizationPlansByComponent[component.componentId] = null
+        // Authorization evidence is meaningful only against the exact plan
+        // compiled from the target package declarations. Rebuilding from the
+        // release manifest would silently discard target-resolved actions.
+        val authorizationPlanComponentIds = authorizationPlan
+            ?.components
+            ?.mapTo(linkedSetOf()) { it.componentId }
+            .orEmpty()
+        authorizationPlan?.let { executionPlan ->
+            val planValid = runCatching { AuthorizationPlanFactory.validate(executionPlan) }
+                .getOrDefault(false)
+            val declarationValidation = runCatching {
+                AuthorizationDeclarationValidator.validateDeclarations(
+                    executionPlan,
+                    executionPlan.declarationsByComponent,
+                )
+            }
+            if (!planValid ||
+                declarationValidation.isFailure ||
+                declarationValidation.getOrNull() != null ||
+                executionPlan.declarationsByComponent.keys != authorizationPlanComponentIds ||
+                executionPlan.actions.map { it.id }.toSet().size != executionPlan.actions.size ||
+                executionPlan.actions.any { it.componentId !in authorizationPlanComponentIds }
+            ) {
+                return "installation_batch_receipt_authorization_plan_invalid"
+            }
+            executionPlan.components.forEach { plannedComponent ->
+                val manifest = manifests[plannedComponent.componentId]
+                    ?: return "installation_batch_receipt_authorization_plan_invalid"
+                val receipt = components.firstOrNull { it.componentId == plannedComponent.componentId }
+                    ?: return "installation_batch_receipt_authorization_plan_invalid"
+                if (plannedComponent.componentId in plan.reusableComponentIds ||
+                    plannedComponent.packageName != manifest.packageName ||
+                    plannedComponent.setup != manifest.deviceSetup ||
+                    plannedComponent.order != manifest.sortOrder ||
+                    plannedComponent.launchComponent != null
+                ) {
+                    return "installation_batch_receipt_authorization_plan_invalid"
                 }
             }
         }
@@ -84,14 +105,11 @@ data class InstallationBatchReceipt(
         if (allAuthorizationEvidence.map { it.actionId }.toSet().size != allAuthorizationEvidence.size) {
             return "installation_batch_receipt_authorization_evidence_invalid"
         }
-        authorizationPlansByComponent.forEach { (componentId, authorizationPlan) ->
-            val evidence = components.first { it.componentId == componentId }.authorization.evidence
-            if (
-                (authorizationPlan == null && evidence.isNotEmpty()) ||
-                (authorizationPlan != null && !AuthorizationPlanFactory.validateEvidenceSubset(authorizationPlan, evidence))
-            ) {
-                return "installation_batch_receipt_authorization_evidence_invalid"
-            }
+        if ((authorizationPlan == null && allAuthorizationEvidence.isNotEmpty()) ||
+            (authorizationPlan != null &&
+                !AuthorizationPlanFactory.validateEvidenceSubset(authorizationPlan, allAuthorizationEvidence))
+        ) {
+            return "installation_batch_receipt_authorization_evidence_invalid"
         }
 
         for (component in components) {
@@ -135,35 +153,41 @@ data class InstallationBatchReceipt(
                 return "installation_batch_receipt_post_install_without_identity"
             }
 
-            val authorizationPlan = authorizationPlansByComponent[component.componentId]
-            if (authorizationPlan == null) {
-                // A rejected optional setup is itself a component-scoped
-                // authorization fact. It may not claim success or carry
-                // evidence from a plan that was never accepted locally.
-                when (component.authorization.status) {
-                    AuthorizationStageReceiptStatus.FAILED,
-                    AuthorizationStageReceiptStatus.UNKNOWN,
-                    AuthorizationStageReceiptStatus.NOT_ATTEMPTED,
-                    -> if (
+            val componentHasAuthorizationPlan = component.componentId in authorizationPlanComponentIds
+            if (componentHasAuthorizationPlan && !installationVerified) {
+                return "installation_batch_receipt_authorization_plan_invalid"
+            }
+            when {
+                componentHasAuthorizationPlan -> {
+                    val expectedActions = checkNotNull(authorizationPlan).actions
+                        .filter { it.componentId == component.componentId }
+                        .mapTo(linkedSetOf()) { it.id }
+                    component.authorization.validationFailure(
+                        componentId = component.componentId,
+                        expectedActionIds = expectedActions,
+                        reusable = false,
+                    )?.let { return it }
+                }
+
+                reusable || !installationVerified || plan.flow == InstallationFlow.SELF_UPDATE -> {
+                    component.authorization.validationFailure(
+                        componentId = component.componentId,
+                        expectedActionIds = emptySet(),
+                        reusable = reusable,
+                    )?.let { return it }
+                }
+
+                else -> {
+                    // A target-declaration or plan build failure carries no
+                    // execution plan and therefore cannot claim success or
+                    // retain any action evidence.
+                    if (component.authorization.status != AuthorizationStageReceiptStatus.FAILED ||
                         component.authorization.evidence.isNotEmpty() ||
                         component.authorization.reasonCode.isNullOrBlank()
                     ) {
                         return "installation_batch_receipt_authorization_plan_invalid"
                     }
-
-                    AuthorizationStageReceiptStatus.VERIFIED,
-                    AuthorizationStageReceiptStatus.NOT_REQUIRED,
-                    AuthorizationStageReceiptStatus.PRESERVED,
-                    -> return "installation_batch_receipt_authorization_plan_invalid"
                 }
-            } else {
-                val expectedActions = authorizationPlan.actions
-                    .mapTo(linkedSetOf()) { it.id }
-                component.authorization.validationFailure(
-                    componentId = component.componentId,
-                    expectedActionIds = expectedActions,
-                    reusable = reusable,
-                )?.let { return it }
             }
 
             val authorizationSatisfied = component.authorization.status in AUTHORIZATION_SATISFIED

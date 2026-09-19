@@ -1,3 +1,12 @@
+# 2026-09-20 声明驱动一键授权与本机 APK 安装收口
+
+1. 一键授权已统一为“车机实际安装 APK 原始 Manifest -> 目标系统能力与本地有限白名单过滤 -> 冻结类型化计划 -> 逐项回读 -> 精确批次收据”。`AndroidBinaryManifestReader` 直接解析二进制 `AndroidManifest.xml`，手机和车机 PackageManager 均不能增删声明；管理页只展示原始声明且车机可自动处理的危险权限、固定 AppOp、无障碍 / 通知服务。初始化、更新、推荐应用、本机 APK 和管理页共用同一动作编译与证据语义；批次收据携带实际执行计划，会话校验版本、组件 / 包身份、声明、动作和 evidence，拒绝从旧 manifest、PackageManager 投影或状态回读重建计划。
+2. 高德 `com.autonavi.amapautolite` 旧“车机授权操作失败：重新授权”根因已在 `S56_HQX` Android 9 上定位：已安装 APK 为 `317,461,313` 字节，旧管理链最多拉取 `128 MiB` APK 解析声明，因此必然落入 `authorization_capability_metadata_missing`。现改为从精确安装路径只提取原始 `AndroidManifest.xml`（当前样本 `44,092` 字节），不传输整包；原始声明经 Android 9 能力过滤后只生成精确位置、大致位置、读取手机状态、读 / 写存储、悬浮窗、安装应用和修改系统设置八项，过滤 `INTERNET`、`FOREGROUND_SERVICE`、`POST_NOTIFICATIONS`、`BLUETOOTH_SCAN` 与厂商签名权限。
+3. 维护首页删除独立“修复授权”入口；APP 分组固定为“管理已安装应用 / 安装推荐应用 / 安装本机应用”。原“安装应用”文案改为“安装推荐应用”。授权项目显示中文用户文案，高德笼统错误改为声明读取、计划、车机拒绝、回读等可执行原因。
+4. “安装本机应用”使用 Android `OpenDocument` 文件选择器。`content://` 内容立即复制到助手单次私有工作区，限制 `1 byte..1 GiB`，校验包名、版本、完整当前证书集合、SHA-256、最低 SDK 并拒绝 split APK；准备后只建立一个 `LOCAL_APK_INSTALL + REINSTALL_SELECTED` 批次，安装完成进入统一自动授权。成功、失败、取消和重试清理助手私有副本，不删除用户原文件，不发布到公共 Download，不写入 Cloud 推荐目录或长期维护基线；失败重试重新选择，返回只回维护首页，并保留既有连接及“稍后安装”导航基线。
+5. 自动化已覆盖旧 `targetSdk` 真实编译 Manifest 不吸收系统合成权限、高德 Android 9 能力过滤、动态授权计划篡改拒绝、本机 APK 准备 / 多证书 / split / 大小 / 缓存清理、URI 到安装授权回执、准备失败不调用设备、本机 APK 重试 / 取消 / 返回和维护入口顺序。指定 JDK17 下 Debug JVM `394/394`（0 failures / 0 errors / 0 skipped）、Debug Lint、Debug / AndroidTest APK 构建、项目文档、Skills 和差异检查均通过。
+6. 登记测试手机 `RMX1901` 完成原始 Manifest 解析、生产 Activity、Debug 维护场景和维护推荐应用单选失败 / 重试 instrumentation，结果 `4/4` 通过；真实截图确认首页依次显示“管理已安装应用 / 安装推荐应用 / 安装本机应用”，本机入口为文件加号图标且没有“修复授权”。全部 smoke 后再次保留数据覆盖安装 Debug 成功，最终包为 `com.ninepointnine.helper.test`、`1.0.16-test (17)`，APK SHA-256 为 `a23e04ad5e2d06957729db69864480ce03b998f2dbb89e986ae57e1342dc8f76`，Launcher 为 `com.ninepointnine.helper.MainActivity`；用户明确反馈测试通过并要求提交。未安装 Release、未清数据、未卸载、未降级、未重启、未推送或发布。
+
 # 2026-09-09 1.0.16 Release APK / ZIP 导出与源码提交
 
 1. 按用户要求运行唯一版本脚本，将 Release 真值从 `1.0.15 (16)` 升级为 `1.0.16 (17)`；Debug / staging 继续由同一版本文件派生测试身份。

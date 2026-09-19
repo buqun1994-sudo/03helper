@@ -13,7 +13,7 @@
 
 1. 第一轮必须先读取本文件和 `docs/README.md`。
 2. 按任务信号读取产品、架构、验证、安全、运维或规则文档，不一次性加载全部历史。
-3. 涉及本机构建、Android SDK、ADB、网络发布或设备时，先读取 `.codex/local-context.properties`；文件不存在时只能参考 `.codex/local-context.properties.example`，不得猜测个人路径、设备地址或凭据。连接车机前还必须按运维规则重新快速枚举，已记录地址只作提示、不得据此直接判断离线。
+3. 涉及本机构建、Android SDK、ADB、网络发布或设备时，先读取 `.codex/local-context.properties`；文件不存在时只能参考 `.codex/local-context.properties.example`，不得猜测个人路径、设备地址或凭据。电脑端发现车机的唯一入口是 `node scripts/find-vehicle-adb.mjs --serial-only`；必须先执行该入口，禁止在它之前人工检查旧 IP、路由、ARP 或逐地址 `adb connect`。手机内的发现继续由既有 `LanAdbDeviceDiscovery` 拥有。
 4. 开工前执行 `git status --short --branch`，保留用户已有改动。
 5. 代码、配置与脚本行为以磁盘文件和已验证契约为准；旧 README、截图、聊天内容或终端乱码与源码冲突时，以源码为真值并同步文档。
 6. 涉及 UI、连接方式、安装步骤、授权状态、维护动作或动效时，先读取对应产品与设计文档；不得在调用点复制第二套状态机。

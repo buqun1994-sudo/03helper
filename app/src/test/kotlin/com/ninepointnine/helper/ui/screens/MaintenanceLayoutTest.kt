@@ -73,6 +73,37 @@ class MaintenanceLayoutTest {
     }
 
     @Test
+    fun `local apk result back returns home without reopening the picker`() {
+        val failed = InstallUiState.Result(
+            kind = ResultKind.INSTALLATION_FAILED,
+            componentResults = emptyList(),
+            canContinue = true,
+            installationFlow = InstallationFlow.LOCAL_APK_INSTALL,
+        )
+
+        assertEquals(
+            InstallUiIntent.EnterMaintenance,
+            maintenanceResultBackIntent(MaintenanceActionId.INSTALL_LOCAL_APPLICATION, failed),
+        )
+    }
+
+    @Test
+    fun `application group exposes only management recommended and local install in order`() {
+        assertEquals(
+            listOf(
+                MaintenanceActionId.MANAGE_APPS,
+                MaintenanceActionId.INSTALL_APPLICATIONS,
+                MaintenanceActionId.INSTALL_LOCAL_APPLICATION,
+            ),
+            maintenanceActions(com.ninepointnine.helper.domain.session.MaintenanceGroupId.APPS),
+        )
+        assertFalse(
+            maintenanceActions(com.ninepointnine.helper.domain.session.MaintenanceGroupId.COMMON)
+                .contains(MaintenanceActionId.REPAIR_CONFIGURATION),
+        )
+    }
+
+    @Test
     fun `initial result cannot be routed by a stale maintenance action`() {
         val failed = InstallUiState.Result(
             kind = ResultKind.INSTALLATION_FAILED,

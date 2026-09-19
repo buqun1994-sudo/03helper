@@ -5,6 +5,7 @@ import com.ninepointnine.helper.application.device.DeviceInstallationCoordinator
 import com.ninepointnine.helper.application.device.DeviceInstallationExecutionResult
 import com.ninepointnine.helper.application.session.InstallationSessionBoundary
 import com.ninepointnine.helper.data.artifact.ApkMetadata
+import com.ninepointnine.helper.data.artifact.ApkManifestMetadata
 import com.ninepointnine.helper.domain.artifact.ArtifactManifest
 import com.ninepointnine.helper.domain.artifact.ArtifactSource
 import com.ninepointnine.helper.domain.artifact.ArtifactSourceKind
@@ -36,6 +37,7 @@ import com.ninepointnine.helper.domain.device.DeviceInstallResult
 import com.ninepointnine.helper.domain.device.DeviceShortcut
 import com.ninepointnine.helper.domain.device.DeviceShortcutFailureStage
 import com.ninepointnine.helper.domain.device.DeviceShortcutResult
+import com.ninepointnine.helper.domain.device.DeclaredApplicationAuthorizationPlanFactory
 import com.ninepointnine.helper.domain.device.InstalledArtifactEvidence
 import com.ninepointnine.helper.domain.session.InstallationSessionEvent
 import com.ninepointnine.helper.domain.session.InstallationBatchPlan
@@ -111,6 +113,8 @@ class DeviceActionsTest {
         assertTrue(command.endsWith("03helper desktop lyrics"))
         assertTrue(command.contains("ensure_appop com.tcrrry.desktop SYSTEM_ALERT_WINDOW"))
         assertTrue(command.contains("ensure_notification_listener"))
+        assertTrue(command.contains("remember_failure()"))
+        assertTrue(command.contains("finish_failures"))
         assertFalse(command.contains("wait_for_service_bound"))
         assertFalse(command.contains("service_bound()"))
         assertFalse(command.contains("dumpsys activity services"))
@@ -1277,6 +1281,7 @@ class DeviceActionsTest {
                 val artifact = prepared(id, "org.independent.player", file,
                     ApkDeclarationMetadata(requestedPermissions = emptySet()))
                 val events = mutableListOf<InstallationSessionEvent>()
+                var authorizationExecutions = 0
                 val gateway = object : AdbCommandGateway {
                     override suspend fun installBatch(
                         artifacts: List<com.ninepointnine.helper.domain.device.InstallableArtifact>,
@@ -1286,18 +1291,167 @@ class DeviceActionsTest {
                     override suspend fun runShortcut(
                         shortcut: DeviceShortcut, selectedComponentIds: Set<String>, authorizationPlan: AuthorizationPlan,
                     ): DeviceShortcutResult {
-                        assertEquals(DeviceShortcut.CONFIGURE_SELECTED_APPS, shortcut)
-                        assertTrue(authorizationPlan.actions.isEmpty())
-                        return DeviceShortcutResult.Completed(selectedComponentIds, emptySet(), emptyList(), emptyList())
+                        authorizationExecutions += 1
+                        throw AssertionError("empty authorization plan must not reach the device executor")
                     }
                 }
                 val plan = initialBatchPlan(listOf(artifact))
                 DeviceInstallationCoordinator(activeBoundary(events)).executeBatch(actionLease(gateway), listOf(artifact), plan)
                 val receipt = events.filterIsInstance<InstallationSessionEvent.InstallationBatchCompleted>().single().receipt
+                assertEquals(0, authorizationExecutions)
+                assertTrue(checkNotNull(receipt.authorizationPlan).actions.isEmpty())
                 assertEquals(AuthorizationStageReceiptStatus.NOT_REQUIRED, receipt.components.single().authorization.status)
                 assertEquals(AvailabilityStageReceiptStatus.NOT_REQUIRED, receipt.components.single().availability.status)
                 assertEquals(null, receipt.validationFailure(plan, mapOf(id to artifact.manifest), com.ninepointnine.helper.domain.session.SessionEvidence()))
             }
+        } finally {
+            file.delete()
+        }
+    }
+
+    @Test
+    fun `coordinator freezes authorization from the apk read back after installation`() = runBlocking {
+        val file = Files.createTempFile("installed-declaration", ".apk").toFile().apply {
+            writeBytes(byteArrayOf(1))
+        }
+        try {
+            val artifact = prepared(
+                componentId = "reader",
+                packageName = "org.example.reader",
+                apkFile = file,
+                declarations = ApkDeclarationMetadata(),
+            )
+            val installedDeclarations = ApkDeclarationMetadata(
+                requestedPermissions = setOf("android.permission.CAMERA"),
+                runtimeGrantPermissions = setOf("android.permission.CAMERA"),
+            )
+            val events = mutableListOf<InstallationSessionEvent>()
+            var frozenPlan: AuthorizationPlan? = null
+            val gateway = object : AdbCommandGateway {
+                override suspend fun installBatch(
+                    artifacts: List<com.ninepointnine.helper.domain.device.InstallableArtifact>,
+                    strategy: InstallationStrategy,
+                ): DeviceInstallResult = DeviceInstallResult.Installed(
+                    evidence = artifacts.map { installedEvidence(it).copy(declarations = installedDeclarations) },
+                )
+
+                override suspend fun buildAuthorizationPlan(
+                    artifacts: List<com.ninepointnine.helper.domain.device.InstallableArtifact>,
+                    requireDesktop: Boolean,
+                ): AuthorizationPlanBuildResult {
+                    assertEquals(installedDeclarations, artifacts.single().declarations)
+                    return AuthorizationPlanFactory.createForComponents(
+                        components = artifacts.map {
+                            ManagedComponent(it.manifest.componentId, it.manifest.packageName)
+                        },
+                        declarationsByComponent = mapOf("reader" to installedDeclarations),
+                    )
+                }
+
+                override suspend fun runShortcut(
+                    shortcut: DeviceShortcut,
+                    selectedComponentIds: Set<String>,
+                    authorizationPlan: AuthorizationPlan,
+                ): DeviceShortcutResult {
+                    frozenPlan = authorizationPlan
+                    return DeviceShortcutResult.Completed(
+                        configuredComponentIds = selectedComponentIds,
+                        skippedComponentIds = emptySet(),
+                        authorizationEvidence = validAuthorizationEvidence(authorizationPlan),
+                        availabilityEvidence = emptyList(),
+                    )
+                }
+            }
+            val batch = initialBatchPlan(listOf(artifact))
+
+            DeviceInstallationCoordinator(activeBoundary(events)).executeBatch(
+                actionLease(gateway),
+                listOf(artifact),
+                batch,
+            )
+
+            val receipt = events.filterIsInstance<InstallationSessionEvent.InstallationBatchCompleted>()
+                .single()
+                .receipt
+            assertEquals(AuthorizationStageReceiptStatus.VERIFIED, receipt.components.single().authorization.status)
+            assertEquals(
+                setOf("android.permission.CAMERA"),
+                checkNotNull(frozenPlan).actions
+                    .filterIsInstance<AuthorizationAction.EnsureDeclaredRuntimePermissionGranted>()
+                    .mapTo(linkedSetOf()) { it.permission },
+            )
+            assertEquals(
+                null,
+                receipt.validationFailure(
+                    batch,
+                    mapOf("reader" to artifact.manifest),
+                    com.ninepointnine.helper.domain.session.SessionEvidence(),
+                ),
+            )
+        } finally {
+            file.delete()
+        }
+    }
+
+    @Test
+    fun `coordinator never falls back to source declarations when installed Manifest is unavailable`() = runBlocking {
+        val file = Files.createTempFile("missing-installed-declaration", ".apk").toFile().apply {
+            writeBytes(byteArrayOf(1))
+        }
+        try {
+            val artifact = prepared(
+                componentId = "reader",
+                packageName = "org.example.reader",
+                apkFile = file,
+                declarations = ApkDeclarationMetadata(
+                    requestedPermissions = setOf("android.permission.CAMERA"),
+                    runtimeGrantPermissions = setOf("android.permission.CAMERA"),
+                ),
+            )
+            val events = mutableListOf<InstallationSessionEvent>()
+            var authorizationExecutions = 0
+            val gateway = object : AdbCommandGateway {
+                override suspend fun installBatch(
+                    artifacts: List<com.ninepointnine.helper.domain.device.InstallableArtifact>,
+                    strategy: InstallationStrategy,
+                ): DeviceInstallResult = DeviceInstallResult.Installed(
+                    evidence = artifacts.map { installedEvidence(it).copy(declarations = null) },
+                )
+
+                override suspend fun buildAuthorizationPlan(
+                    artifacts: List<com.ninepointnine.helper.domain.device.InstallableArtifact>,
+                    requireDesktop: Boolean,
+                ): AuthorizationPlanBuildResult {
+                    assertEquals(null, artifacts.single().declarations)
+                    return AuthorizationPlanBuildResult.Rejected("authorization_capability_metadata_missing")
+                }
+
+                override suspend fun runShortcut(
+                    shortcut: DeviceShortcut,
+                    selectedComponentIds: Set<String>,
+                    authorizationPlan: AuthorizationPlan,
+                ): DeviceShortcutResult {
+                    authorizationExecutions += 1
+                    throw AssertionError("missing installed declarations must not execute authorization")
+                }
+            }
+            val batch = initialBatchPlan(listOf(artifact))
+
+            DeviceInstallationCoordinator(activeBoundary(events)).executeBatch(
+                actionLease(gateway),
+                listOf(artifact),
+                batch,
+            )
+
+            val receipt = events.filterIsInstance<InstallationSessionEvent.InstallationBatchCompleted>()
+                .single()
+                .receipt
+            assertEquals(0, authorizationExecutions)
+            assertEquals(AuthorizationStageReceiptStatus.FAILED, receipt.components.single().authorization.status)
+            assertEquals(
+                "authorization_capability_metadata_missing",
+                receipt.components.single().authorization.reasonCode,
+            )
         } finally {
             file.delete()
         }
@@ -2443,11 +2597,12 @@ class DeviceActionsTest {
             ): DeviceShortcutResult {
                 shortcuts += shortcut
                 assertEquals(setOf("cast"), selectedComponentIds)
-                assertTrue(authorizationPlan.actions.isEmpty())
+                assertEquals(setOf("cast"), authorizationPlan.components.map { it.componentId }.toSet())
+                assertTrue(authorizationPlan.actions.all { it.componentId == "cast" })
                 return DeviceShortcutResult.Completed(
                     configuredComponentIds = setOf("cast"),
                     skippedComponentIds = emptySet(),
-                    authorizationEvidence = emptyList(),
+                    authorizationEvidence = validAuthorizationEvidence(authorizationPlan),
                     availabilityEvidence = emptyList(),
                 )
             }
@@ -2465,7 +2620,7 @@ class DeviceActionsTest {
             .single().receipt.components.single()
         assertEquals("cast", receipt.componentId)
         assertEquals(InstallationStageReceiptStatus.VERIFIED, receipt.installation.status)
-        assertEquals(AuthorizationStageReceiptStatus.NOT_REQUIRED, receipt.authorization.status)
+        assertEquals(AuthorizationStageReceiptStatus.VERIFIED, receipt.authorization.status)
         assertEquals(AvailabilityStageReceiptStatus.NOT_REQUIRED, receipt.availability.status)
     }
 
@@ -2626,6 +2781,499 @@ class DeviceActionsTest {
     }
 
     @Test
+    fun `authorization plan uses verified apk declarations without package snapshot`() {
+        val packageName = "mark.via"
+        val sourceDeclarations = ApkDeclarationMetadata(
+            requestedPermissions = setOf(
+                "android.permission.CAMERA",
+                "android.permission.REQUEST_INSTALL_PACKAGES",
+            ),
+        )
+        var dangerousPermissionReads = 0
+        val fakeDadb = Proxy.newProxyInstance(
+            Dadb::class.java.classLoader,
+            arrayOf(Dadb::class.java),
+        ) { _, method, args ->
+            when (method.name) {
+                "shell" -> when (val command = args?.firstOrNull()?.toString().orEmpty()) {
+                    "pm list permissions -g -d" -> {
+                        dangerousPermissionReads += 1
+                        AdbShellResponse(
+                            "Dangerous Permissions:\n\n" +
+                                "group:android.permission-group.CAMERA\n" +
+                                "  permission:android.permission.CAMERA\n",
+                            "",
+                            0,
+                        )
+                    }
+
+                    else -> throw AssertionError("unexpected shell command: $command")
+                }
+
+                "supportsFeature" -> false
+                "close" -> null
+                else -> null
+            }
+        } as Dadb
+        val gateway = DadbCommandGateway(
+            adb = fakeDadb,
+            closed = AtomicBoolean(false),
+            ioMutex = Mutex(),
+            installedApkCacheDirectory = null,
+            installedApkMetadataReader = null,
+        )
+
+        val result = runBlocking {
+            gateway.buildAuthorizationPlan(
+                artifacts = listOf(
+                    com.ninepointnine.helper.domain.device.InstallableArtifact(
+                        manifest = manifest("via", packageName, apkSize = 1),
+                        apkFile = null,
+                        declarations = sourceDeclarations,
+                    ),
+                ),
+                requireDesktop = false,
+            )
+        }
+
+        assertTrue("result=$result", result is AuthorizationPlanBuildResult.Ready)
+        val plan = (result as AuthorizationPlanBuildResult.Ready).plan
+        assertEquals(1, dangerousPermissionReads)
+        assertEquals(sourceDeclarations.requestedPermissions, plan.declarationsByComponent.getValue("via").requestedPermissions)
+        assertEquals(
+            setOf("android.permission.CAMERA"),
+            plan.actions.filterIsInstance<AuthorizationAction.EnsureDeclaredRuntimePermissionGranted>()
+                .mapTo(linkedSetOf()) { it.permission },
+        )
+        assertEquals(
+            setOf(com.ninepointnine.helper.domain.device.ManagedAppOp.REQUEST_INSTALL_PACKAGES),
+            plan.actions.filterIsInstance<AuthorizationAction.EnsureAppOpAllowed>()
+                .mapTo(linkedSetOf()) { it.operation },
+        )
+    }
+
+    @Test
+    fun `authorization plan accepts a verified empty declaration without target metadata`() {
+        val packageName = "org.example.reader"
+        var shellCalls = 0
+        val fakeDadb = Proxy.newProxyInstance(
+            Dadb::class.java.classLoader,
+            arrayOf(Dadb::class.java),
+        ) { _, method, _ ->
+            when (method.name) {
+                "shell" -> {
+                    shellCalls += 1
+                    throw AssertionError("empty declarations must not require target metadata")
+                }
+                "supportsFeature" -> false
+                "close" -> null
+                else -> null
+            }
+        } as Dadb
+        val gateway = DadbCommandGateway(
+            adb = fakeDadb,
+            closed = AtomicBoolean(false),
+            ioMutex = Mutex(),
+            installedApkCacheDirectory = null,
+            installedApkMetadataReader = null,
+        )
+
+        val result = runBlocking {
+            gateway.buildAuthorizationPlan(
+                artifacts = listOf(
+                    com.ninepointnine.helper.domain.device.InstallableArtifact(
+                        manifest = manifest("reader", packageName, apkSize = 1),
+                        apkFile = null,
+                        declarations = ApkDeclarationMetadata(),
+                    ),
+                ),
+                requireDesktop = false,
+            )
+        }
+
+        assertTrue("result=$result", result is AuthorizationPlanBuildResult.Ready)
+        assertTrue((result as AuthorizationPlanBuildResult.Ready).plan.actions.isEmpty())
+        assertEquals(0, shellCalls)
+    }
+
+    @Test
+    fun `authorization plan rejects missing verified declarations without target fallback`() {
+        val packageName = "org.example.reader"
+        var shellCalls = 0
+        val fakeDadb = Proxy.newProxyInstance(
+            Dadb::class.java.classLoader,
+            arrayOf(Dadb::class.java),
+        ) { _, method, _ ->
+            when (method.name) {
+                "shell" -> {
+                    shellCalls += 1
+                    throw AssertionError("missing APK declarations must not trigger a target declaration fallback")
+                }
+                "supportsFeature" -> false
+                "close" -> null
+                else -> null
+            }
+        } as Dadb
+        val gateway = DadbCommandGateway(
+            adb = fakeDadb,
+            closed = AtomicBoolean(false),
+            ioMutex = Mutex(),
+            installedApkCacheDirectory = null,
+            installedApkMetadataReader = null,
+        )
+
+        val result = runBlocking {
+            gateway.buildAuthorizationPlan(
+                artifacts = listOf(
+                    com.ninepointnine.helper.domain.device.InstallableArtifact(
+                        manifest = manifest("reader", packageName, apkSize = 1),
+                        apkFile = null,
+                        declarations = null,
+                    ),
+                ),
+                requireDesktop = false,
+            )
+        }
+
+        assertEquals(
+            AuthorizationPlanBuildResult.Rejected("authorization_capability_metadata_missing"),
+            result,
+        )
+        assertEquals(0, shellCalls)
+    }
+
+    @Test
+    fun `authorization plan uses verified apk services without target service index`() {
+        val packageName = "com.dudu.autoui"
+        val accessibilityService = "$packageName/$packageName.DuduAccessibilityService"
+        val notificationService = "$packageName/$packageName.GetMusicInfoService"
+        val sourceDeclarations = ApkDeclarationMetadata(
+            requestedPermissions = setOf("android.permission.CAMERA"),
+            services = setOf(
+                ApkServiceDeclaration(
+                    accessibilityService,
+                    "android.permission.BIND_ACCESSIBILITY_SERVICE",
+                ),
+                ApkServiceDeclaration(
+                    notificationService,
+                    "android.permission.BIND_NOTIFICATION_LISTENER_SERVICE",
+                ),
+            ),
+        )
+        val fakeDadb = Proxy.newProxyInstance(
+            Dadb::class.java.classLoader,
+            arrayOf(Dadb::class.java),
+        ) { _, method, args ->
+            when (method.name) {
+                "shell" -> when (val command = args?.firstOrNull()?.toString().orEmpty()) {
+                    "pm list permissions -g -d" -> AdbShellResponse(
+                        "Dangerous Permissions:\n\n" +
+                            "group:android.permission-group.CAMERA\n" +
+                            "  permission:android.permission.CAMERA\n",
+                        "",
+                        0,
+                    )
+
+                    else -> throw AssertionError("unexpected shell command: $command")
+                }
+
+                "supportsFeature" -> false
+                "close" -> null
+                else -> null
+            }
+        } as Dadb
+        val gateway = DadbCommandGateway(
+            adb = fakeDadb,
+            closed = AtomicBoolean(false),
+            ioMutex = Mutex(),
+            installedApkCacheDirectory = null,
+            installedApkMetadataReader = null,
+        )
+
+        val result = runBlocking {
+            gateway.buildAuthorizationPlan(
+                artifacts = listOf(
+                    com.ninepointnine.helper.domain.device.InstallableArtifact(
+                        manifest = manifest("dudu", packageName, apkSize = 1),
+                        apkFile = null,
+                        declarations = sourceDeclarations,
+                    ),
+                ),
+                requireDesktop = false,
+            )
+        }
+
+        assertTrue("result=$result", result is AuthorizationPlanBuildResult.Ready)
+        val plan = (result as AuthorizationPlanBuildResult.Ready).plan
+        assertEquals(sourceDeclarations.services, plan.declarationsByComponent.getValue("dudu").services)
+        assertEquals(
+            setOf(accessibilityService, notificationService),
+            plan.actions.filterIsInstance<AuthorizationAction.AppendSecureComponent>()
+                .mapTo(linkedSetOf()) { it.targetComponent },
+        )
+        assertEquals(
+            setOf("android.permission.CAMERA"),
+            plan.actions.filterIsInstance<AuthorizationAction.EnsureDeclaredRuntimePermissionGranted>()
+                .mapTo(linkedSetOf()) { it.permission },
+        )
+    }
+
+    @Test
+    fun `authorization plan never adds permissions synthesized by Android 9 package manager`() {
+        val packageName = "mark.via"
+        val sourceDeclarations = ApkDeclarationMetadata(
+            requestedPermissions = setOf(
+                "android.permission.WRITE_EXTERNAL_STORAGE",
+                "android.permission.REQUEST_INSTALL_PACKAGES",
+            ),
+        )
+        val fakeDadb = Proxy.newProxyInstance(
+            Dadb::class.java.classLoader,
+            arrayOf(Dadb::class.java),
+        ) { _, method, args ->
+            when (method.name) {
+                "shell" -> when (val command = args?.firstOrNull()?.toString().orEmpty()) {
+                    "pm list permissions -g -d" -> AdbShellResponse(
+                        "Dangerous Permissions:\n\n" +
+                            "group:android.permission-group.STORAGE\n" +
+                            "  permission:android.permission.READ_EXTERNAL_STORAGE\n" +
+                            "  permission:android.permission.WRITE_EXTERNAL_STORAGE\n",
+                        "",
+                        0,
+                    )
+
+                    else -> throw AssertionError("unexpected shell command: $command")
+                }
+
+                "supportsFeature" -> false
+                "close" -> null
+                else -> null
+            }
+        } as Dadb
+        val gateway = DadbCommandGateway(
+            adb = fakeDadb,
+            closed = AtomicBoolean(false),
+            ioMutex = Mutex(),
+            installedApkCacheDirectory = null,
+            installedApkMetadataReader = null,
+        )
+
+        val result = runBlocking {
+            gateway.buildAuthorizationPlan(
+                artifacts = listOf(
+                    com.ninepointnine.helper.domain.device.InstallableArtifact(
+                        manifest = manifest("via", packageName, apkSize = 1),
+                        apkFile = null,
+                        declarations = sourceDeclarations,
+                    ),
+                ),
+                requireDesktop = false,
+            )
+        }
+
+        assertTrue("result=$result", result is AuthorizationPlanBuildResult.Ready)
+        val plan = (result as AuthorizationPlanBuildResult.Ready).plan
+        assertEquals(sourceDeclarations.requestedPermissions, plan.declarationsByComponent.getValue("via").requestedPermissions)
+        assertEquals(
+            setOf("android.permission.WRITE_EXTERNAL_STORAGE"),
+            plan.actions.filterIsInstance<AuthorizationAction.EnsureDeclaredRuntimePermissionGranted>()
+                .mapTo(linkedSetOf()) { it.permission },
+        )
+        assertEquals(
+            setOf(
+                com.ninepointnine.helper.domain.device.ManagedAppOp.REQUEST_INSTALL_PACKAGES,
+                com.ninepointnine.helper.domain.device.ManagedAppOp.WRITE_EXTERNAL_STORAGE,
+            ),
+            plan.actions.filterIsInstance<AuthorizationAction.EnsureAppOpAllowed>()
+                .mapTo(linkedSetOf()) { it.operation },
+        )
+    }
+
+    @Test
+    fun `Android 9 Amap plan filters the raw Manifest to eight supported declarations`() {
+        val packageName = "com.autonavi.amapautolite"
+        val rawDeclarations = ApkDeclarationMetadata(
+            requestedPermissions = setOf(
+                "android.permission.WRITE_EXTERNAL_STORAGE",
+                "android.permission.WRITE_MEDIA_STORAGE",
+                "android.permission.MANAGE_USB",
+                "android.permission.ACCESS_NETWORK_STATE",
+                "android.permission.INTERNET",
+                "android.permission.READ_PHONE_STATE",
+                "android.permission.ACCESS_FINE_LOCATION",
+                "android.permission.ACCESS_COARSE_LOCATION",
+                "android.permission.SYSTEM_ALERT_WINDOW",
+                "android.permission.ACCESS_BACKGROUND_LOCATION",
+                "android.permission.POST_NOTIFICATIONS",
+                "android.permission.FOREGROUND_SERVICE",
+                "com.autonavi.amapautolite.permission.WRITE_CONTENTPROVIDER",
+                "android.permission.READ_EXTERNAL_STORAGE",
+                "android.permission.REQUEST_INSTALL_PACKAGES",
+                "android.permission.BLUETOOTH_SCAN",
+                "android.permission.WRITE_SETTINGS",
+            ),
+        )
+        val fakeDadb = Proxy.newProxyInstance(
+            Dadb::class.java.classLoader,
+            arrayOf(Dadb::class.java),
+        ) { _, method, args ->
+            when (method.name) {
+                "shell" -> when (val command = args?.firstOrNull()?.toString().orEmpty()) {
+                    "pm list permissions -g -d" -> AdbShellResponse(
+                        "Dangerous Permissions:\n\n" +
+                            "group:android.permission-group.PHONE\n" +
+                            "  permission:android.permission.READ_PHONE_STATE\n" +
+                            "group:android.permission-group.LOCATION\n" +
+                            "  permission:android.permission.ACCESS_FINE_LOCATION\n" +
+                            "  permission:android.permission.ACCESS_COARSE_LOCATION\n" +
+                            "group:android.permission-group.STORAGE\n" +
+                            "  permission:android.permission.READ_EXTERNAL_STORAGE\n" +
+                            "  permission:android.permission.WRITE_EXTERNAL_STORAGE\n",
+                        "",
+                        0,
+                    )
+                    else -> throw AssertionError("unexpected shell command: $command")
+                }
+                "supportsFeature" -> false
+                "close" -> null
+                else -> null
+            }
+        } as Dadb
+        val gateway = DadbCommandGateway(
+            adb = fakeDadb,
+            closed = AtomicBoolean(false),
+            ioMutex = Mutex(),
+            installedApkCacheDirectory = null,
+            installedApkMetadataReader = null,
+        )
+
+        val result = runBlocking {
+            gateway.buildAuthorizationPlan(
+                artifacts = listOf(
+                    com.ninepointnine.helper.domain.device.InstallableArtifact(
+                        manifest = manifest("amap", packageName, apkSize = 317_461_313L),
+                        apkFile = null,
+                        declarations = rawDeclarations,
+                    ),
+                ),
+                requireDesktop = false,
+            )
+        }
+
+        assertTrue("result=$result", result is AuthorizationPlanBuildResult.Ready)
+        val plan = (result as AuthorizationPlanBuildResult.Ready).plan
+        assertEquals(rawDeclarations.requestedPermissions, plan.declarationsByComponent.getValue("amap").requestedPermissions)
+        assertEquals(
+            setOf(
+                "android.permission.ACCESS_COARSE_LOCATION",
+                "android.permission.ACCESS_FINE_LOCATION",
+                "android.permission.READ_EXTERNAL_STORAGE",
+                "android.permission.READ_PHONE_STATE",
+                "android.permission.REQUEST_INSTALL_PACKAGES",
+                "android.permission.SYSTEM_ALERT_WINDOW",
+                "android.permission.WRITE_EXTERNAL_STORAGE",
+                "android.permission.WRITE_SETTINGS",
+            ),
+            DeclaredApplicationAuthorizationPlanFactory.create(
+                componentId = "amap",
+                packageName = packageName,
+                declarations = plan.declarationsByComponent.getValue("amap"),
+            ).mapTo(linkedSetOf()) { it.declaration },
+        )
+    }
+
+    @Test
+    fun `managed authorization reads only installed manifest bytes and never pulls the apk`() {
+        val root = Files.createTempDirectory("installed-manifest-authorization").toFile()
+        val packageName = "com.autonavi.amapautolite"
+        val remotePath = "/data/app/$packageName/base.apk"
+        val declarations = ApkDeclarationMetadata(
+            requestedPermissions = setOf(
+                "android.permission.ACCESS_FINE_LOCATION",
+                "android.permission.INTERNET",
+            ),
+        )
+        val manifestBytes = byteArrayOf(3, 0, 8, 0, 1, 2, 3, 4)
+        val commands = mutableListOf<String>()
+        var pullCalls = 0
+        var parsedManifestBytes: ByteArray? = null
+        val fakeDadb = Proxy.newProxyInstance(
+            Dadb::class.java.classLoader,
+            arrayOf(Dadb::class.java),
+        ) { _, method, args ->
+            when (method.name) {
+                "shell" -> {
+                    val command = args?.firstOrNull()?.toString().orEmpty()
+                    commands += command
+                    when {
+                        command == "pm path $packageName" ->
+                            AdbShellResponse("package:$remotePath\n", "", 0)
+                        command.contains("unzip -p") ->
+                            AdbShellResponse(Base64.getEncoder().encodeToString(manifestBytes), "", 0)
+                        command == "pm list permissions -g -d" -> AdbShellResponse(
+                            "Dangerous Permissions:\n\n" +
+                                "group:android.permission-group.LOCATION\n" +
+                                "  permission:android.permission.ACCESS_FINE_LOCATION\n",
+                            "",
+                            0,
+                        )
+                        command == "dumpsys package '$packageName'" -> AdbShellResponse(
+                            "Packages:\n" +
+                                "  Package [$packageName] (1):\n" +
+                                "    requested permissions:\n" +
+                                "      android.permission.ACCESS_FINE_LOCATION\n" +
+                                "      android.permission.READ_EXTERNAL_STORAGE\n" +
+                                "    User 0: installed=true\n" +
+                                "      runtime permissions:\n" +
+                                "        android.permission.ACCESS_FINE_LOCATION: granted=true\n",
+                            "",
+                            0,
+                        )
+                        command == "stat -c %s '$remotePath'" -> AdbShellResponse("317461313\n", "", 0)
+                        else -> throw AssertionError("unexpected shell command: $command")
+                    }
+                }
+                "pull" -> {
+                    pullCalls += 1
+                    throw AssertionError("authorization must not pull the installed APK")
+                }
+                "supportsFeature" -> false
+                "close" -> null
+                else -> null
+            }
+        } as Dadb
+        val metadataReader = object : com.ninepointnine.helper.data.artifact.ApkMetadataReader {
+            override fun read(apk: File): ApkMetadata? = throw AssertionError("full APK parser must not run")
+
+            override fun readManifest(bytes: ByteArray): ApkManifestMetadata {
+                parsedManifestBytes = bytes
+                assertTrue(bytes.contentEquals(manifestBytes))
+                return ApkManifestMetadata(packageName, declarations)
+            }
+        }
+        val gateway = DadbCommandGateway(
+            adb = fakeDadb,
+            closed = AtomicBoolean(false),
+            ioMutex = Mutex(),
+            installedApkCacheDirectory = root,
+            installedApkMetadataReader = metadataReader,
+        )
+
+        val result = runBlocking {
+            gateway.inspectApplicationAuthorization(ManagedComponent("amap", packageName))
+        }
+
+        assertTrue("result=$result", result is ApplicationAuthorizationResult.Completed)
+        val requirements = (result as ApplicationAuthorizationResult.Completed).value.requirements
+        assertEquals(listOf("android.permission.ACCESS_FINE_LOCATION"), requirements.map { it.permission })
+        assertEquals(0, pullCalls)
+        assertEquals(1, commands.count { it.contains("unzip -p") })
+        assertEquals(2, commands.count { it == "dumpsys package '$packageName'" })
+        assertTrue(checkNotNull(parsedManifestBytes).contentEquals(manifestBytes))
+        root.deleteRecursively()
+    }
+
+    @Test
     fun `single application authorization continues after one failure and reports each readback`() {
         val root = Files.createTempDirectory("application-authorization").toFile()
         val packageName = "com.example.player"
@@ -2637,6 +3285,11 @@ class DeviceActionsTest {
         var enabledServices = "com.existing/com.existing.AccessibilityService"
         val packageDump = {
             """
+                Service Resolver Table:
+                  Non-Data Actions:
+                      android.accessibilityservice.AccessibilityService:
+                        12ab34 $service filter 56cd78 permission android.permission.BIND_ACCESSIBILITY_SERVICE
+
                 Packages:
                   Package [$packageName]
                     versionCode=7
@@ -2644,7 +3297,12 @@ class DeviceActionsTest {
                     userId=10123
                     firstInstallTime=2026-01-02 03:04:05
                     lastUpdateTime=2026-01-02 03:04:05
-                    android.permission.CAMERA: granted=false
+                    requested permissions:
+                      android.permission.CAMERA
+                      android.permission.SYSTEM_ALERT_WINDOW
+                    User 0: installed=true
+                      runtime permissions:
+                        android.permission.CAMERA: granted=false
             """.trimIndent()
         }
         val fakeDadb = Proxy.newProxyInstance(
@@ -2658,34 +3316,48 @@ class DeviceActionsTest {
                     when {
                         command == "pm path $packageName" ->
                             AdbShellResponse("package:/data/app/$packageName/base.apk\n", "", 0)
+                        command == "pm list permissions -g -d" -> AdbShellResponse(
+                            """
+                                Dangerous Permissions:
+
+                                group:android.permission-group.CAMERA
+                                  permission:android.permission.CAMERA
+                            """.trimIndent(),
+                            "",
+                            0,
+                        )
                         command == "dumpsys package '$packageName'" ->
                             AdbShellResponse(packageDump(), "", 0)
                         command == "stat -c %s '/data/app/$packageName/base.apk'" ->
                             AdbShellResponse("42\n", "", 0)
-                        command == "pm grant '$packageName' 'android.permission.CAMERA'" ->
-                            AdbShellResponse("", "not a changeable permission", 1)
+                        command.startsWith("extract_manifest()") ->
+                            AdbShellResponse(Base64.getEncoder().encodeToString(byteArrayOf(3, 0, 8, 0)), "", 0)
                         command == "appops get '$packageName' 'SYSTEM_ALERT_WINDOW'" ->
                             AdbShellResponse(
                                 "SYSTEM_ALERT_WINDOW: ${if (overlayAllowed) "allow" else "default"}\n",
                                 "",
                                 0,
                             )
-                        command == "appops set '$packageName' 'SYSTEM_ALERT_WINDOW' allow" -> {
+                        command.startsWith("sh -c ") -> {
                             overlayAllowed = true
-                            AdbShellResponse("", "", 0)
+                            accessibilityEnabled = true
+                            enabledServices += ":$service"
+                            AdbShellResponse(
+                                """
+                                    03HELPER|AUTH|app-player|app-player-declared-1-0-v1|DEFAULT|1|ALLOWED|-
+                                    03HELPER|AUTH|app-player|app-player-declared-2-0-v1|COMPONENT_ABSENT|1|COMPONENT_PRESENT|1
+                                    03HELPER|AUTH|app-player|app-player-declared-2-1-v1|DISABLED|1|ENABLED|-
+                                    03HELPER|FAIL|authorization_runtime_permission_write_failed|app-player
+                                """.trimIndent(),
+                                "",
+                                1,
+                            )
                         }
-                        command == "settings get secure 'enabled_accessibility_services'" ->
+                        command == "settings get secure enabled_accessibility_services" ||
+                            command == "settings get secure 'enabled_accessibility_services'" ->
                             AdbShellResponse("$enabledServices\n", "", 0)
-                        command.startsWith("settings put secure 'enabled_accessibility_services' ") -> {
-                            enabledServices = command.substringAfterLast(' ').trim('\'')
-                            AdbShellResponse("", "", 0)
-                        }
                         command == "settings get secure 'accessibility_enabled'" ->
                             AdbShellResponse(if (accessibilityEnabled) "1\n" else "0\n", "", 0)
-                        command == "settings put secure 'accessibility_enabled' 1" -> {
-                            accessibilityEnabled = true
-                            AdbShellResponse("", "", 0)
-                        }
                         else -> throw AssertionError("unexpected shell command: $command")
                     }
                 }
@@ -2704,21 +3376,26 @@ class DeviceActionsTest {
             closed = AtomicBoolean(false),
             ioMutex = Mutex(),
             installedApkCacheDirectory = root,
-            installedApkMetadataReader = com.ninepointnine.helper.data.artifact.ApkMetadataReader {
-                ApkMetadata(
+            installedApkMetadataReader = object : com.ninepointnine.helper.data.artifact.ApkMetadataReader {
+                val declarations = ApkDeclarationMetadata(
+                    requestedPermissions = setOf(
+                        "android.permission.CAMERA",
+                        "android.permission.SYSTEM_ALERT_WINDOW",
+                    ),
+                    services = setOf(
+                        ApkServiceDeclaration(service, "android.permission.BIND_ACCESSIBILITY_SERVICE"),
+                    ),
+                )
+
+                override fun read(apk: File): ApkMetadata = ApkMetadata(
                     packageName = packageName,
                     version = ArtifactVersion("1.2.3", 7),
                     certificateSha256s = setOf("fixture"),
-                    declarations = ApkDeclarationMetadata(
-                        requestedPermissions = setOf(
-                            "android.permission.CAMERA",
-                            "android.permission.SYSTEM_ALERT_WINDOW",
-                        ),
-                        services = setOf(
-                            ApkServiceDeclaration(service, "android.permission.BIND_ACCESSIBILITY_SERVICE"),
-                        ),
-                    ),
+                    declarations = declarations,
                 )
+
+                override fun readManifest(manifestBytes: ByteArray): ApkManifestMetadata =
+                    ApkManifestMetadata(packageName, declarations)
             },
         )
 
@@ -2731,15 +3408,20 @@ class DeviceActionsTest {
 
         assertTrue(result is ApplicationAuthorizationResult.Completed)
         val requirements = (result as ApplicationAuthorizationResult.Completed).value.requirements
-        assertEquals(3, progress.size)
+        assertEquals(1, progress.size)
         assertEquals(3, requirements.size)
         assertEquals(false, requirements[0].grantedAfter)
-        assertEquals("authorization_runtime_permission_write_failed", requirements[0].reasonCode)
+        assertEquals("authorization_runtime_permission_not_granted", requirements[0].reasonCode)
         assertEquals(true, requirements[1].grantedAfter)
+        assertEquals(null, requirements[1].reasonCode)
         assertEquals(ApplicationAuthorizationRequirementKind.APP_OP, requirements[1].kind)
         assertEquals(true, requirements[2].grantedAfter)
+        assertEquals(null, requirements[2].reasonCode)
         assertEquals(ApplicationAuthorizationRequirementKind.ACCESSIBILITY_SERVICE, requirements[2].kind)
-        assertTrue(commands.any { it.startsWith("settings put secure 'enabled_accessibility_services'") })
+        assertEquals(1, commands.count { it.startsWith("sh -c ") })
+        assertFalse(commands.any { it.startsWith("pm grant ") })
+        assertFalse(commands.any { it.startsWith("appops set ") })
+        assertFalse(commands.any { it.startsWith("settings put ") })
         assertTrue(enabledServices.contains("com.existing/com.existing.AccessibilityService"))
         assertTrue(enabledServices.contains(service))
     }
@@ -2798,7 +3480,9 @@ class DeviceActionsTest {
                     after = AuthorizationValueState.ALLOWED,
                 )
 
-                is AuthorizationAction.EnsureRuntimePermissionGranted -> AuthorizationActionEvidence(
+                is AuthorizationAction.EnsureRuntimePermissionGranted,
+                is AuthorizationAction.EnsureDeclaredRuntimePermissionGranted,
+                -> AuthorizationActionEvidence(
                     componentId = action.componentId,
                     actionId = action.id,
                     before = AuthorizationValueState.DENIED,
@@ -2902,6 +3586,7 @@ class DeviceActionsTest {
         apkSizeBytes = artifact.manifest.apkSizeBytes,
         apkSha256 = artifact.manifest.apkSha256,
         certificateSha256 = artifact.manifest.certificateSha256,
+        declarations = artifact.declarations,
     )
 
     private fun actionLease(gateway: AdbCommandGateway): DeviceActionConnectionLease = object : DeviceActionConnectionLease {

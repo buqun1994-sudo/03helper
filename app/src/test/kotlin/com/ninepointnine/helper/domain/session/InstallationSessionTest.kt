@@ -1,6 +1,7 @@
 package com.ninepointnine.helper.domain.session
 
 import com.ninepointnine.helper.domain.artifact.ArtifactManifest
+import com.ninepointnine.helper.domain.artifact.ArtifactManifestValidator
 import com.ninepointnine.helper.domain.artifact.ArtifactFailure
 import com.ninepointnine.helper.domain.artifact.ArtifactFailurePhase
 import com.ninepointnine.helper.domain.artifact.ArchiveDownloadEvidence
@@ -15,12 +16,16 @@ import com.ninepointnine.helper.domain.artifact.SourceSelectionEvidence
 import com.ninepointnine.helper.domain.artifact.toComponentDescriptor
 import com.ninepointnine.helper.domain.device.AuthorizationAction
 import com.ninepointnine.helper.domain.device.AuthorizationActionEvidence
+import com.ninepointnine.helper.domain.device.ApkDeclarationMetadata
+import com.ninepointnine.helper.domain.device.ApkServiceDeclaration
+import com.ninepointnine.helper.domain.device.AuthorizationPlan
 import com.ninepointnine.helper.domain.device.AuthorizationPlanBuildResult
 import com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
 import com.ninepointnine.helper.domain.device.AuthorizationValueState
 import com.ninepointnine.helper.domain.device.DeviceAvailabilityEvidence
 import com.ninepointnine.helper.domain.device.DeviceCapability
 import com.ninepointnine.helper.domain.device.InstalledArtifactEvidence
+import com.ninepointnine.helper.domain.device.ManagedComponent
 import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationState
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationRequirement
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationRequirementKind
@@ -2691,6 +2696,166 @@ class InstallationSessionTest {
     }
 
     @Test
+    fun `local apk terminal retry starts a clean generation without changing the trusted baseline`() {
+        val trusted = fullManifest("desktop", versionCode = 1)
+        val local = evidenceManifest(
+            componentId = "local-selected",
+            packageName = "com.example.local",
+            required = false,
+        ).copy(
+            localOnly = true,
+            sources = listOf(
+                ArtifactSource(
+                    ArtifactSourceKind.USER_SELECTED_APK,
+                    ArtifactManifestValidator.USER_SELECTED_APK_URL,
+                ),
+            ),
+        )
+        val localVerification = ArtifactVerification(
+            componentId = local.componentId,
+            sourceKind = ArtifactSourceKind.USER_SELECTED_APK,
+            archiveSizeBytes = 0L,
+            archiveSha256 = "",
+            apkSizeBytes = local.apkSizeBytes,
+            apkSha256 = local.apkSha256,
+            packageName = local.packageName,
+            apkVersion = local.apkVersion,
+            certificateSha256 = local.certificateSha256,
+            archiveDeleted = true,
+            userSelected = true,
+        )
+        val session = InstallationSession(
+            initialSnapshot = InstallationSessionSnapshot(
+                state = InstallationSessionState.FAILED,
+                device = confirmedDevice.copy(
+                    androidSdk = 28,
+                    capabilities = setOf(DeviceCapability.ADB_TCP, DeviceCapability.IDENTITY_READ),
+                ),
+                components = listOf(trusted.toComponentDescriptor(), local.toComponentDescriptor()),
+                installationFlow = InstallationFlow.LOCAL_APK_INSTALL,
+                installationBatch = InstallationBatchPlan(
+                    batchId = 41L,
+                    flow = InstallationFlow.LOCAL_APK_INSTALL,
+                    strategy = InstallationStrategy.REINSTALL_SELECTED,
+                    selectedComponentIds = setOf(local.componentId),
+                    reusableComponentIds = emptySet(),
+                    preparationComponentIds = setOf(local.componentId),
+                    resultComponentIds = setOf(local.componentId),
+                ),
+                artifactManifests = listOf(local),
+                artifactCatalogStage = ArtifactCatalogStage.PREPARED,
+                selectedSources = mapOf(local.componentId to ArtifactSourceKind.USER_SELECTED_APK),
+                evidence = SessionEvidence(
+                    artifactsVerified = setOf(local.componentId),
+                    artifactVerifications = mapOf(local.componentId to localVerification),
+                    installed = setOf(local.componentId),
+                ),
+                failure = SessionFailure(
+                    category = FailureCategory.CONFIGURATION,
+                    retryable = true,
+                    reasonCode = "authorization_failed",
+                ),
+                maintenance = MaintenanceSnapshot(
+                    routeAction = MaintenanceActionId.INSTALL_LOCAL_APPLICATION,
+                    lastAction = MaintenanceActionRecord(
+                        actionId = MaintenanceActionId.INSTALL_LOCAL_APPLICATION,
+                        status = MaintenanceActionStatus.FAILED,
+                        reasonCode = "authorization_failed",
+                        retryable = true,
+                    ),
+                    availableComponents = listOf(trusted.toComponentDescriptor()),
+                    availableManifests = listOf(trusted),
+                    installedManifests = listOf(trusted),
+                ),
+                sessionId = 41L,
+            ),
+        )
+
+        val before = session.currentSnapshot()
+        session.dispatch(InstallationSessionCommand.StartLocalApkInstallation("content://phone/new.apk"))
+        val retried = session.currentSnapshot()
+
+        assertNotEquals(before.sessionId, retried.sessionId)
+        assertEquals(InstallationSessionState.MAINTENANCE, retried.state)
+        assertEquals(MaintenanceActionId.INSTALL_LOCAL_APPLICATION, retried.maintenance.activeAction)
+        assertEquals(MaintenanceActionStatus.RUNNING, retried.maintenance.lastAction?.status)
+        assertEquals(listOf(trusted), retried.maintenance.installedManifests)
+        assertEquals(listOf(trusted), retried.maintenance.availableManifests)
+        assertEquals(listOf(trusted.toComponentDescriptor()), retried.components)
+        assertTrue(retried.artifactManifests.isEmpty())
+        assertTrue(retried.evidence.artifactVerifications.isEmpty())
+        assertTrue(retried.evidence.installed.isEmpty())
+        assertEquals(null, retried.installationBatch)
+        assertEquals(null, retried.installationBatchReceipt)
+        assertEquals(null, retried.failure)
+    }
+
+    @Test
+    fun `leaving a failed local apk result restores maintenance without persisting the local manifest`() {
+        val trusted = fullManifest("desktop", versionCode = 1)
+        val local = evidenceManifest(
+            componentId = "local-selected",
+            packageName = "com.example.local",
+            required = false,
+        ).copy(
+            localOnly = true,
+            sources = listOf(
+                ArtifactSource(
+                    ArtifactSourceKind.USER_SELECTED_APK,
+                    ArtifactManifestValidator.USER_SELECTED_APK_URL,
+                ),
+            ),
+        )
+        val session = InstallationSession(
+            initialSnapshot = InstallationSessionSnapshot(
+                state = InstallationSessionState.FAILED,
+                device = confirmedDevice,
+                components = listOf(trusted.toComponentDescriptor(), local.toComponentDescriptor()),
+                installationFlow = InstallationFlow.LOCAL_APK_INSTALL,
+                installationBatch = InstallationBatchPlan(
+                    batchId = 7L,
+                    flow = InstallationFlow.LOCAL_APK_INSTALL,
+                    strategy = InstallationStrategy.REINSTALL_SELECTED,
+                    selectedComponentIds = setOf(local.componentId),
+                    reusableComponentIds = emptySet(),
+                    preparationComponentIds = setOf(local.componentId),
+                    resultComponentIds = setOf(local.componentId),
+                ),
+                artifactManifests = listOf(local),
+                failure = SessionFailure(FailureCategory.INSTALLATION, retryable = true, reasonCode = "install_failed"),
+                maintenance = MaintenanceSnapshot(
+                    routeAction = MaintenanceActionId.INSTALL_LOCAL_APPLICATION,
+                    availableComponents = listOf(trusted.toComponentDescriptor()),
+                    availableManifests = listOf(trusted),
+                    installedManifests = listOf(trusted),
+                    initialInstallationSkipped = true,
+                ),
+            ),
+        )
+
+        session.dispatch(InstallationSessionCommand.EnterMaintenance)
+
+        val restored = session.currentSnapshot()
+        assertEquals(InstallationSessionState.MAINTENANCE, restored.state)
+        assertEquals(listOf(trusted.toComponentDescriptor()), restored.components)
+        assertEquals(listOf(trusted), restored.maintenance.installedManifests)
+        assertEquals(listOf(trusted), restored.maintenance.availableManifests)
+        assertTrue(restored.maintenance.initialInstallationSkipped)
+        assertTrue(restored.artifactManifests.isEmpty())
+        assertEquals(null, restored.maintenance.routeAction)
+    }
+
+    @Test
+    fun `cancelling local apk selection leaves maintenance state unchanged`() {
+        val session = maintenanceSession()
+        val before = session.currentSnapshot()
+
+        session.dispatch(InstallationSessionCommand.CancelLocalApkSelection)
+
+        assertEquals(before, session.currentSnapshot())
+    }
+
+    @Test
     fun `update candidate is retained separately from the installed manifest`() {
         val installed = fullManifest("desktop", versionCode = 1)
         val available = fullManifest("desktop", versionCode = 2)
@@ -3035,12 +3200,7 @@ class InstallationSessionTest {
                 evidence = SessionEvidence(artifactsVerified = setOf(desktop.componentId)),
             ),
         )
-        val desktopPlan = (
-            AuthorizationPlanFactory.createForManifests(
-                listOf(desktop),
-                requireDesktop = false,
-            ) as AuthorizationPlanBuildResult.Ready
-            ).plan
+        val desktopPlan = checkNotNull(authorizationPlanFor(listOf(desktop)))
         val receipt = InstallationBatchReceipt(
             batchId = plan.batchId,
             components = listOf(
@@ -3077,6 +3237,7 @@ class InstallationSessionTest {
                     ),
                 ),
             ),
+            authorizationPlan = desktopPlan,
         )
 
         session.dispatchEvent(InstallationSessionEvent.InstallationBatchCompleted(receipt))
@@ -3303,10 +3464,7 @@ class InstallationSessionTest {
                 evidence = SessionEvidence(artifactsVerified = setOf("desktop", "notes")),
             ),
         )
-        val desktopPlan = (
-            AuthorizationPlanFactory.createForManifests(listOf(desktop), requireDesktop = false)
-                as AuthorizationPlanBuildResult.Ready
-            ).plan
+        val desktopPlan = checkNotNull(authorizationPlanFor(listOf(desktop)))
         val receipt = InstallationBatchReceipt(
             batchId = plan.batchId,
             components = listOf(
@@ -3343,6 +3501,7 @@ class InstallationSessionTest {
                     ),
                 ),
             ),
+            authorizationPlan = desktopPlan,
         )
 
         session.dispatchEvent(InstallationSessionEvent.InstallationBatchCompleted(receipt))
@@ -3379,6 +3538,27 @@ class InstallationSessionTest {
         val snapshot = fixture.session.currentSnapshot()
         assertEquals(InstallationSessionState.FAILED, snapshot.state)
         assertEquals("installation_batch_receipt_installation_package_mismatch", snapshot.failure?.reasonCode)
+        assertEquals(null, snapshot.installationBatchReceipt)
+    }
+
+    @Test
+    fun `receipt rejects an authorization plan whose action whitelist was altered`() {
+        val fileManager = fullManifest("file-manager", versionCode = 1)
+        val fixture = maintenanceReceiptFixture(fileManager)
+        val valid = successfulMaintenanceReceipt(fixture)
+        val plan = checkNotNull(valid.authorizationPlan)
+        val forged = valid.copy(
+            authorizationPlan = plan.copy(actions = plan.actions.dropLast(1)),
+        )
+
+        fixture.session.dispatchEvent(InstallationSessionEvent.InstallationBatchCompleted(forged))
+
+        val snapshot = fixture.session.currentSnapshot()
+        assertEquals(InstallationSessionState.FAILED, snapshot.state)
+        assertEquals(
+            "installation_batch_receipt_authorization_plan_invalid",
+            snapshot.failure?.reasonCode,
+        )
         assertEquals(null, snapshot.installationBatchReceipt)
     }
 
@@ -3557,11 +3737,10 @@ class InstallationSessionTest {
         val selectedManifests = batch.selectedComponentIds.map { componentId ->
             checkNotNull(manifests[componentId])
         }
-        val authorizationPlan = (
-            AuthorizationPlanFactory.createForManifests(selectedManifests, requireDesktop = false)
-                as AuthorizationPlanBuildResult.Ready
-            ).plan
-        val authorizationEvidence = validAuthorizationEvidence(authorizationPlan)
+        val authorizationPlan = authorizationPlanFor(
+            selectedManifests.filterNot { it.componentId in batch.reusableComponentIds },
+        )
+        val authorizationEvidence = authorizationPlan?.let(::validAuthorizationEvidence).orEmpty()
         val orderedIds = snapshot.components.map { it.id }.filter { it in batch.selectedComponentIds } +
             (batch.selectedComponentIds - snapshot.components.map { it.id }.toSet())
         return InstallationBatchReceipt(
@@ -3608,17 +3787,110 @@ class InstallationSessionTest {
                     )
                 }
             },
+            authorizationPlan = authorizationPlan,
         )
     }
 
     private fun InstallationBatchReceipt.mapComponent(
         componentId: String,
         transform: (InstallationComponentReceipt) -> InstallationComponentReceipt,
-    ): InstallationBatchReceipt = copy(
-        components = components.map { component ->
+    ): InstallationBatchReceipt {
+        val updatedComponents = components.map { component ->
             if (component.componentId == componentId) transform(component) else component
-        },
-    )
+        }
+        val retainedPlanIds = updatedComponents
+            .filter { component ->
+                component.installation.status == InstallationStageReceiptStatus.VERIFIED ||
+                    component.authorization.evidence.isNotEmpty()
+            }
+            .mapTo(linkedSetOf()) { it.componentId }
+        val retainedPlan = authorizationPlan?.let { plan ->
+            val retainedComponents = plan.components.filter { it.componentId in retainedPlanIds }
+            if (retainedComponents.isEmpty()) {
+                null
+            } else {
+                plan.copy(
+                    components = retainedComponents,
+                    actions = plan.actions.filter { it.componentId in retainedPlanIds },
+                    runtimeServiceOverrides = plan.runtimeServiceOverrides.filterKeys { it in retainedPlanIds },
+                    declarationsByComponent = plan.declarationsByComponent.filterKeys { it in retainedPlanIds },
+                )
+            }
+        }
+        return copy(components = updatedComponents, authorizationPlan = retainedPlan)
+    }
+
+    private fun authorizationPlanFor(manifests: List<ArtifactManifest>): AuthorizationPlan? {
+        if (manifests.isEmpty()) return null
+        val components = manifests.map { manifest ->
+            ManagedComponent(
+                componentId = manifest.componentId,
+                packageName = manifest.packageName,
+                setup = manifest.deviceSetup,
+                order = manifest.sortOrder,
+            )
+        }
+        val declarations = manifests.associate { manifest ->
+            manifest.componentId to authorizationDeclarations(manifest)
+        }
+        return (
+            AuthorizationPlanFactory.createForComponents(
+                components = components,
+                requireDesktop = false,
+                declarationsByComponent = declarations,
+            ) as AuthorizationPlanBuildResult.Ready
+            ).plan
+    }
+
+    private fun authorizationDeclarations(manifest: ArtifactManifest): ApkDeclarationMetadata {
+        val packageName = manifest.packageName
+        val runtimeNamespace = packageName
+            .removeSuffix(".test")
+            .removeSuffix(".staging")
+            .removeSuffix(".release")
+        return when (manifest.componentId) {
+            AuthorizationPlanFactory.DESKTOP_COMPONENT_ID -> ApkDeclarationMetadata(
+                requestedPermissions = setOf(
+                    "android.permission.SYSTEM_ALERT_WINDOW",
+                    "android.permission.REQUEST_INSTALL_PACKAGES",
+                ),
+                services = setOf(
+                    ApkServiceDeclaration(
+                        "$packageName/$runtimeNamespace.debug.NavigationDemoAccessibilityService",
+                        "android.permission.BIND_ACCESSIBILITY_SERVICE",
+                    ),
+                ),
+            )
+
+            AuthorizationPlanFactory.LYRICS_COMPONENT_ID -> ApkDeclarationMetadata(
+                requestedPermissions = setOf("android.permission.SYSTEM_ALERT_WINDOW"),
+                services = setOf(
+                    ApkServiceDeclaration(
+                        "$packageName/$runtimeNamespace.MediaListenerService",
+                        "android.permission.BIND_NOTIFICATION_LISTENER_SERVICE",
+                    ),
+                    ApkServiceDeclaration(
+                        "$packageName/$runtimeNamespace.IcarDockAccessibilityService",
+                        "android.permission.BIND_ACCESSIBILITY_SERVICE",
+                    ),
+                ),
+            )
+
+            AuthorizationPlanFactory.FILE_MANAGER_COMPONENT_ID -> ApkDeclarationMetadata(
+                requestedPermissions = setOf(
+                    "android.permission.READ_EXTERNAL_STORAGE",
+                    "android.permission.WRITE_EXTERNAL_STORAGE",
+                    "android.permission.REQUEST_INSTALL_PACKAGES",
+                ),
+                runtimeGrantPermissions = setOf(
+                    "android.permission.READ_EXTERNAL_STORAGE",
+                    "android.permission.WRITE_EXTERNAL_STORAGE",
+                ),
+            )
+
+            else -> ApkDeclarationMetadata()
+        }
+    }
 
     private fun installedEvidence(manifest: ArtifactManifest): InstalledArtifactEvidence =
         InstalledArtifactEvidence(
@@ -3797,7 +4069,9 @@ class InstallationSessionTest {
                 after = AuthorizationValueState.ALLOWED,
             )
 
-            is AuthorizationAction.EnsureRuntimePermissionGranted -> AuthorizationActionEvidence(
+            is AuthorizationAction.EnsureRuntimePermissionGranted,
+            is AuthorizationAction.EnsureDeclaredRuntimePermissionGranted,
+            -> AuthorizationActionEvidence(
                 componentId = action.componentId,
                 actionId = action.id,
                 before = AuthorizationValueState.DENIED,

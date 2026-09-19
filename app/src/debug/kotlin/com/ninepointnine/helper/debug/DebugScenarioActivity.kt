@@ -110,6 +110,7 @@ private fun DebugScenarioRoot(scenario: String) {
         snapshot = snapshot,
         onIntent = { intent ->
             val command = intent.toInstallationSessionCommand()
+            command ?: return@InstallApp
             session.dispatch(command)
             when (command) {
                 is InstallationSessionCommand.MaintenanceAction -> {
@@ -596,7 +597,9 @@ private class FakeSessionDriver(
             after = AuthorizationValueState.ALLOWED,
         )
 
-        is AuthorizationAction.EnsureRuntimePermissionGranted -> AuthorizationActionEvidence(
+        is AuthorizationAction.EnsureRuntimePermissionGranted,
+        is AuthorizationAction.EnsureDeclaredRuntimePermissionGranted,
+        -> AuthorizationActionEvidence(
             componentId = action.componentId,
             actionId = action.id,
             before = AuthorizationValueState.DENIED,

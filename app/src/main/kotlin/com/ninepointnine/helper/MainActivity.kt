@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.net.Uri
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import androidx.activity.ComponentActivity
@@ -26,6 +27,14 @@ class MainActivity : ComponentActivity() {
     private val installerRuntime: InstallerRuntime
         get() = (application as InstallerApplication).installerRuntime
     private var storagePermissionPrompted = false
+    private val localApkLauncher = registerForActivityResult(
+        ActivityResultContracts.OpenDocument(),
+    ) { uri: Uri? ->
+        installerRuntime.dispatch(
+            uri?.let { InstallationSessionCommand.StartLocalApkInstallation(it.toString()) }
+                ?: InstallationSessionCommand.CancelLocalApkSelection,
+        )
+    }
     private val storagePermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions(),
     ) {
@@ -51,7 +60,15 @@ class MainActivity : ComponentActivity() {
         )
         webViewMount = webViewLayer
         webViewMountRegistry.register(webViewLayer)
-        composeView.setContent { InstallerRoot(installerRuntime) }
+        composeView.setContent {
+            InstallerRoot(
+                runtime = installerRuntime,
+                // Some OEM file managers label APKs as application/octet-stream
+                // or omit a MIME type entirely. The preparer remains the sole
+                // APK identity gate, so the picker must not hide valid files.
+                onPickLocalApk = { localApkLauncher.launch(arrayOf("*/*")) },
+            )
+        }
         root.addView(composeView)
         setContentView(root)
     }
@@ -89,17 +106,26 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun InstallerRoot(runtime: InstallerRuntime) {
+private fun InstallerRoot(
+    runtime: InstallerRuntime,
+    onPickLocalApk: () -> Unit,
+) {
     val snapshot by runtime.session.snapshots.collectAsStateWithLifecycle()
     InstallApp(
         snapshot = snapshot,
-        onIntent = { intent -> runtime.dispatch(intent.toInstallationSessionCommand()) },
+        onIntent = { intent ->
+            if (intent == InstallUiIntent.PickLocalApk) {
+                onPickLocalApk()
+            } else {
+                intent.toInstallationSessionCommand()?.let(runtime::dispatch)
+            }
+        },
         apkIconRepository = runtime.apkIconRepository,
     )
 }
 
 /** Application-layer mapping; the domain session never depends on Compose UI types. */
-internal fun InstallUiIntent.toInstallationSessionCommand(): InstallationSessionCommand = when (this) {
+internal fun InstallUiIntent.toInstallationSessionCommand(): InstallationSessionCommand? = when (this) {
     InstallUiIntent.StopDiscovery -> InstallationSessionCommand.StopDiscovery
     InstallUiIntent.CancelConnection -> InstallationSessionCommand.CancelConnection
     InstallUiIntent.RetryDiscovery -> InstallationSessionCommand.StartDiscovery
@@ -129,4 +155,7 @@ internal fun InstallUiIntent.toInstallationSessionCommand(): InstallationSession
     is InstallUiIntent.ToggleMaintenanceInstallationComponent ->
         InstallationSessionCommand.ToggleMaintenanceInstallationComponent(componentId, selected)
     InstallUiIntent.StartMaintenanceInstallation -> InstallationSessionCommand.StartMaintenanceInstallation
+    InstallUiIntent.PickLocalApk -> null
+    is InstallUiIntent.LocalApkSelected -> InstallationSessionCommand.StartLocalApkInstallation(uri)
+    InstallUiIntent.LocalApkSelectionCancelled -> InstallationSessionCommand.CancelLocalApkSelection
 }

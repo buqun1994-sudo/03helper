@@ -17,6 +17,7 @@ class DynamicAuthorizationTest {
         val packageName = "com.example.player"
 
         val requirements = DeclaredApplicationAuthorizationPlanFactory.create(
+            "app-player",
             packageName,
             ApkDeclarationMetadata(
                 requestedPermissions = setOf(
@@ -81,8 +82,9 @@ class DynamicAuthorizationTest {
     }
 
     @Test
-    fun `normal and signature permissions remain visible without generating shell writes`() {
+    fun `normal and signature permissions are omitted from the actionable authorization list`() {
         val requirements = DeclaredApplicationAuthorizationPlanFactory.create(
+            "app-player",
             "com.example.player",
             ApkDeclarationMetadata(
                 requestedPermissions = setOf(
@@ -95,19 +97,9 @@ class DynamicAuthorizationTest {
             ),
         ).associateBy { it.declaration }
 
-        listOf(
-            "android.permission.INTERNET",
-            "android.permission.FOREGROUND_SERVICE",
-            "com.example.signature.CONTROL",
-        ).forEach { permission ->
-            val requirement = requirements.getValue(permission)
-            assertEquals(ApplicationAuthorizationRequirementKind.DECLARED_PERMISSION, requirement.kind)
-            assertEquals(false, requirement.automaticallyActionable)
-            assertEquals(
-                listOf(DeclaredApplicationAuthorizationAction.InspectPermission(permission)),
-                requirement.actions,
-            )
-        }
+        assertTrue("android.permission.INTERNET" !in requirements)
+        assertTrue("android.permission.FOREGROUND_SERVICE" !in requirements)
+        assertTrue("com.example.signature.CONTROL" !in requirements)
         assertEquals(
             listOf(DeclaredApplicationAuthorizationAction.GrantRuntimePermission("android.permission.CAMERA")),
             requirements.getValue("android.permission.CAMERA").actions,
@@ -117,6 +109,7 @@ class DynamicAuthorizationTest {
     @Test
     fun `installed declaration authorization ignores services owned by another package`() {
         val requirements = DeclaredApplicationAuthorizationPlanFactory.create(
+            "app-player",
             "com.example.player",
             ApkDeclarationMetadata(
                 services = setOf(

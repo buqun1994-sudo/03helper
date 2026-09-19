@@ -58,6 +58,11 @@ sealed interface InstallationSessionCommand {
         val selected: Boolean,
     ) : InstallationSessionCommand
     data object StartMaintenanceInstallation : InstallationSessionCommand
+    /** Starts the one-APK local flow after the Android document picker returns. */
+    data class StartLocalApkInstallation(val uri: String) : InstallationSessionCommand
+
+    /** The picker was dismissed without changing the maintenance session. */
+    data object CancelLocalApkSelection : InstallationSessionCommand
 
     /** An event emitted by a discovery or installation adapter. */
     data class AdapterEvent(
@@ -119,6 +124,12 @@ sealed interface InstallationSessionEvent {
         val extractions: List<ApkExtractionEvidence> = emptyList(),
         val verifications: List<ArtifactVerification> = emptyList(),
         val failures: List<ArtifactFailure> = emptyList(),
+    ) : InstallationSessionEvent
+
+    /** Trusted metadata for one user-selected APK after private-copy validation. */
+    data class LocalApkPrepared(
+        val manifest: ArtifactManifest,
+        val verification: ArtifactVerification,
     ) : InstallationSessionEvent
 
     data class CatalogFailed(

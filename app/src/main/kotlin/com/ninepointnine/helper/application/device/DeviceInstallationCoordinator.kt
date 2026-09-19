@@ -387,6 +387,7 @@ class DeviceInstallationCoordinator(
     ): PostInstallationFacts {
         val authorization = linkedMapOf<String, AuthorizationStageReceipt>()
         val availability = linkedMapOf<String, AvailabilityStageReceipt>()
+        var authorizationPlan: AuthorizationPlan? = null
         val preinstalledIds = batchPlan.preinstalledComponentIds
         val installedIds = installation.stages.filterValues {
             it.status == InstallationStageReceiptStatus.VERIFIED
@@ -409,11 +410,21 @@ class DeviceInstallationCoordinator(
         // they are prerequisites, not fresh authorization targets in this batch.
         val freshInstalledIds = installedIds - batchPlan.reusableComponentIds - preinstalledIds
         if (freshInstalledIds.isNotEmpty()) {
-            val freshArtifacts = artifacts.filter { it.manifest.componentId in freshInstalledIds }
+            val freshArtifacts = artifacts
+                .filter { it.manifest.componentId in freshInstalledIds }
+                .map { artifact ->
+                    // Installation identity verification reads the APK actually
+                    // present on the vehicle. Its Manifest is the only declaration
+                    // input for this batch's frozen authorization plan.
+                    artifact.copy(
+                        declarations = installation.evidenceById[artifact.manifest.componentId]
+                            ?.declarations,
+                    )
+                }
             val requireDesktop = freshArtifacts.any {
                 AuthorizationPlanFactory.requiresLaunchVerification(it.manifest.componentId, it.manifest.packageName)
             }
-            val preparation = prepareAuthorizationBatch(freshArtifacts, requireDesktop)
+            val preparation = prepareAuthorizationBatch(gateway, freshArtifacts, requireDesktop)
             authorization.putAll(preparation.rejected)
             preparation.rejected.keys.forEach { componentId ->
                 availability[componentId] = availabilityNotAttempted(
@@ -421,6 +432,7 @@ class DeviceInstallationCoordinator(
                 )
             }
             if (preparation.plan != null && preparation.candidates.isNotEmpty()) {
+                authorizationPlan = preparation.plan
                 preparation.candidates.forEach { artifact ->
                     emitProgress(
                         artifact.manifest.componentId,
@@ -457,66 +469,94 @@ class DeviceInstallationCoordinator(
                 availabilityNotAttempted("availability_not_attempted"),
             )
         }
-        val facts = PostInstallationFacts(authorization, availability)
+        val facts = PostInstallationFacts(authorization, availability, authorizationPlan)
         emitPostInstallationProgress(facts, freshInstalledIds)
         return facts
     }
 
-    private fun prepareAuthorizationBatch(
+    private suspend fun prepareAuthorizationBatch(
+        gateway: AdbCommandGateway,
         artifacts: List<InstallableArtifact>,
         requireDesktop: Boolean,
     ): AuthorizationPreparation {
-        var candidates = artifacts
+        val candidates = mutableListOf<InstallableArtifact>()
+        val declarations = linkedMapOf<String, com.ninepointnine.helper.domain.device.ApkDeclarationMetadata>()
         val rejected = linkedMapOf<String, AuthorizationStageReceipt>()
-        while (candidates.isNotEmpty()) {
-            val plan = when (val build = AuthorizationPlanFactory.createForComponents(
-                candidates.map(::toManagedComponent),
-                requireDesktop = requireDesktop && candidates.any {
-                    AuthorizationPlanFactory.requiresLaunchVerification(it.manifest.componentId, it.manifest.packageName)
-                },
-                declaredServicesByComponent = candidates.mapNotNull { artifact ->
-                    artifact.declarations?.services?.let { services ->
-                        artifact.manifest.componentId to services
-                    }
-                }.toMap(),
-            )) {
-                is AuthorizationPlanBuildResult.Ready -> build.plan
-                is AuthorizationPlanBuildResult.Rejected -> {
-                    candidates.forEach { artifact ->
+        artifacts.forEach { artifact ->
+            val build = try {
+                gateway.buildAuthorizationPlan(
+                    artifacts = listOf(artifact),
+                    requireDesktop = requireDesktop && AuthorizationPlanFactory.requiresLaunchVerification(
+                        artifact.manifest.componentId,
+                        artifact.manifest.packageName,
+                    ),
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                AuthorizationPlanBuildResult.Rejected("authorization_plan_build_failed")
+            }
+            when (build) {
+                is AuthorizationPlanBuildResult.Rejected -> rejected[artifact.manifest.componentId] =
+                    AuthorizationStageReceipt(
+                        status = AuthorizationStageReceiptStatus.FAILED,
+                        reasonCode = build.reasonCode,
+                        retryable = build.reasonCode in TARGET_AUTHORIZATION_RETRYABLE_REASONS,
+                    )
+
+                is AuthorizationPlanBuildResult.Ready -> {
+                    val failure = AuthorizationDeclarationValidator.validateDeclarations(
+                        build.plan,
+                        build.plan.declarationsByComponent,
+                    )
+                    if (failure == null) {
+                        candidates += artifact
+                        declarations.putAll(build.plan.declarationsByComponent)
+                    } else {
                         rejected[artifact.manifest.componentId] = AuthorizationStageReceipt(
                             status = AuthorizationStageReceiptStatus.FAILED,
-                            reasonCode = build.reasonCode,
-                            retryable = false,
+                            reasonCode = failure.reasonCode,
+                            retryable = failure.retryable,
                         )
                     }
-                    return AuthorizationPreparation(emptyList(), null, rejected)
                 }
             }
-            val declarationFailure = AuthorizationDeclarationValidator.validate(plan, candidates)
-                ?: return AuthorizationPreparation(candidates, plan, rejected)
-            val failedId = declarationFailure.componentId
-            val componentFailure = failedId != null && candidates.any { it.manifest.componentId == failedId }
-            if (componentFailure) {
-                rejected[checkNotNull(failedId)] = AuthorizationStageReceipt(
-                    status = AuthorizationStageReceiptStatus.FAILED,
-                    reasonCode = declarationFailure.reasonCode,
-                    retryable = declarationFailure.retryable,
-                )
-                candidates = candidates.filterNot { it.manifest.componentId == failedId }
-                continue
-            }
+        }
+        if (candidates.isEmpty()) return AuthorizationPreparation(emptyList(), null, rejected)
 
+        val plan = when (val build = AuthorizationPlanFactory.createForComponents(
+            components = candidates.map(::toManagedComponent),
+            requireDesktop = requireDesktop && candidates.any {
+                AuthorizationPlanFactory.requiresLaunchVerification(
+                    it.manifest.componentId,
+                    it.manifest.packageName,
+                )
+            },
+            declarationsByComponent = declarations,
+        )) {
+            is AuthorizationPlanBuildResult.Ready -> build.plan
+            is AuthorizationPlanBuildResult.Rejected -> {
+                candidates.forEach { artifact ->
+                    rejected[artifact.manifest.componentId] = AuthorizationStageReceipt(
+                        status = AuthorizationStageReceiptStatus.FAILED,
+                        reasonCode = build.reasonCode,
+                        retryable = false,
+                    )
+                }
+                return AuthorizationPreparation(emptyList(), null, rejected)
+            }
+        }
+        AuthorizationDeclarationValidator.validateDeclarations(plan, declarations)?.let { failure ->
             candidates.forEach { artifact ->
-                val componentId = artifact.manifest.componentId
-                rejected[componentId] = AuthorizationStageReceipt(
+                rejected[artifact.manifest.componentId] = AuthorizationStageReceipt(
                     status = AuthorizationStageReceiptStatus.FAILED,
-                    reasonCode = declarationFailure.reasonCode,
-                    retryable = declarationFailure.retryable,
+                    reasonCode = failure.reasonCode,
+                    retryable = failure.retryable,
                 )
             }
             return AuthorizationPreparation(emptyList(), null, rejected)
         }
-        return AuthorizationPreparation(emptyList(), null, rejected)
+        return AuthorizationPreparation(candidates, plan, rejected)
     }
 
     private suspend fun executeAuthorizationBatch(
@@ -524,7 +564,17 @@ class DeviceInstallationCoordinator(
         candidates: List<InstallableArtifact>,
         plan: AuthorizationPlan,
         launchDesktop: Boolean,
-    ): DeviceShortcutResult = try {
+    ): DeviceShortcutResult = if (plan.actions.isEmpty() && !launchDesktop) {
+        // An empty, resolved plan means the application declared no supported
+        // automatic authorization work. It is a successful no-op, not missing
+        // metadata, and must not issue an authorization shell command.
+        DeviceShortcutResult.Completed(
+            configuredComponentIds = candidates.mapTo(linkedSetOf()) { it.manifest.componentId },
+            skippedComponentIds = emptySet(),
+            authorizationEvidence = emptyList(),
+            availabilityEvidence = emptyList(),
+        )
+    } else try {
         gateway.runShortcut(
             shortcut = if (launchDesktop) {
                 DeviceShortcut.CONFIGURE_ALL_INSTALLED_APPS_AND_START_DESKTOP
@@ -721,6 +771,7 @@ class DeviceInstallationCoordinator(
             )
         },
         warnings = installation.warnings,
+        authorizationPlan = postInstallation.authorizationPlan,
     )
 
     private fun fallbackInstallationFacts(
@@ -881,6 +932,7 @@ class DeviceInstallationCoordinator(
             availability = batchPlan.selectedComponentIds.associateWith { componentId ->
                 facts.availability[componentId] ?: checkNotNull(fallback.availability[componentId])
             },
+            authorizationPlan = facts.authorizationPlan,
         )
     }
 
@@ -1028,6 +1080,7 @@ class DeviceInstallationCoordinator(
     private data class PostInstallationFacts(
         val authorization: Map<String, AuthorizationStageReceipt>,
         val availability: Map<String, AvailabilityStageReceipt>,
+        val authorizationPlan: AuthorizationPlan? = null,
     )
 
     private data class AuthorizationPreparation(
@@ -1039,6 +1092,11 @@ class DeviceInstallationCoordinator(
     private companion object {
         const val INSTALLATION_BATCH_EXECUTION_FAILED = "installation_batch_execution_failed"
         const val AUTHORIZATION_BATCH_EXECUTION_FAILED = "authorization_batch_execution_failed"
+        val TARGET_AUTHORIZATION_RETRYABLE_REASONS = setOf(
+            "adb_connection_closed",
+            "authorization_capability_metadata_missing",
+            "authorization_plan_build_failed",
+        )
         val AUTHORIZATION_SATISFIED = setOf(
             AuthorizationStageReceiptStatus.VERIFIED,
             AuthorizationStageReceiptStatus.NOT_REQUIRED,

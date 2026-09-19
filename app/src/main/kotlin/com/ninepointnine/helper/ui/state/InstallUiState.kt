@@ -302,4 +302,7 @@ sealed interface InstallUiIntent {
         val selected: Boolean,
     ) : InstallUiIntent
     data object StartMaintenanceInstallation : InstallUiIntent
+    data object PickLocalApk : InstallUiIntent
+    data class LocalApkSelected(val uri: String) : InstallUiIntent
+    data object LocalApkSelectionCancelled : InstallUiIntent
 }

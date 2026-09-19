@@ -1,6 +1,7 @@
 package com.ninepointnine.helper.data.device
 
 import com.ninepointnine.helper.data.artifact.ApkMetadataReader
+import com.ninepointnine.helper.data.artifact.MAX_APK_MANIFEST_BYTES
 import com.ninepointnine.helper.data.artifact.sha256
 import com.ninepointnine.helper.domain.artifact.ArtifactManifestValidator
 import com.ninepointnine.helper.domain.artifact.ManifestValidation
@@ -29,7 +30,6 @@ import com.ninepointnine.helper.domain.device.InstalledApplicationIconResult
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationRequirement
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationResult
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationResultValue
-import com.ninepointnine.helper.domain.device.DeclaredApplicationAuthorizationAction
 import com.ninepointnine.helper.domain.device.DeclaredApplicationAuthorizationPlanFactory
 import com.ninepointnine.helper.domain.device.DeclaredApplicationAuthorizationRequirement
 import com.ninepointnine.helper.domain.device.ManagedComponent
@@ -48,13 +48,13 @@ import dadb.AdbShellResponse
 import dadb.Dadb
 import java.io.File
 import java.io.IOException
+import java.security.MessageDigest
 import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
-import java.util.Locale
 import java.util.Base64
-import java.security.MessageDigest
+import java.util.Locale
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -76,6 +76,11 @@ internal class DadbCommandGateway(
 ) : AdbCommandGateway, MaintenanceCommandGateway {
     /** Cached per lease so older Android package-manager builds are probed once. */
     private var versionedPackageInventorySupported: Boolean? = null
+    /** Target-owned dangerous permission registry; one read per retained connection lease. */
+    private var targetDangerousPermissions: Set<String>? = null
+    private var targetDangerousPermissionsResolved: Boolean = false
+    /** Raw Manifest declarations keyed by the exact installed base.apk path. */
+    private val installedManifestDeclarations = linkedMapOf<String, CachedInstalledManifestDeclarations>()
 
     override suspend fun installBatch(
         artifacts: List<InstallableArtifact>,
@@ -249,6 +254,7 @@ internal class DadbCommandGateway(
             }
             writeConfirmedComponentIds += artifact.manifest.componentId
             operationConfirmedComponentIds += artifact.manifest.componentId
+            installedManifestDeclarations.remove(artifact.manifest.packageName)
         }
 
         // Read back every installed APK only after the entire install batch is
@@ -291,6 +297,37 @@ internal class DadbCommandGateway(
         )
     }
 
+    override suspend fun buildAuthorizationPlan(
+        artifacts: List<InstallableArtifact>,
+        requireDesktop: Boolean,
+    ): AuthorizationPlanBuildResult = withLease(
+        whenClosed = AuthorizationPlanBuildResult.Rejected("adb_connection_closed"),
+    ) {
+        if (artifacts.isEmpty() || artifacts.map { it.manifest.componentId }.toSet().size != artifacts.size) {
+            return@withLease AuthorizationPlanBuildResult.Rejected("authorization_artifacts_missing")
+        }
+        val declarations = linkedMapOf<String, com.ninepointnine.helper.domain.device.ApkDeclarationMetadata>()
+        artifacts.forEach { artifact ->
+            val resolved = resolveVerifiedApkAuthorizationDeclarations(artifact.declarations)
+                ?: return@withLease AuthorizationPlanBuildResult.Rejected(
+                    "authorization_capability_metadata_missing",
+                )
+            declarations[artifact.manifest.componentId] = resolved
+        }
+        AuthorizationPlanFactory.createForComponents(
+            components = artifacts.map { artifact ->
+                ManagedComponent(
+                    componentId = artifact.manifest.componentId,
+                    packageName = artifact.manifest.packageName,
+                    setup = artifact.manifest.deviceSetup,
+                    order = artifact.manifest.sortOrder,
+                )
+            },
+            requireDesktop = requireDesktop,
+            declarationsByComponent = declarations,
+        )
+    }
+
     override suspend fun runShortcut(
         shortcut: DeviceShortcut,
         selectedComponentIds: Set<String>,
@@ -307,13 +344,22 @@ internal class DadbCommandGateway(
             failure = DeviceActionFailure("adb_connection_closed", retryable = true),
         ),
     ) {
+        runShortcutWithPlanLocked(shortcut, selectedComponentIds, authorizationPlan)
+    }
+
+    /** Executes a validated plan while the caller owns the connection lease. */
+    private suspend fun runShortcutWithPlanLocked(
+        shortcut: DeviceShortcut,
+        selectedComponentIds: Set<String>,
+        authorizationPlan: com.ninepointnine.helper.domain.device.AuthorizationPlan,
+    ): DeviceShortcutResult {
         val launchDesktop = shortcut == DeviceShortcut.CONFIGURE_ALL_INSTALLED_APPS_AND_START_DESKTOP
         if (shortcut !in setOf(
                 DeviceShortcut.CONFIGURE_ALL_INSTALLED_APPS_AND_START_DESKTOP,
                 DeviceShortcut.CONFIGURE_SELECTED_APPS,
             )
         ) {
-            return@withLease DeviceShortcutResult.Failed(
+            return DeviceShortcutResult.Failed(
                 stage = DeviceShortcutFailureStage.AUTHORIZATION,
                 failure = DeviceActionFailure("device_shortcut_unavailable", retryable = false),
             )
@@ -321,14 +367,14 @@ internal class DadbCommandGateway(
         if (authorizationPlan.components.map { it.componentId }.toSet() != selectedComponentIds ||
             !AuthorizationPlanFactory.validate(authorizationPlan)
         ) {
-            return@withLease DeviceShortcutResult.Failed(
+            return DeviceShortcutResult.Failed(
                 stage = DeviceShortcutFailureStage.AUTHORIZATION,
                 failure = DeviceActionFailure("shortcut_component_selection_invalid", retryable = false),
             )
         }
         val capacityFailure = probeAuthorizationCapacity(authorizationPlan)
         if (capacityFailure != null) {
-            return@withLease DeviceShortcutResult.Failed(
+            return DeviceShortcutResult.Failed(
                 stage = DeviceShortcutFailureStage.AUTHORIZATION,
                 failure = capacityFailure,
             )
@@ -405,7 +451,7 @@ internal class DadbCommandGateway(
                     "shortcut_result failed stage=${result.stage} reason=${result.failure.reasonCode}"
             },
         )
-        result
+        return result
     }
 
     private suspend fun verifyDesktopRuntime(
@@ -569,7 +615,7 @@ internal class DadbCommandGateway(
         }
         val plan = when (val result = AuthorizationPlanFactory.createForComponents(
             components,
-            declaredServicesByComponent = resolvedDeclarations.mapValues { it.value.services },
+            declarationsByComponent = resolvedDeclarations,
         )) {
             is AuthorizationPlanBuildResult.Ready -> result.plan
             is AuthorizationPlanBuildResult.Rejected -> return@withLease MaintenanceDeviceResult.Failed(
@@ -724,19 +770,6 @@ internal class DadbCommandGateway(
             DeviceActionFailure("adb_connection_closed", retryable = true),
         ),
     ) {
-        if (!PACKAGE_NAME_PATTERN.matches(component.packageName)) {
-            return@withLease ApplicationAuthorizationResult.Failed(
-                DeviceActionFailure("maintenance_component_identity_invalid", component.componentId, retryable = false),
-            )
-        }
-        when (val installed = inspectInstalledPackage(component.componentId, component.packageName)) {
-            is PackageInspection.Failed -> return@withLease ApplicationAuthorizationResult.Failed(installed.failure)
-            is PackageInspection.Completed -> if (!installed.installed) {
-                return@withLease ApplicationAuthorizationResult.Failed(
-                    DeviceActionFailure("maintenance_component_not_installed", component.componentId, retryable = false),
-                )
-            }
-        }
         authorizeApplicationLocked(component, write = true, onProgress = onProgress)
     }
 
@@ -750,7 +783,7 @@ internal class DadbCommandGateway(
         authorizeApplicationLocked(component, write = false)
     }
 
-    private fun authorizeApplicationLocked(
+    private suspend fun authorizeApplicationLocked(
         component: ManagedComponent,
         write: Boolean,
         onProgress: (ApplicationAuthorizationResultValue) -> Unit = {},
@@ -768,22 +801,35 @@ internal class DadbCommandGateway(
                 )
             }
         }
-        val declarations = readInstalledApkDeclarations(component, component.packageName)
+        val declarations = resolveInstalledApkAuthorizationDeclarations(component.packageName)
             ?: return ApplicationAuthorizationResult.Failed(
                 DeviceActionFailure("authorization_capability_metadata_missing", component.componentId, retryable = true),
             )
         val declaredRequirements = DeclaredApplicationAuthorizationPlanFactory.create(
+            component.componentId,
             component.packageName,
             declarations,
         )
-        val initialPermissionDump = readPackageDetails(component.packageName)
-        val initialRequirements = declaredRequirements.map { requirement ->
-            inspectDeclaredAuthorizationRequirement(
-                packageName = component.packageName,
-                requirement = requirement,
-                packageDetails = initialPermissionDump,
+        val plan = when (val build = AuthorizationPlanFactory.createForComponents(
+            components = listOf(component),
+            requireDesktop = false,
+            declarationsByComponent = mapOf(component.componentId to declarations),
+        )) {
+            is AuthorizationPlanBuildResult.Ready -> build.plan
+            is AuthorizationPlanBuildResult.Rejected -> return ApplicationAuthorizationResult.Failed(
+                DeviceActionFailure(build.reasonCode, component.componentId, retryable = false),
             )
         }
+        AuthorizationDeclarationValidator.validateDeclarations(
+            plan,
+            mapOf(component.componentId to declarations),
+        )?.let { return ApplicationAuthorizationResult.Failed(it) }
+
+        val initialRequirements = projectAuthorizationRequirements(
+            declaredRequirements = declaredRequirements,
+            readings = readAuthorizationActions(plan.actions),
+            attempted = false,
+        )
         if (!write) {
             return ApplicationAuthorizationResult.Completed(
                 ApplicationAuthorizationResultValue(
@@ -793,63 +839,69 @@ internal class DadbCommandGateway(
                 ),
             )
         }
-        val requirements = initialRequirements.toMutableList()
-        declaredRequirements.forEachIndexed { index, requirement ->
-            requirements[index] = applyDeclaredAuthorizationRequirement(
-                packageName = component.packageName,
-                requirement = requirement,
-                before = initialRequirements[index].grantedBefore,
-            )
-            onProgress(
+        if (plan.actions.isEmpty()) {
+            return ApplicationAuthorizationResult.Completed(
                 ApplicationAuthorizationResultValue(
                     component.componentId,
                     component.packageName,
-                    requirements.toList(),
+                    initialRequirements,
                 ),
             )
         }
-        return ApplicationAuthorizationResult.Completed(
-            ApplicationAuthorizationResultValue(component.componentId, component.packageName, requirements),
+        val execution = runShortcutWithPlanLocked(
+            shortcut = DeviceShortcut.CONFIGURE_SELECTED_APPS,
+            selectedComponentIds = setOf(component.componentId),
+            authorizationPlan = plan,
         )
+        val executionFailure = (execution as? DeviceShortcutResult.Failed)?.failure
+        val finalRequirements = projectAuthorizationRequirements(
+            declaredRequirements = declaredRequirements,
+            readings = readAuthorizationActions(plan.actions),
+            before = initialRequirements,
+            attempted = true,
+            executionFailure = executionFailure,
+        )
+        val value = ApplicationAuthorizationResultValue(
+            component.componentId,
+            component.packageName,
+            finalRequirements,
+        )
+        onProgress(value)
+        if (executionFailure != null && isNonMaskableAuthorizationFailure(executionFailure.reasonCode)) {
+            return ApplicationAuthorizationResult.Failed(executionFailure)
+        }
+        return ApplicationAuthorizationResult.Completed(value)
     }
 
-    private fun inspectDeclaredAuthorizationRequirement(
-        packageName: String,
-        requirement: DeclaredApplicationAuthorizationRequirement,
-        packageDetails: String?,
-    ): ApplicationAuthorizationRequirement {
-        val probes = requirement.actions.map { action ->
-            readDeclaredAuthorizationAction(packageName, action, packageDetails)
+    private fun projectAuthorizationRequirements(
+        declaredRequirements: List<DeclaredApplicationAuthorizationRequirement>,
+        readings: List<Pair<AuthorizationAction, AuthorizationProbe>>,
+        before: List<ApplicationAuthorizationRequirement>? = null,
+        attempted: Boolean,
+        executionFailure: DeviceActionFailure? = null,
+    ): List<ApplicationAuthorizationRequirement> {
+        val probesByKey = readings.associate { (action, probe) ->
+            AuthorizationPlanFactory.semanticKey(action) to probe
         }
-        val granted = aggregateAuthorizationProbes(probes)
-        return ApplicationAuthorizationRequirement(
-            permission = requirement.declaration,
-            grantedBefore = granted,
-            grantedAfter = granted,
-            reasonCode = authorizationFailureReason(probes),
-            kind = requirement.kind,
-            automaticallyActionable = requirement.automaticallyActionable,
-            authorizationAttempted = false,
-        )
-    }
-
-    private fun applyDeclaredAuthorizationRequirement(
-        packageName: String,
-        requirement: DeclaredApplicationAuthorizationRequirement,
-        before: Boolean?,
-    ): ApplicationAuthorizationRequirement {
-        val probes = requirement.actions.map { action ->
-            applyDeclaredAuthorizationAction(packageName, action)
+        return declaredRequirements.mapIndexed { index, requirement ->
+            val probes = requirement.actionKeys.map { key ->
+                probesByKey[key] ?: AuthorizationProbe(null, "authorization_evidence_invalid")
+            }
+            val granted = aggregateAuthorizationProbes(probes)
+            ApplicationAuthorizationRequirement(
+                permission = requirement.declaration,
+                grantedBefore = before?.getOrNull(index)?.grantedAfter ?: granted,
+                grantedAfter = granted,
+                reasonCode = if (granted == true) {
+                    null
+                } else {
+                    authorizationFailureReason(probes) ?: executionFailure?.reasonCode
+                },
+                kind = requirement.kind,
+                automaticallyActionable = requirement.automaticallyActionable,
+                authorizationAttempted = attempted,
+            )
         }
-        return ApplicationAuthorizationRequirement(
-            permission = requirement.declaration,
-            grantedBefore = before,
-            grantedAfter = aggregateAuthorizationProbes(probes),
-            reasonCode = authorizationFailureReason(probes),
-            kind = requirement.kind,
-            automaticallyActionable = requirement.automaticallyActionable,
-            authorizationAttempted = true,
-        )
     }
 
     private fun authorizationFailureReason(probes: List<AuthorizationProbe>): String? = probes
@@ -868,164 +920,6 @@ internal class DadbCommandGateway(
         probes.all { it.value == true } -> true
         probes.any { it.value == false } -> false
         else -> null
-    }
-
-    private fun applyDeclaredAuthorizationAction(
-        packageName: String,
-        action: DeclaredApplicationAuthorizationAction,
-    ): AuthorizationProbe {
-        val before = readDeclaredAuthorizationAction(packageName, action)
-        if (before.value == true) return before
-        val writeFailure = when (action) {
-            is DeclaredApplicationAuthorizationAction.InspectPermission -> return before
-
-            is DeclaredApplicationAuthorizationAction.GrantRuntimePermission ->
-                "authorization_runtime_permission_write_failed".takeUnless {
-                    isSuccessful(
-                        shell("pm grant ${shellArgument(packageName)} ${shellArgument(action.permission)}"),
-                    )
-                }
-
-            is DeclaredApplicationAuthorizationAction.AllowAppOp ->
-                "authorization_appop_write_failed".takeUnless {
-                    isSuccessful(
-                        shell(
-                            "appops set ${shellArgument(packageName)} " +
-                                "${shellArgument(action.operation.wireName)} allow",
-                        ),
-                    )
-                }
-
-            is DeclaredApplicationAuthorizationAction.EnableSecureFlag ->
-                "authorization_secure_flag_write_failed".takeUnless {
-                    isSuccessful(
-                        shell("settings put secure ${shellArgument(action.setting.wireName)} 1"),
-                    )
-                }
-
-            is DeclaredApplicationAuthorizationAction.AppendSecureComponent ->
-                appendDeclaredSecureComponent(action)
-        }
-        if (writeFailure != null) return AuthorizationProbe(false, writeFailure)
-        return readDeclaredAuthorizationAction(packageName, action).let { after ->
-            if (after.value == false && after.reasonCode == null) {
-                after.copy(reasonCode = "authorization_confirmation_not_satisfied")
-            } else {
-                after
-            }
-        }
-    }
-
-    private fun appendDeclaredSecureComponent(
-        action: DeclaredApplicationAuthorizationAction.AppendSecureComponent,
-    ): String? {
-        val response = shell("settings get secure ${shellArgument(action.setting.wireName)}")
-            ?: return "authorization_component_list_read_failed"
-        if (response.exitCode != 0) return "authorization_component_list_read_failed"
-        val existing = parseAuthorizationComponentList(response.output)
-            ?: return "authorization_component_list_read_failed"
-        if (action.componentName in existing) return null
-        val next = (existing + action.componentName).distinct()
-        if (next.size > MAX_DECLARED_SECURE_LIST_ENTRIES) {
-            return "authorization_capacity_entries_exceeded"
-        }
-        val serialized = next.joinToString(":")
-        if (serialized.toByteArray(Charsets.UTF_8).size > MAX_DECLARED_SECURE_LIST_BYTES) {
-            return "authorization_capacity_bytes_exceeded"
-        }
-        val write = if (action.setting == ManagedSecureComponentList.ENABLED_NOTIFICATION_LISTENERS) {
-            shell("cmd notification allow_listener ${shellArgument(action.componentName)} 0")
-        } else {
-            shell(
-                "settings put secure ${shellArgument(action.setting.wireName)} " +
-                    shellArgument(serialized),
-            )
-        }
-        return "authorization_component_list_write_failed".takeUnless { isSuccessful(write) }
-    }
-
-    private fun readDeclaredAuthorizationAction(
-        packageName: String,
-        action: DeclaredApplicationAuthorizationAction,
-        packageDetails: String? = null,
-    ): AuthorizationProbe = when (action) {
-        is DeclaredApplicationAuthorizationAction.InspectPermission -> {
-            val output = packageDetails ?: readPackageDetails(packageName)
-            val granted = output?.let { parseDeclaredPermission(it, action.permission) }
-            when (granted) {
-                true -> AuthorizationProbe(true, null, AuthorizationValueState.GRANTED)
-                false -> AuthorizationProbe(
-                    false,
-                    "authorization_not_automatically_grantable",
-                    AuthorizationValueState.DENIED,
-                )
-                null -> AuthorizationProbe(null, "authorization_permission_state_unknown")
-            }
-        }
-
-        is DeclaredApplicationAuthorizationAction.GrantRuntimePermission -> {
-            val output = packageDetails ?: readPackageDetails(packageName)
-            val granted = output?.let { parseDeclaredPermission(it, action.permission) }
-            when (granted) {
-                true -> AuthorizationProbe(true, null, AuthorizationValueState.GRANTED)
-                false -> AuthorizationProbe(
-                    false,
-                    "authorization_runtime_permission_not_granted",
-                    AuthorizationValueState.DENIED,
-                )
-                null -> AuthorizationProbe(null, "authorization_runtime_permission_read_failed")
-            }
-        }
-
-        is DeclaredApplicationAuthorizationAction.AllowAppOp -> {
-            val response = shell(
-                "appops get ${shellArgument(packageName)} ${shellArgument(action.operation.wireName)}",
-            )
-            when (
-                val state = response?.takeIf { it.exitCode == 0 }
-                    ?.let { AppOpsResponseParser.parse(it.output, action.operation.wireName) }
-            ) {
-                AuthorizationValueState.ALLOWED -> AuthorizationProbe(true, null, state)
-                null -> AuthorizationProbe(null, "authorization_appop_read_failed")
-                else -> AuthorizationProbe(false, "authorization_appop_not_allowed", state)
-            }
-        }
-
-        is DeclaredApplicationAuthorizationAction.EnableSecureFlag -> {
-            val response = shell("settings get secure ${shellArgument(action.setting.wireName)}")
-            when {
-                response == null || response.exitCode != 0 ->
-                    AuthorizationProbe(null, "authorization_secure_setting_read_failed")
-                response.output.trim() == "1" -> AuthorizationProbe(true, null, AuthorizationValueState.ENABLED)
-                response.output.trim() == "0" -> AuthorizationProbe(
-                    false,
-                    "authorization_secure_setting_disabled",
-                    AuthorizationValueState.DISABLED,
-                )
-                else -> AuthorizationProbe(null, "authorization_secure_setting_read_failed")
-            }
-        }
-
-        is DeclaredApplicationAuthorizationAction.AppendSecureComponent -> {
-            val response = shell("settings get secure ${shellArgument(action.setting.wireName)}")
-            val entries = response?.takeIf { it.exitCode == 0 }
-                ?.let { parseAuthorizationComponentList(it.output) }
-            when {
-                entries == null -> AuthorizationProbe(null, "authorization_component_list_read_failed")
-                action.componentName in entries -> AuthorizationProbe(
-                    true,
-                    null,
-                    AuthorizationValueState.COMPONENT_PRESENT,
-                    entries.size,
-                )
-                else -> AuthorizationProbe(
-                    false,
-                    "authorization_component_not_present",
-                    AuthorizationValueState.COMPONENT_ABSENT,
-                    entries.size,
-                )
-            }
-        }
     }
 
     override suspend fun inspectComponentAuthorization(
@@ -1128,7 +1022,7 @@ internal class DadbCommandGateway(
         return entries
     }
 
-    private fun inspectComponentAuthorizationLocked(
+    private suspend fun inspectComponentAuthorizationLocked(
         components: List<ManagedComponent>,
         installedApplications: List<ManagedApplicationProbe>? = null,
         declarationsByComponent: Map<String, com.ninepointnine.helper.domain.device.ApkDeclarationMetadata> = emptyMap(),
@@ -1152,13 +1046,20 @@ internal class DadbCommandGateway(
         val statuses = components.mapNotNull { component ->
             val installed = installedById[component.componentId] ?: return@mapNotNull null
             val declarations = declarationsByComponent[component.componentId]
-                ?: readInstalledApkDeclarations(component, installed.packageName)
+                ?: resolveInstalledApkAuthorizationDeclarations(installed.packageName)
+            if (declarations == null) {
+                return@mapNotNull ManagedApplicationAuthorizationStatus(
+                    componentId = component.componentId,
+                    packageName = installed.packageName,
+                    authorized = null,
+                    state = MaintenanceAuthorizationState.ERROR,
+                    reasonCode = "authorization_capability_metadata_missing",
+                )
+            }
             val plan = when (val result = AuthorizationPlanFactory.createForComponents(
                 components = listOf(component),
                 requireDesktop = false,
-                declaredServicesByComponent = mapOf(
-                    component.componentId to declarations?.services.orEmpty(),
-                ).filterValues { it.isNotEmpty() },
+                declarationsByComponent = mapOf(component.componentId to declarations),
             )) {
                 is AuthorizationPlanBuildResult.Ready -> result.plan
                 is AuthorizationPlanBuildResult.Rejected -> {
@@ -1180,7 +1081,7 @@ internal class DadbCommandGateway(
                     reasonCode = "authorization_not_required",
                 )
             }
-            val probes = plan.actions.map(::readAuthorizationAction)
+            val probes = readAuthorizationActions(plan.actions).map { it.second }
             val unmet = probes.firstOrNull { it.value == false }
             val failedProbe = probes.firstOrNull { it.value == null }
             when {
@@ -1211,7 +1112,19 @@ internal class DadbCommandGateway(
         return MaintenanceAuthorizationResult.Completed(statuses)
     }
 
-    private fun readAuthorizationAction(action: AuthorizationAction): AuthorizationProbe = try {
+    private fun readAuthorizationActions(
+        actions: List<AuthorizationAction>,
+    ): List<Pair<AuthorizationAction, AuthorizationProbe>> {
+        val packageDetailsByPackage = mutableMapOf<String, String?>()
+        return actions.map { action ->
+            action to readAuthorizationAction(action, packageDetailsByPackage)
+        }
+    }
+
+    private fun readAuthorizationAction(
+        action: AuthorizationAction,
+        packageDetailsByPackage: MutableMap<String, String?> = mutableMapOf(),
+    ): AuthorizationProbe = try {
         when (action) {
         is AuthorizationAction.EnsureAppOpAllowed -> {
             val response = shell("appops get ${shellArgument(action.packageName)} ${shellArgument(action.operation.wireName)}")
@@ -1230,17 +1143,38 @@ internal class DadbCommandGateway(
         }
 
         is AuthorizationAction.EnsureRuntimePermissionGranted -> {
-            val response = shell("dumpsys package ${shellArgument(action.packageName)}")
-            if (response == null || response.exitCode != 0) {
+            val details = cachedPackageDetails(action.packageName, packageDetailsByPackage)
+            if (details == null) {
                 AuthorizationProbe(null, "authorization_runtime_permission_read_failed")
             } else {
                 val granted = Regex(
                     "(?im)^\\s*${Regex.escape(action.permission.wireName)}\\s*:\\s*granted\\s*=\\s*(true|false)\\b",
-                ).find(response.output)?.groupValues?.getOrNull(1)
+                ).find(details)?.groupValues?.getOrNull(1)
                     ?.equals("true", ignoreCase = true)
                 when (granted) {
                     true -> AuthorizationProbe(true, null, AuthorizationValueState.GRANTED)
                     false -> AuthorizationProbe(false, "authorization_runtime_permission_not_granted", AuthorizationValueState.DENIED)
+                    null -> AuthorizationProbe(null, "authorization_runtime_permission_read_failed")
+                }
+            }
+        }
+
+        is AuthorizationAction.EnsureDeclaredRuntimePermissionGranted -> {
+            val details = cachedPackageDetails(action.packageName, packageDetailsByPackage)
+            if (details == null) {
+                AuthorizationProbe(null, "authorization_runtime_permission_read_failed")
+            } else {
+                val granted = Regex(
+                    "(?im)^\\s*${Regex.escape(action.permission)}\\s*:\\s*granted\\s*=\\s*(true|false)\\b",
+                ).find(details)?.groupValues?.getOrNull(1)
+                    ?.equals("true", ignoreCase = true)
+                when (granted) {
+                    true -> AuthorizationProbe(true, null, AuthorizationValueState.GRANTED)
+                    false -> AuthorizationProbe(
+                        false,
+                        "authorization_runtime_permission_not_granted",
+                        AuthorizationValueState.DENIED,
+                    )
                     null -> AuthorizationProbe(null, "authorization_runtime_permission_read_failed")
                 }
             }
@@ -1292,10 +1226,22 @@ internal class DadbCommandGateway(
             reasonCode = when (action) {
                 is AuthorizationAction.EnsureAppOpAllowed -> "authorization_appop_read_failed"
                 is AuthorizationAction.EnsureRuntimePermissionGranted -> "authorization_runtime_permission_read_failed"
+                is AuthorizationAction.EnsureDeclaredRuntimePermissionGranted ->
+                    "authorization_runtime_permission_read_failed"
                 is AuthorizationAction.EnsureSecureSettingEnabled -> "authorization_secure_setting_read_failed"
                 is AuthorizationAction.AppendSecureComponent -> "authorization_component_list_read_failed"
             },
         )
+    }
+
+    private fun cachedPackageDetails(
+        packageName: String,
+        packageDetailsByPackage: MutableMap<String, String?>,
+    ): String? {
+        if (!packageDetailsByPackage.containsKey(packageName)) {
+            packageDetailsByPackage[packageName] = readPackageDetails(packageName)
+        }
+        return packageDetailsByPackage[packageName]
     }
 
     private data class AuthorizationProbe(
@@ -1337,7 +1283,7 @@ internal class DadbCommandGateway(
         }
         var lastReadings = emptyList<Pair<AuthorizationAction, AuthorizationProbe>>()
         READBACK_RETRY_DELAYS_MILLIS.take(AUTHORIZATION_CONFIRMATION_ATTEMPTS).forEachIndexed { index, delayMillis ->
-            val readings = plan.actions.map { action -> action to readAuthorizationAction(action) }
+            val readings = readAuthorizationActions(plan.actions)
             lastReadings = readings
             val evidence = authorizationEvidenceFor(readings)
             val configured = configuredComponentIdsFor(readings, plan)
@@ -1445,7 +1391,9 @@ internal class DadbCommandGateway(
                     // Uninstall is idempotent. A stale management row can race
                     // with another remover; the desired postcondition is
                     // already true, so report success and refresh inventory.
-                    return@withLease MaintenanceDeviceResult.Completed("component_already_uninstalled")
+                    return@withLease MaintenanceDeviceResult.Completed("component_already_uninstalled").also {
+                        installedManifestDeclarations.remove(component.packageName)
+                    }
                 PackagePresence.PRESENT -> Unit
                 PackagePresence.UNKNOWN -> return@withLease MaintenanceDeviceResult.Failed(
                     DeviceActionFailure("maintenance_package_check_failed", component.componentId, retryable = true),
@@ -1562,6 +1510,7 @@ internal class DadbCommandGateway(
                         }
                     }
                     if (absent) {
+                        installedManifestDeclarations.remove(component.packageName)
                         MaintenanceDeviceResult.Completed("component_uninstalled")
                     } else {
                         MaintenanceDeviceResult.Failed(
@@ -1857,38 +1806,86 @@ internal class DadbCommandGateway(
     }
 
     /**
-     * Resolve declarations from the APK currently installed on the vehicle.
-     * This is intentionally used only by an explicit authorization inspection;
-     * inventory listing remains metadata-only and never pulls APK bytes.
+     * The installed APK Manifest is the only declaration source. Target PackageManager
+     * contributes only its dangerous-permission registry and never adds package items.
      */
-    private fun readInstalledApkDeclarations(
-        component: ManagedComponent,
+    private fun resolveVerifiedApkAuthorizationDeclarations(
+        declarations: com.ninepointnine.helper.domain.device.ApkDeclarationMetadata?,
+    ): com.ninepointnine.helper.domain.device.ApkDeclarationMetadata? {
+        declarations ?: return null
+        if (declarations.requestedPermissions.isEmpty()) {
+            return declarations.copy(runtimeGrantPermissions = emptySet())
+        }
+        val dangerousPermissions = readTargetDangerousPermissions() ?: return null
+        return declarations.copy(
+            runtimeGrantPermissions = dangerousPermissions.intersect(declarations.requestedPermissions),
+        )
+    }
+
+    private fun resolveInstalledApkAuthorizationDeclarations(
+        packageName: String,
+    ): com.ninepointnine.helper.domain.device.ApkDeclarationMetadata? =
+        readInstalledApkManifestDeclarations(packageName)
+            ?.let(::resolveVerifiedApkAuthorizationDeclarations)
+
+    /**
+     * Extracts only AndroidManifest.xml from base.apk on the target. Raw binary XML is
+     * parsed without passing through either device's compatibility-expanding PackageManager.
+     */
+    private fun readInstalledApkManifestDeclarations(
         packageName: String,
     ): com.ninepointnine.helper.domain.device.ApkDeclarationMetadata? {
-        val verificationDirectory = installedApkCacheDirectory ?: return null
+        val remoteApkPath = readInstalledApkPath(packageName) ?: return null
+        installedManifestDeclarations[packageName]
+            ?.takeIf { it.remoteApkPath == remoteApkPath }
+            ?.let { return it.declarations }
         val metadataReader = installedApkMetadataReader ?: return null
-        if (!verificationDirectory.mkdirs() && !verificationDirectory.isDirectory) return null
-        val remotePath = readInstalledApkPath(packageName) ?: return null
-        val remoteSize = shell("stat -c %s ${shellArgument(remotePath)}")
-            ?.takeIf { it.exitCode == 0 }
-            ?.output
-            ?.trim()
-            ?.toLongOrNull()
-            ?: return null
-        if (remoteSize !in 1L..MAX_DECLARATION_READ_BYTES) return null
-        val pulledApk = verificationDirectory.resolve(
-            "authorization-${component.componentId}-${Integer.toHexString(packageName.hashCode())}.apk",
-        )
-        pulledApk.delete()
-        return try {
-            adb.pull(pulledApk, remotePath)
-            val metadata = metadataReader.read(pulledApk) ?: return null
-            metadata.declarations.takeIf { metadata.packageName == packageName }
-        } catch (_: Exception) {
-            null
-        } finally {
-            pulledApk.delete()
+        val response = shell(installedManifestExtractionCommand(remoteApkPath)) ?: return null
+        if (response.exitCode != 0 || response.output.isBlank()) return null
+        val manifestBytes = try {
+            Base64.getMimeDecoder().decode(response.output)
+        } catch (_: IllegalArgumentException) {
+            return null
         }
+        if (manifestBytes.size !in 1..MAX_APK_MANIFEST_BYTES) return null
+        val metadata = metadataReader.readManifest(manifestBytes) ?: return null
+        if (metadata.packageName != packageName) return null
+        cacheInstalledManifestDeclarations(packageName, remoteApkPath, metadata.declarations)
+        return metadata.declarations
+    }
+
+    private fun installedManifestExtractionCommand(remoteApkPath: String): String =
+        "extract_manifest() { " +
+            "if [ -x /vendor/bin/busybox ]; then /vendor/bin/busybox unzip -p \"\$1\" AndroidManifest.xml; " +
+            "elif [ -x /system/xbin/busybox ]; then /system/xbin/busybox unzip -p \"\$1\" AndroidManifest.xml; " +
+            "elif command -v unzip >/dev/null 2>&1; then unzip -p \"\$1\" AndroidManifest.xml; " +
+            "else return 127; fi; }; " +
+            "extract_manifest ${shellArgument(remoteApkPath)} 2>/dev/null " +
+            "| $TARGET_HEAD -c ${MAX_APK_MANIFEST_BYTES + 1} | $TARGET_BASE64"
+
+    private fun cacheInstalledManifestDeclarations(
+        packageName: String,
+        remoteApkPath: String,
+        declarations: com.ninepointnine.helper.domain.device.ApkDeclarationMetadata,
+    ) {
+        installedManifestDeclarations.remove(packageName)
+        while (installedManifestDeclarations.size >= MAX_INSTALLED_MANIFEST_CACHE_ENTRIES) {
+            installedManifestDeclarations.remove(installedManifestDeclarations.keys.first())
+        }
+        installedManifestDeclarations[packageName] = CachedInstalledManifestDeclarations(
+            remoteApkPath = remoteApkPath,
+            declarations = declarations,
+        )
+    }
+
+    private fun readTargetDangerousPermissions(): Set<String>? {
+        if (targetDangerousPermissionsResolved) return targetDangerousPermissions
+        val response = shell("pm list permissions -g -d") ?: return null
+        if (response.exitCode != 0) return null
+        val parsed = TargetDangerousPermissionParser.parse(response.output) ?: return null
+        targetDangerousPermissions = parsed
+        targetDangerousPermissionsResolved = true
+        return parsed
     }
 
     private fun readDeclaredPermission(packageName: String, permission: String): Boolean? {
@@ -2127,6 +2124,11 @@ internal class DadbCommandGateway(
         data class Failed(val failure: DeviceActionFailure) : MaintenanceInstalledIdentity
     }
 
+    private data class CachedInstalledManifestDeclarations(
+        val remoteApkPath: String,
+        val declarations: com.ninepointnine.helper.domain.device.ApkDeclarationMetadata,
+    )
+
     private sealed interface PackageInspection {
         data class Completed(
             val installed: Boolean,
@@ -2164,6 +2166,9 @@ internal class DadbCommandGateway(
         val COMPONENT_NAME_PATTERN = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)*/[A-Za-z0-9_.$]+$")
         val DIGEST_PREFIX_PATTERN = Regex("^[0-9a-f]{16}$")
         val READBACK_RETRY_DELAYS_MILLIS = longArrayOf(150L, 300L, 500L, 750L, 750L, 750L, 750L, 750L)
+        const val TARGET_HEAD = "/system/bin/head"
+        const val TARGET_BASE64 = "/system/bin/base64"
+        const val MAX_INSTALLED_MANIFEST_CACHE_ENTRIES = 64
         const val PROCESS_READBACK_ATTEMPTS = 13
         const val PROCESS_READBACK_DELAY_MILLIS = 250L
         const val SERVICE_READBACK_ATTEMPTS = 10
@@ -2175,7 +2180,6 @@ internal class DadbCommandGateway(
             "com.ninepointnine.desktop.appcatalog",
             "com.ninepointnine.desktop.test.appcatalog",
         )
-        const val MAX_DECLARATION_READ_BYTES = 128L * 1024L * 1024L
     }
 
     private enum class BoundServiceProbe {
@@ -2548,6 +2552,9 @@ internal object CombinedAuthorizationCommand {
         is com.ninepointnine.helper.domain.device.AuthorizationAction.EnsureRuntimePermissionGranted ->
             listOf("RUNTIME", componentId, id, packageName, permission.wireName).joinToString("|")
 
+        is com.ninepointnine.helper.domain.device.AuthorizationAction.EnsureDeclaredRuntimePermissionGranted ->
+            listOf("RUNTIME", componentId, id, packageName, permission).joinToString("|")
+
         is com.ninepointnine.helper.domain.device.AuthorizationAction.EnsureSecureSettingEnabled ->
             listOf("SECURE_FLAG", componentId, id, setting.wireName).joinToString("|")
 
@@ -2586,6 +2593,17 @@ internal object CombinedAuthorizationCommand {
         selected() { wanted="${'$'}1"; shift; for value in "${'$'}@"; do [ "${'$'}value" = "${'$'}wanted" ] && return 0; done; return 1; }
         emit() { printf '%s|%s\n' "${'$'}marker" "${'$'}*"; }
         fail() { emit "FAIL|${'$'}1|${'$'}{2:-}"; exit 1; }
+        first_failure_reason=''
+        first_failure_component=''
+        remember_failure() {
+          if [ -z "${'$'}first_failure_reason" ]; then
+            first_failure_reason="${'$'}1"
+            first_failure_component="${'$'}{2:-}"
+          fi
+        }
+        finish_failures() {
+          [ -z "${'$'}first_failure_reason" ] || fail "${'$'}first_failure_reason" "${'$'}first_failure_component"
+        }
         list_contains() { case ":${'$'}1:" in *":${'$'}2:"*) return 0;; *) return 1;; esac; }
         dedupe_list() {
           raw="${'$'}1"; result=""; old_ifs="${'$'}IFS"; IFS=':'
@@ -2647,42 +2665,57 @@ internal object CombinedAuthorizationCommand {
         emit_auth() { emit "AUTH|${'$'}1|${'$'}2|${'$'}3|${'$'}4|${'$'}5|${'$'}6"; }
         ensure_appop() {
           package="${'$'}1"; operation="${'$'}2"; component="${'$'}3"; action="${'$'}4"
-          before="${'$'}(appop_state "${'$'}package" "${'$'}operation")" || fail authorization_appop_read_failed "${'$'}component"
+          before="${'$'}(appop_state "${'$'}package" "${'$'}operation")" || { remember_failure authorization_appop_read_failed "${'$'}component"; return 0; }
           after="${'$'}before"; changed=0
-          if [ "${'$'}before" != ALLOWED ]; then appops set "${'$'}package" "${'$'}operation" allow >/dev/null 2>&1 || fail authorization_appop_write_failed "${'$'}component"; changed=1; after="${'$'}(appop_state "${'$'}package" "${'$'}operation")" || fail authorization_appop_readback_failed "${'$'}component"; fi
-          [ "${'$'}after" = ALLOWED ] || fail authorization_appop_not_allowed "${'$'}component"
+          if [ "${'$'}before" != ALLOWED ]; then
+            appops set "${'$'}package" "${'$'}operation" allow >/dev/null 2>&1 || { remember_failure authorization_appop_write_failed "${'$'}component"; return 0; }
+            changed=1
+            after="${'$'}(appop_state "${'$'}package" "${'$'}operation")" || { remember_failure authorization_appop_readback_failed "${'$'}component"; return 0; }
+          fi
+          [ "${'$'}after" = ALLOWED ] || { remember_failure authorization_appop_not_allowed "${'$'}component"; return 0; }
           emit_auth "${'$'}component" "${'$'}action" "${'$'}before" "${'$'}changed" "${'$'}after" "-"
         }
         ensure_runtime_permission() {
           package="${'$'}1"; permission="${'$'}2"; component="${'$'}3"; action="${'$'}4"
-          before="${'$'}(runtime_state "${'$'}package" "${'$'}permission")" || fail authorization_runtime_permission_read_failed "${'$'}component"
+          before="${'$'}(runtime_state "${'$'}package" "${'$'}permission")" || { remember_failure authorization_runtime_permission_read_failed "${'$'}component"; return 0; }
           after="${'$'}before"; changed=0
-          if [ "${'$'}before" != GRANTED ]; then pm grant "${'$'}package" "${'$'}permission" >/dev/null 2>&1 || fail authorization_runtime_permission_write_failed "${'$'}component"; changed=1; after="${'$'}(runtime_state "${'$'}package" "${'$'}permission")" || fail authorization_runtime_permission_readback_failed "${'$'}component"; fi
-          [ "${'$'}after" = GRANTED ] || fail authorization_runtime_permission_not_granted "${'$'}component"
+          if [ "${'$'}before" != GRANTED ]; then
+            pm grant "${'$'}package" "${'$'}permission" >/dev/null 2>&1 || { remember_failure authorization_runtime_permission_write_failed "${'$'}component"; return 0; }
+            changed=1
+            after="${'$'}(runtime_state "${'$'}package" "${'$'}permission")" || { remember_failure authorization_runtime_permission_readback_failed "${'$'}component"; return 0; }
+          fi
+          [ "${'$'}after" = GRANTED ] || { remember_failure authorization_runtime_permission_not_granted "${'$'}component"; return 0; }
           emit_auth "${'$'}component" "${'$'}action" "${'$'}before" "${'$'}changed" "${'$'}after" "-"
         }
         ensure_secure_flag() {
           setting="${'$'}1"; component="${'$'}2"; action="${'$'}3"
-          before="${'$'}(secure_flag_state "${'$'}setting")" || fail authorization_secure_flag_read_failed "${'$'}component"
+          before="${'$'}(secure_flag_state "${'$'}setting")" || { remember_failure authorization_secure_flag_read_failed "${'$'}component"; return 0; }
           after="${'$'}before"; changed=0
-          if [ "${'$'}before" != ENABLED ]; then settings put secure "${'$'}setting" 1 >/dev/null 2>&1 || fail authorization_secure_flag_write_failed "${'$'}component"; changed=1; after="${'$'}(secure_flag_state "${'$'}setting")" || fail authorization_secure_flag_readback_failed "${'$'}component"; fi
-          [ "${'$'}after" = ENABLED ] || fail authorization_secure_flag_not_enabled "${'$'}component"
+          if [ "${'$'}before" != ENABLED ]; then
+            settings put secure "${'$'}setting" 1 >/dev/null 2>&1 || { remember_failure authorization_secure_flag_write_failed "${'$'}component"; return 0; }
+            changed=1
+            after="${'$'}(secure_flag_state "${'$'}setting")" || { remember_failure authorization_secure_flag_readback_failed "${'$'}component"; return 0; }
+          fi
+          [ "${'$'}after" = ENABLED ] || { remember_failure authorization_secure_flag_not_enabled "${'$'}component"; return 0; }
           emit_auth "${'$'}component" "${'$'}action" "${'$'}before" "${'$'}changed" "${'$'}after" "-"
         }
         append_component() {
           setting="${'$'}1"; target="${'$'}2"; component="${'$'}3"; action="${'$'}4"
-          before_raw="${'$'}(secure_list "${'$'}setting")" || fail authorization_component_list_read_failed "${'$'}component"
+          before_raw="${'$'}(secure_list "${'$'}setting")" || { remember_failure authorization_component_list_read_failed "${'$'}component"; return 0; }
           before_normalized="${'$'}(dedupe_list "${'$'}before_raw")"
           before_state=COMPONENT_ABSENT; list_contains "${'$'}before_normalized" "${'$'}target" && before_state=COMPONENT_PRESENT
           after_raw="${'$'}before_normalized"; changed=0
           if [ "${'$'}before_state" = COMPONENT_ABSENT ]; then
-            if [ "${'$'}setting" = enabled_notification_listeners ]; then cmd notification allow_listener "${'$'}target" 0 >/dev/null 2>&1 || fail authorization_component_list_write_failed "${'$'}component"; else
+            if [ "${'$'}setting" = enabled_notification_listeners ]; then
+              cmd notification allow_listener "${'$'}target" 0 >/dev/null 2>&1 || { remember_failure authorization_component_list_write_failed "${'$'}component"; return 0; }
+            else
               if [ "${'$'}before_normalized" = null ] || [ -z "${'$'}before_normalized" ]; then next="${'$'}target"; else next="${'$'}before_normalized:${'$'}target"; fi
-              settings put secure "${'$'}setting" "${'$'}next" >/dev/null 2>&1 || fail authorization_component_list_write_failed "${'$'}component"
+              settings put secure "${'$'}setting" "${'$'}next" >/dev/null 2>&1 || { remember_failure authorization_component_list_write_failed "${'$'}component"; return 0; }
             fi
-            changed=1; after_raw="${'$'}(secure_list "${'$'}setting")" || fail authorization_component_list_readback_failed "${'$'}component"
+            changed=1
+            after_raw="${'$'}(secure_list "${'$'}setting")" || { remember_failure authorization_component_list_readback_failed "${'$'}component"; return 0; }
           fi
-          list_contains "${'$'}after_raw" "${'$'}target" || fail authorization_component_list_not_present "${'$'}component"
+          list_contains "${'$'}after_raw" "${'$'}target" || { remember_failure authorization_component_list_not_present "${'$'}component"; return 0; }
           list_preserved "${'$'}before_raw" "${'$'}after_raw" || fail authorization_component_list_not_preserved "${'$'}component"
           emit_auth "${'$'}component" "${'$'}action" "${'$'}before_state" "${'$'}changed" COMPONENT_PRESENT "${'$'}(list_count "${'$'}before_normalized")"
         }
@@ -2692,8 +2725,10 @@ internal object CombinedAuthorizationCommand {
         }
         ensure_accessibility_service() {
           component="${'$'}1"; target="${'$'}2"; class_name="${'$'}3"; record="${'$'}4"; label="${'$'}5"
-          enabled="${'$'}(settings get secure accessibility_enabled 2>/dev/null)" || fail authorization_secure_flag_read_failed "${'$'}component"
-          if [ "${'$'}enabled" != 1 ]; then settings put secure accessibility_enabled 1 >/dev/null 2>&1 || fail authorization_secure_flag_write_failed "${'$'}component"; fi
+          enabled="${'$'}(settings get secure accessibility_enabled 2>/dev/null)" || { remember_failure authorization_secure_flag_read_failed "${'$'}component"; return 0; }
+          if [ "${'$'}enabled" != 1 ]; then
+            settings put secure accessibility_enabled 1 >/dev/null 2>&1 || { remember_failure authorization_secure_flag_write_failed "${'$'}component"; return 0; }
+          fi
           append_component enabled_accessibility_services "${'$'}target" "${'$'}component" "${'$'}label"
         }
 
@@ -2770,6 +2805,7 @@ internal object CombinedAuthorizationCommand {
         fi
 
         [ "${'$'}skipped" -eq 0 ] || fail selected_component_missing
+        finish_failures
         if [ "${'$'}repair_only" -eq 1 ]; then emit "DONE|OK"; exit 0; fi
         if [ "${'$'}launch_desktop" -eq 0 ]; then emit "DONE|OK"; exit 0; fi
         if [ "${'$'}dynamic_mode" -eq 0 ]; then

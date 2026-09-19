@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">03车机助手</string>
-    <string name="task_install">安装应用</string>
+    <string name="task_install">安装推荐应用</string>
     <string name="task_maintenance">03车机助手</string>
     <string name="step_connect">连接设备</string>
     <string name="step_select">选择应用</string>
@@ -60,7 +60,7 @@
     <string name="result_continue">继续安装</string>
     <string name="result_retry">重新尝试</string>
     <string name="result_row_success">安装成功</string>
-    <string name="result_row_authorization_incomplete">已安装，授权失败</string>
+    <string name="result_row_authorization_incomplete">已安装，授权未全部完成</string>
     <string name="result_row_availability_incomplete">已安装，可用性校验失败</string>
     <string name="result_row_pending_confirmation">已写入，等待车机回读</string>
     <string name="result_row_failure">安装失败</string>
@@ -80,8 +80,10 @@
     <string name="maintenance_repair_description">恢复受控授权</string>
     <string name="maintenance_manage_apps">管理已安装应用</string>
     <string name="maintenance_manage_apps_description">查看和管理车机应用</string>
-    <string name="maintenance_install_file_manager">安装应用</string>
-    <string name="maintenance_install_file_manager_description">重新选择并安装车机应用</string>
+    <string name="maintenance_install_file_manager">安装推荐应用</string>
+    <string name="maintenance_install_file_manager_description">从受信任清单选择并安装车机应用</string>
+    <string name="maintenance_install_local_application">安装本机应用</string>
+    <string name="maintenance_install_local_application_description">从手机文件管理器选择 APK 并安装</string>
     <string name="maintenance_launch_lyrics">启动03歌词</string>
     <string name="maintenance_launch_lyrics_description">打开已安装的歌词应用</string>
     <string name="maintenance_launch_desktop">启动03桌面</string>
@@ -158,8 +160,8 @@
     <string name="maintenance_authorization_active">已生效</string>
     <string name="maintenance_authorization_not_automatic">无法自动授权</string>
     <string name="maintenance_authorization_unknown_reason">车机没有返回具体原因</string>
-    <string name="maintenance_authorization_accessibility">无障碍服务 · %1$s</string>
-    <string name="maintenance_authorization_notification">通知读取服务 · %1$s</string>
+    <string name="maintenance_authorization_accessibility">无障碍服务</string>
+    <string name="maintenance_authorization_notification">通知读取服务</string>
     <string name="maintenance_authorization_success">授权成功</string>
     <string name="maintenance_authorization_partial">部分授权成功</string>
     <string name="maintenance_authorization_partial_reason">部分授权成功：%1$s</string>

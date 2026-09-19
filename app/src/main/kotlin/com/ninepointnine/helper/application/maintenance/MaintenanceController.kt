@@ -105,6 +105,8 @@ class MaintenanceController(
                 MaintenanceActionId.INSTALL_FILE_MANAGER,
                 ->
                     prepareMaintenanceApplications(actionId, snapshot, connection, eventPort)
+                MaintenanceActionId.INSTALL_LOCAL_APPLICATION ->
+                    fail(actionId, "local_apk_picker_required", retryable = false, eventPort)
                 MaintenanceActionId.LAUNCH_LYRICS -> launch(actionId, "lyrics", snapshot, connection, eventPort)
                 MaintenanceActionId.LAUNCH_DESKTOP -> launch(actionId, "desktop", snapshot, connection, eventPort)
                 MaintenanceActionId.CLEANUP -> {

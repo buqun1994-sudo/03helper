@@ -637,11 +637,58 @@ private fun String.toUserMessage(componentName: String? = null): String {
             "安装包未声明所需授权：检查发布包"
         reason == "authorization_artifacts_missing" || reason == "authorization_artifacts_mismatch" ->
             "授权对象与安装包不一致：重新获取安装配置"
+        reason == "authorization_capability_metadata_missing" ->
+            "无法取得该应用的授权信息：重新读取应用状态"
+        reason == "authorization_declaration_metadata_mismatch" ->
+            "安装包与车机中的授权信息不一致：重新安装后再试"
+        reason == "authorization_plan_build_failed" || reason == "authorization_exception" ->
+            "授权计划生成失败：重新读取应用状态"
+        reason == "authorization_appop_write_failed" ||
+            reason == "authorization_runtime_permission_write_failed" ||
+            reason == "authorization_secure_flag_write_failed" ||
+            reason == "authorization_component_list_write_failed" ->
+            "车机拒绝修改该授权：请检查车机系统设置"
+        reason == "authorization_component_list_not_preserved" ->
+            "车机未保留原有服务授权：已停止修改"
+        reason == "authorization_capacity_probe_failed" ||
+            reason == "authorization_component_list_read_failed" ->
+            "车机授权列表读取失败：重新连接后再试"
+        reason == "authorization_result_invalid" || reason == "authorization_evidence_invalid" ||
+            reason == "authorization_batch_execution_failed" ->
+            "车机授权结果校验失败：重新读取应用状态"
+        reason == "local_apk_preparer_unavailable" ->
+            "本机 APK 模块未启动：重新打开应用"
+        reason == "local_apk_picker_required" ->
+            "请选择一个 APK 文件后继续"
+        reason == "local_apk_uri_invalid" ->
+            "无法读取所选文件：请从系统文件管理器重新选择"
+        reason == "local_apk_read_denied" ->
+            "没有读取所选文件的权限：请重新选择"
+        reason == "local_apk_read_failed" || reason == "local_apk_workspace_unavailable" ->
+            "读取所选 APK 失败：请确认文件可用后重试"
+        reason == "local_apk_size_invalid" ->
+            "所选 APK 为空或超过 1 GB：请选择其他文件"
+        reason == "local_apk_metadata_unreadable" || reason == "local_apk_manifest_invalid" ->
+            "所选文件不是可识别的完整 APK"
+        reason == "local_apk_split_not_supported" ->
+            "暂不支持拆分 APK：请选择单个完整 APK"
+        reason == "local_apk_incompatible" ->
+            "这个 APK 不兼容当前车机系统"
+        reason == "local_apk_signature_invalid" || reason == "local_apk_hash_failed" ||
+            reason == "local_apk_package_invalid" || reason == "local_apk_version_invalid" ||
+            reason == "local_apk_min_sdk_unavailable" ->
+            "所选 APK 身份校验失败：请选择可信的完整安装包"
+        reason == "local_apk_target_sdk_unknown" ->
+            "未读取到车机系统版本：重新连接车机后再试"
+        reason == "local_apk_install_failed" ->
+            "本机 APK 安装未完成：重新连接车机后再试"
+        reason.startsWith("local_apk_") ->
+            "所选 APK 无法安装：请选择完整、未拆分的 APK 文件"
         reason == "authorization_not_attempted_installation_unverified" ||
             reason == "authorization_not_attempted" ->
             "安装身份尚未确认：先完成安装结果读取"
         reason.startsWith("authorization_") ->
-            "车机授权操作失败：重新授权"
+            "该授权未完成：重新读取应用状态"
 
         reason == "availability_evidence_missing" || reason == "availability_detail_invalid" ||
             reason == "availability_evidence_invalid" ->
