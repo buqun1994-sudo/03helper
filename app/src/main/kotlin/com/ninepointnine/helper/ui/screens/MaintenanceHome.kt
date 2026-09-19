@@ -1,5 +1,8 @@
 package com.ninepointnine.helper.ui.screens
 
+import android.graphics.drawable.ColorDrawable
+import android.view.WindowManager
+
 import androidx.activity.compose.BackHandler
 import androidx.annotation.StringRes
 import androidx.compose.animation.AnimatedContent
@@ -45,6 +48,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -53,11 +57,15 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.DialogWindowProvider
 import kotlinx.coroutines.delay
 import com.ninepointnine.helper.R
 import com.ninepointnine.helper.domain.session.MaintenanceActionId
@@ -623,21 +631,6 @@ private fun MaintenanceManageAppsPage(
     var pendingDestructive by remember { mutableStateOf<Pair<MaintenanceApplicationRow, MaintenanceApplicationActionId>?>(null) }
     var pendingAction by remember { mutableStateOf<Pair<MaintenanceApplicationRow, MaintenanceApplicationActionId>?>(null) }
     val applicationActionsEnabled = applicationActionsEnabled(state.applicationAction)
-    LaunchedEffect(
-        pendingAction?.first?.packageName,
-        pendingAction?.second,
-        state.applicationAction?.packageName,
-        state.applicationAction?.actionId,
-        state.applicationAction?.status,
-    ) {
-        if (shouldDismissAuthorizationDialog(pendingAction, state.applicationAction)) {
-            // Let the last row state settle before revealing the page-owned
-            // result overlay. Keeping the dialog open would cover the toast
-            // until its visibility window had already expired.
-            delay(180L)
-            pendingAction = null
-        }
-    }
     BackHandler(enabled = true, onBack = onBack)
     Box(modifier = Modifier.fillMaxSize()) {
         Column(
@@ -711,17 +704,6 @@ private fun MaintenanceManageAppsPage(
             }
             Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
         }
-        state.applicationAction
-            ?.takeIf {
-                it.actionId in setOf(
-                    MaintenanceApplicationActionId.START,
-                    MaintenanceApplicationActionId.FORCE_STOP,
-                    MaintenanceApplicationActionId.CLEAR_DATA,
-                    MaintenanceApplicationActionId.AUTHORIZE,
-                    MaintenanceApplicationActionId.UNINSTALL,
-                )
-            }
-            ?.let { feedback -> ApplicationActionToast(feedback, state.applications) }
     }
     pendingDestructive?.let { (app, action) ->
         AlertDialog(
@@ -755,10 +737,20 @@ private fun MaintenanceManageAppsPage(
         }
         val actionRunning = dialogFeedback?.status == MaintenanceActionStatus.RUNNING
         val actionFailed = dialogFeedback?.status == MaintenanceActionStatus.FAILED
-        val authorizationReady = dialogFeedback?.actionId == MaintenanceApplicationActionId.INSPECT_AUTHORIZATION &&
-            dialogFeedback.status == MaintenanceActionStatus.SUCCEEDED
+        val authorizationPrimaryAction = authorizationDialogPrimaryAction(
+            feedback = dialogFeedback,
+            requirements = state.applicationAuthorizationRequirements,
+        )
         AlertDialog(
-            onDismissRequest = { if (!actionRunning) pendingAction = null },
+            onDismissRequest = {
+                if (!actionRunning && authorizationPrimaryAction in setOf(
+                        AuthorizationDialogPrimaryAction.NONE,
+                        AuthorizationDialogPrimaryAction.AUTHORIZE,
+                    )
+                ) {
+                    pendingAction = null
+                }
+            },
             containerColor = InstallerColors.PageBlue,
             titleContentColor = InstallerColors.White,
             textContentColor = InstallerColors.AuxiliaryWhite,
@@ -887,23 +879,53 @@ private fun MaintenanceManageAppsPage(
                         Text(stringResource(R.string.maintenance_confirm), color = InstallerColors.White)
                     }
                 } else {
-                    TextButton(
-                        enabled = authorizationReady && state.applicationAuthorizationRequirements.any {
-                            it.automaticallyActionable
-                        },
-                        onClick = {
-                            onIntent(InstallUiIntent.MaintenanceApplicationAction(app.packageName, action))
-                        },
-                    ) { Text(stringResource(R.string.maintenance_authorize), color = InstallerColors.White) }
+                    when (authorizationPrimaryAction) {
+                        AuthorizationDialogPrimaryAction.AUTHORIZE -> TextButton(
+                            onClick = {
+                                onIntent(InstallUiIntent.MaintenanceApplicationAction(app.packageName, action))
+                            },
+                        ) {
+                            Text(stringResource(R.string.maintenance_authorize), color = InstallerColors.White)
+                        }
+
+                        AuthorizationDialogPrimaryAction.ACKNOWLEDGE -> TextButton(
+                            onClick = { pendingAction = null },
+                        ) {
+                            Text(stringResource(R.string.maintenance_install_done), color = InstallerColors.White)
+                        }
+
+                        AuthorizationDialogPrimaryAction.COMPLETE -> TextButton(
+                            onClick = { pendingAction = null },
+                        ) {
+                            Text(stringResource(R.string.maintenance_finish), color = InstallerColors.White)
+                        }
+
+                        AuthorizationDialogPrimaryAction.NONE -> Unit
+                    }
                 }
             },
             dismissButton = {
-                if (action != MaintenanceApplicationActionId.DETAILS) {
-                    TextButton(enabled = !actionRunning, onClick = { pendingAction = null }) { Text(stringResource(R.string.maintenance_cancel), color = InstallerColors.White) }
+                if (action != MaintenanceApplicationActionId.DETAILS &&
+                    authorizationPrimaryAction == AuthorizationDialogPrimaryAction.AUTHORIZE
+                ) {
+                    TextButton(onClick = { pendingAction = null }) {
+                        Text(stringResource(R.string.maintenance_cancel), color = InstallerColors.White)
+                    }
                 }
             },
         )
     }
+    state.applicationAction
+        ?.takeIf {
+            it.actionId in setOf(
+                MaintenanceApplicationActionId.START,
+                MaintenanceApplicationActionId.FORCE_STOP,
+                MaintenanceApplicationActionId.CLEAR_DATA,
+                MaintenanceApplicationActionId.AUTHORIZE,
+                MaintenanceApplicationActionId.UNINSTALL,
+            )
+        }
+        ?.let { feedback -> ApplicationActionToast(feedback, state.applications) }
 }
 
 @Composable
@@ -979,15 +1001,36 @@ internal fun nextExpandedApplicationId(currentId: String?, selectedId: String): 
 internal fun applicationActionsEnabled(feedback: MaintenanceApplicationFeedback?): Boolean =
     feedback?.status != MaintenanceActionStatus.RUNNING
 
-internal fun shouldDismissAuthorizationDialog(
-    pendingAction: Pair<MaintenanceApplicationRow, MaintenanceApplicationActionId>?,
+internal enum class AuthorizationDialogPrimaryAction {
+    NONE,
+    AUTHORIZE,
+    ACKNOWLEDGE,
+    COMPLETE,
+}
+
+internal fun authorizationDialogPrimaryAction(
     feedback: MaintenanceApplicationFeedback?,
-): Boolean = pendingAction?.let { (application, actionId) ->
-    actionId == MaintenanceApplicationActionId.AUTHORIZE &&
-        feedback?.packageName == application.packageName &&
-        feedback.actionId == MaintenanceApplicationActionId.AUTHORIZE &&
-        feedback.status != MaintenanceActionStatus.RUNNING
-} == true
+    requirements: List<ApplicationAuthorizationRequirement>,
+): AuthorizationDialogPrimaryAction = when (feedback?.actionId) {
+    MaintenanceApplicationActionId.INSPECT_AUTHORIZATION -> when (feedback.status) {
+        MaintenanceActionStatus.RUNNING -> AuthorizationDialogPrimaryAction.NONE
+        MaintenanceActionStatus.FAILED -> AuthorizationDialogPrimaryAction.ACKNOWLEDGE
+        MaintenanceActionStatus.SUCCEEDED -> if (requirements.any { it.automaticallyActionable }) {
+            AuthorizationDialogPrimaryAction.AUTHORIZE
+        } else {
+            AuthorizationDialogPrimaryAction.ACKNOWLEDGE
+        }
+    }
+
+    MaintenanceApplicationActionId.AUTHORIZE -> when (feedback.status) {
+        MaintenanceActionStatus.RUNNING -> AuthorizationDialogPrimaryAction.NONE
+        MaintenanceActionStatus.SUCCEEDED,
+        MaintenanceActionStatus.FAILED,
+        -> AuthorizationDialogPrimaryAction.COMPLETE
+    }
+
+    else -> AuthorizationDialogPrimaryAction.NONE
+}
 
 @Composable
 private fun applicationActionLabel(actionId: MaintenanceApplicationActionId): String = stringResource(
@@ -1139,37 +1182,58 @@ private fun ApplicationActionToast(
                 ?: stringResource(R.string.maintenance_application_action_failed)
         else -> stringResource(R.string.maintenance_application_action_failed)
     }
-    AnimatedVisibility(
-        visible = visible,
-        modifier = Modifier.fillMaxSize(),
-        enter = fadeIn(InstallerMotion.stateChange()) +
-            slideInVertically(
-                animationSpec = InstallerMotion.stateChange(),
-                initialOffsetY = { height -> height / 2 },
-            ),
-        exit = fadeOut(InstallerMotion.stateChange()) +
-            slideOutVertically(
-                animationSpec = InstallerMotion.stateChange(),
-                targetOffsetY = { height -> height / 2 },
-            ),
+    Dialog(
+        onDismissRequest = {},
+        properties = DialogProperties(
+            dismissOnBackPress = false,
+            dismissOnClickOutside = false,
+            usePlatformDefaultWidth = false,
+        ),
     ) {
+        val window = (LocalView.current.parent as? DialogWindowProvider)?.window
+        SideEffect {
+            window?.apply {
+                setDimAmount(0f)
+                clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+                addFlags(
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                )
+                setBackgroundDrawable(ColorDrawable(android.graphics.Color.TRANSPARENT))
+            }
+        }
         Box(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(bottom = 56.dp),
             contentAlignment = Alignment.BottomCenter,
         ) {
-            Text(
-                text = text,
-                color = InstallerColors.White,
-                style = MaterialTheme.typography.bodyMedium,
-                modifier = Modifier
-                    .background(
-                        color = Color(0xE61D232B),
-                        shape = RoundedCornerShape(20.dp),
-                    )
-                    .padding(horizontal = 18.dp, vertical = 10.dp),
-            )
+            AnimatedVisibility(
+                visible = visible,
+                enter = fadeIn(InstallerMotion.stateChange()) +
+                    slideInVertically(
+                        animationSpec = InstallerMotion.stateChange(),
+                        initialOffsetY = { height -> height / 2 },
+                    ),
+                exit = fadeOut(InstallerMotion.stateChange()) +
+                    slideOutVertically(
+                        animationSpec = InstallerMotion.stateChange(),
+                        targetOffsetY = { height -> height / 2 },
+                    ),
+            ) {
+                Text(
+                    text = text,
+                    color = InstallerColors.White,
+                    style = MaterialTheme.typography.bodyMedium,
+                    modifier = Modifier
+                        .testTag("application_action_notice")
+                        .background(
+                            color = Color(0xE61D232B),
+                            shape = RoundedCornerShape(20.dp),
+                        )
+                        .padding(horizontal = 18.dp, vertical = 10.dp),
+                )
+            }
         }
     }
 }
@@ -1412,7 +1476,7 @@ fun MaintenanceActionFlowPage(
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val canNavigateBack = state !is InstallUiState.Installing || state.selfUpdateReady
+    val canNavigateBack = state !is InstallUiState.Installing
     // Consume the gesture while an install is active. The install pipeline is
     // intentionally not cancellable from this page, but it must not minimize
     // the activity through the system back dispatcher.
@@ -1429,14 +1493,7 @@ fun MaintenanceActionFlowPage(
             iconName = actionIcon(action),
         )
         when (state) {
-            is InstallUiState.Installing -> MaintenanceInstallProgress(
-                state = state,
-                onInstallSelfUpdate = if (state.selfUpdateReady) {
-                    { onIntent(InstallUiIntent.InstallPreparedSelfUpdate) }
-                } else {
-                    null
-                },
-            )
+            is InstallUiState.Installing -> MaintenanceInstallProgress(state = state)
 
             is InstallUiState.Result -> MaintenanceInstallResult(
                 state = state,
@@ -1453,7 +1510,6 @@ fun MaintenanceActionFlowPage(
 @Composable
 private fun MaintenanceInstallProgress(
     state: InstallUiState.Installing,
-    onInstallSelfUpdate: (() -> Unit)? = null,
 ) {
     val phases = listOf(
         InstallPhase.FETCH to R.string.phase_fetch,
@@ -1494,22 +1550,13 @@ private fun MaintenanceInstallProgress(
             }
         }
         Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
-        if (onInstallSelfUpdate != null) {
-            PrimaryActionButton(
-                text = stringResource(R.string.self_update_install),
-                onClick = onInstallSelfUpdate,
-                modifier = Modifier.fillMaxWidth(),
-            )
-            Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
-        } else {
-            Text(
-                text = stringResource(R.string.install_keep_screen_on),
-                style = MaterialTheme.typography.bodySmall,
-                color = InstallerColors.AuxiliaryWhite,
-                textAlign = TextAlign.Center,
-                modifier = Modifier.fillMaxWidth(),
-            )
-        }
+        Text(
+            text = stringResource(R.string.install_keep_screen_on),
+            style = MaterialTheme.typography.bodySmall,
+            color = InstallerColors.AuxiliaryWhite,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.fillMaxWidth(),
+        )
         Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
     }
 }

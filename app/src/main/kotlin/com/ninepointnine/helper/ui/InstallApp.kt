@@ -189,14 +189,8 @@ fun InstallApp(
                                 state = target.uiState,
                                 onIntent = onIntent,
                                 onBack = {
-                                    if (target.uiState is InstallUiState.Installing &&
-                                        target.uiState.selfUpdateReady
-                                    ) {
-                                        onIntent(InstallUiIntent.CancelInstallation)
-                                    } else {
-                                        currentFlowBack?.invoke()
-                                            ?: onIntent(InstallUiIntent.ReturnToMaintenanceInstallationSelection)
-                                    }
+                                    currentFlowBack?.invoke()
+                                        ?: onIntent(InstallUiIntent.ReturnToMaintenanceInstallationSelection)
                                 },
                             )
                         }

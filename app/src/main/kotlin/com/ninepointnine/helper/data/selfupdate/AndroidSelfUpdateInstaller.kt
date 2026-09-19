@@ -8,8 +8,10 @@ import android.net.Uri
 import android.os.Build
 import android.provider.Settings
 import androidx.core.content.FileProvider
+import com.ninepointnine.helper.application.SelfUpdateInstallPermissionStatus
 import com.ninepointnine.helper.application.SelfUpdateInstaller
 import com.ninepointnine.helper.application.SelfUpdateLaunchResult
+import com.ninepointnine.helper.application.SelfUpdatePermissionRequestResult
 import com.ninepointnine.helper.application.SelfUpdateStageResult
 import com.ninepointnine.helper.application.SelfUpdateVerificationResult
 import com.ninepointnine.helper.application.StagedSelfUpdate
@@ -36,6 +38,32 @@ class AndroidSelfUpdateInstaller(
     private val applicationContext = context.applicationContext
     private val packageManager: PackageManager = applicationContext.packageManager
     private val authority: String = "${applicationContext.packageName}.fileprovider"
+
+    override fun installPermissionStatus(): SelfUpdateInstallPermissionStatus =
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O || packageManager.canRequestPackageInstalls()) {
+            SelfUpdateInstallPermissionStatus.GRANTED
+        } else {
+            SelfUpdateInstallPermissionStatus.REQUIRED
+        }
+
+    override fun requestInstallPermission(): SelfUpdatePermissionRequestResult {
+        if (installPermissionStatus() == SelfUpdateInstallPermissionStatus.GRANTED) {
+            return SelfUpdatePermissionRequestResult.Started
+        }
+        val settingsIntent = Intent(
+            Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+            Uri.parse("package:${applicationContext.packageName}"),
+        ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        return try {
+            applicationContext.startActivity(settingsIntent)
+            SelfUpdatePermissionRequestResult.Started
+        } catch (_: Exception) {
+            SelfUpdatePermissionRequestResult.Failed(
+                "self_update_unknown_sources_settings_failed",
+                retryable = true,
+            )
+        }
+    }
 
     override fun stage(artifact: PreparedArtifact): SelfUpdateStageResult {
         val manifest = artifact.manifest
@@ -91,22 +119,11 @@ class AndroidSelfUpdateInstaller(
         if (!isOwnedPath(staged.apkFile) || !staged.apkFile.isFile) {
             return SelfUpdateLaunchResult.Failed("self_update_apk_missing", retryable = true)
         }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
-            !packageManager.canRequestPackageInstalls()
-        ) {
-            val settingsIntent = Intent(
-                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
-                Uri.parse("package:${applicationContext.packageName}"),
-            ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            return try {
-                applicationContext.startActivity(settingsIntent)
-                SelfUpdateLaunchResult.Failed(
-                    "self_update_unknown_sources_permission_required",
-                    retryable = true,
-                )
-            } catch (_: Exception) {
-                SelfUpdateLaunchResult.Failed("self_update_unknown_sources_settings_failed", retryable = true)
-            }
+        if (installPermissionStatus() != SelfUpdateInstallPermissionStatus.GRANTED) {
+            return SelfUpdateLaunchResult.Failed(
+                "self_update_unknown_sources_permission_required",
+                retryable = true,
+            )
         }
         val contentUri = try {
             FileProvider.getUriForFile(applicationContext, authority, staged.apkFile)

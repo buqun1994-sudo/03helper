@@ -16,6 +16,7 @@ import com.ninepointnine.helper.domain.session.ManagedApplicationStatus
 import com.ninepointnine.helper.ui.state.MaintenanceApplicationDetailsRow
 import com.ninepointnine.helper.ui.state.MaintenanceApplicationFeedback
 import com.ninepointnine.helper.ui.state.MaintenanceApplicationRow
+import com.ninepointnine.helper.domain.device.ApplicationAuthorizationRequirement
 import com.ninepointnine.helper.domain.session.ResultKind
 import com.ninepointnine.helper.domain.session.InstallationFlow
 import org.junit.Assert.assertEquals
@@ -167,57 +168,83 @@ class MaintenanceLayoutTest {
     }
 
     @Test
-    fun `authorization dialog closes only after the matching write action settles`() {
-        val application = MaintenanceApplicationRow(
-            componentId = "app-player",
-            displayName = "Player",
-            packageName = "com.example.player",
-            installed = true,
+    fun `authorization dialog exposes one primary action for each lifecycle state`() {
+        val packageName = "com.example.player"
+        val actionable = ApplicationAuthorizationRequirement(
+            permission = "android.permission.CAMERA",
+            grantedBefore = false,
+            grantedAfter = false,
         )
-        val pending = application to MaintenanceApplicationActionId.AUTHORIZE
+        val informational = actionable.copy(automaticallyActionable = false)
 
-        assertFalse(
-            shouldDismissAuthorizationDialog(
-                pending,
+        assertEquals(
+            AuthorizationDialogPrimaryAction.NONE,
+            authorizationDialogPrimaryAction(
                 MaintenanceApplicationFeedback(
-                    packageName = application.packageName,
+                    packageName = packageName,
+                    actionId = MaintenanceApplicationActionId.INSPECT_AUTHORIZATION,
+                    status = MaintenanceActionStatus.RUNNING,
+                ),
+                emptyList(),
+            ),
+        )
+        assertEquals(
+            AuthorizationDialogPrimaryAction.ACKNOWLEDGE,
+            authorizationDialogPrimaryAction(
+                MaintenanceApplicationFeedback(
+                    packageName = packageName,
                     actionId = MaintenanceApplicationActionId.INSPECT_AUTHORIZATION,
                     status = MaintenanceActionStatus.SUCCEEDED,
                 ),
+                emptyList(),
             ),
         )
-        assertFalse(
-            shouldDismissAuthorizationDialog(
-                pending,
+        assertEquals(
+            AuthorizationDialogPrimaryAction.ACKNOWLEDGE,
+            authorizationDialogPrimaryAction(
                 MaintenanceApplicationFeedback(
-                    packageName = application.packageName,
+                    packageName = packageName,
+                    actionId = MaintenanceApplicationActionId.INSPECT_AUTHORIZATION,
+                    status = MaintenanceActionStatus.SUCCEEDED,
+                ),
+                listOf(informational),
+            ),
+        )
+        assertEquals(
+            AuthorizationDialogPrimaryAction.AUTHORIZE,
+            authorizationDialogPrimaryAction(
+                MaintenanceApplicationFeedback(
+                    packageName = packageName,
+                    actionId = MaintenanceApplicationActionId.INSPECT_AUTHORIZATION,
+                    status = MaintenanceActionStatus.SUCCEEDED,
+                ),
+                listOf(actionable),
+            ),
+        )
+        assertEquals(
+            AuthorizationDialogPrimaryAction.NONE,
+            authorizationDialogPrimaryAction(
+                MaintenanceApplicationFeedback(
+                    packageName = packageName,
                     actionId = MaintenanceApplicationActionId.AUTHORIZE,
                     status = MaintenanceActionStatus.RUNNING,
                 ),
+                listOf(actionable),
             ),
         )
-        assertTrue(
-            shouldDismissAuthorizationDialog(
-                pending,
-                MaintenanceApplicationFeedback(
-                    packageName = application.packageName,
-                    actionId = MaintenanceApplicationActionId.AUTHORIZE,
-                    status = MaintenanceActionStatus.SUCCEEDED,
-                    resultCode = "authorization_partially_succeeded",
+        listOf(MaintenanceActionStatus.SUCCEEDED, MaintenanceActionStatus.FAILED).forEach { status ->
+            assertEquals(
+                AuthorizationDialogPrimaryAction.COMPLETE,
+                authorizationDialogPrimaryAction(
+                    MaintenanceApplicationFeedback(
+                        packageName = packageName,
+                        actionId = MaintenanceApplicationActionId.AUTHORIZE,
+                        status = status,
+                    ),
+                    listOf(actionable),
                 ),
-            ),
-        )
-        assertTrue(
-            shouldDismissAuthorizationDialog(
-                pending,
-                MaintenanceApplicationFeedback(
-                    packageName = application.packageName,
-                    actionId = MaintenanceApplicationActionId.AUTHORIZE,
-                    status = MaintenanceActionStatus.FAILED,
-                    reasonCode = "authorization_runtime_permission_write_failed",
-                ),
-            ),
-        )
+            )
+        }
     }
 
     @Test

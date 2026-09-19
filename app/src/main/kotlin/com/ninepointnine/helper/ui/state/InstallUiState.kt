@@ -58,8 +58,6 @@ sealed interface InstallUiState {
         val completedStages: Set<InstallPhase>,
         /** Business flow owning this installation page; never inferred by UI route state. */
         val installationFlow: InstallationFlow = InstallationFlow.INITIAL_INSTALL,
-        /** True when a helper APK is prepared and waiting for the user's install tap. */
-        val selfUpdateReady: Boolean = false,
         /** True after the Android system installer has been launched. */
         val selfUpdateInstallInProgress: Boolean = false,
     ) : InstallUiState {
@@ -281,7 +279,6 @@ sealed interface InstallUiIntent {
     data object StartInstallation : InstallUiIntent
     data object SkipInitialInstallation : InstallUiIntent
     data class StartMaintenanceComponentUpdate(val componentId: String) : InstallUiIntent
-    data object InstallPreparedSelfUpdate : InstallUiIntent
     data object CancelInstallation : InstallUiIntent
     data object ContinueInstallation : InstallUiIntent
     data object RetryInstallation : InstallUiIntent

@@ -1445,7 +1445,7 @@ class InstallerRuntimeTest {
     }
 
     @Test
-    fun `self update stages without touching the vehicle and commits through the ordinary receipt`() = runTest {
+    fun `self update launches automatically after staging and commits through the ordinary receipt`() = runTest {
         val self = selfManifest(versionCode = 2)
         val installer = RecordingSelfUpdateInstaller()
         var deviceExecutionCalls = 0
@@ -1463,16 +1463,12 @@ class InstallerRuntimeTest {
         )
         advanceUntilIdle()
 
-        val prepared = runtime.session.currentSnapshot()
-        assertEquals(InstallationSessionState.ARTIFACTS_READY, prepared.state)
-        assertEquals(InstallationFlow.SELF_UPDATE, prepared.installationFlow)
+        val installing = runtime.session.currentSnapshot()
+        assertEquals(InstallationSessionState.INSTALLING, installing.state)
+        assertEquals(InstallationFlow.SELF_UPDATE, installing.installationFlow)
         assertEquals(1, installer.stageCalls)
-        assertEquals(0, installer.launchCalls)
-        assertEquals(0, deviceExecutionCalls)
-
-        runtime.dispatch(InstallationSessionCommand.InstallPreparedSelfUpdate)
-        assertEquals(InstallationSessionState.INSTALLING, runtime.session.currentSnapshot().state)
         assertEquals(1, installer.launchCalls)
+        assertEquals(0, deviceExecutionCalls)
 
         runtime.onForeground()
         advanceUntilIdle()
@@ -1519,7 +1515,8 @@ class InstallerRuntimeTest {
             ),
         )
         advanceUntilIdle()
-        runtime.dispatch(InstallationSessionCommand.InstallPreparedSelfUpdate)
+        assertEquals(InstallationSessionState.INSTALLING, runtime.session.currentSnapshot().state)
+        assertEquals(1, installer.launchCalls)
         runtime.onForeground()
         advanceUntilIdle()
 
@@ -1567,8 +1564,8 @@ class InstallerRuntimeTest {
             ),
         )
         advanceUntilIdle()
-        runtime.dispatch(InstallationSessionCommand.InstallPreparedSelfUpdate)
         assertEquals(InstallationSessionState.INSTALLING, runtime.session.currentSnapshot().state)
+        assertEquals(1, installer.launchCalls)
 
         runtime.dispatch(InstallationSessionCommand.CancelInstallation)
         advanceUntilIdle()
@@ -1579,6 +1576,75 @@ class InstallerRuntimeTest {
         advanceUntilIdle()
         assertEquals(InstallationSessionState.PAUSED, runtime.session.currentSnapshot().state)
         assertEquals(0, installer.verifyCalls)
+        runtime.close()
+    }
+
+    @Test
+    fun `self update waits for install permission before preparing and resumes after grant`() = runTest {
+        val installer = RecordingSelfUpdateInstaller(
+            permissionStatus = SelfUpdateInstallPermissionStatus.REQUIRED,
+        )
+        val runtime = createSelfUpdateRuntime(
+            self = selfManifest(versionCode = 2),
+            installer = installer,
+            coroutineContext = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        runtime.dispatch(
+            InstallationSessionCommand.StartMaintenanceComponentUpdate(
+                InstallerSelfIdentity.COMPONENT_ID,
+            ),
+        )
+        advanceUntilIdle()
+
+        assertEquals(InstallationSessionState.MAINTENANCE, runtime.session.currentSnapshot().state)
+        assertEquals(1, installer.permissionRequestCalls)
+        assertEquals(0, installer.stageCalls)
+        assertEquals(0, installer.launchCalls)
+
+        installer.permissionStatus = SelfUpdateInstallPermissionStatus.GRANTED
+        runtime.onForeground()
+        advanceUntilIdle()
+
+        assertEquals(InstallationSessionState.INSTALLING, runtime.session.currentSnapshot().state)
+        assertEquals(1, installer.permissionRequestCalls)
+        assertEquals(1, installer.stageCalls)
+        assertEquals(1, installer.launchCalls)
+
+        runtime.onForeground()
+        advanceUntilIdle()
+        assertEquals(InstallationSessionState.SUCCEEDED, runtime.session.currentSnapshot().state)
+        runtime.close()
+    }
+
+    @Test
+    fun `self update permission request failure stops before preparation`() = runTest {
+        val installer = RecordingSelfUpdateInstaller(
+            permissionStatus = SelfUpdateInstallPermissionStatus.REQUIRED,
+            permissionRequestResult = SelfUpdatePermissionRequestResult.Failed(
+                reasonCode = "self_update_unknown_sources_settings_failed",
+                retryable = true,
+            ),
+        )
+        val runtime = createSelfUpdateRuntime(
+            self = selfManifest(versionCode = 2),
+            installer = installer,
+            coroutineContext = UnconfinedTestDispatcher(testScheduler),
+        )
+
+        runtime.dispatch(
+            InstallationSessionCommand.StartMaintenanceComponentUpdate(
+                InstallerSelfIdentity.COMPONENT_ID,
+            ),
+        )
+        advanceUntilIdle()
+
+        val failed = runtime.session.currentSnapshot()
+        assertEquals(InstallationSessionState.FAILED, failed.state)
+        assertEquals("self_update_unknown_sources_settings_failed", failed.failure?.reasonCode)
+        assertEquals(1, installer.permissionRequestCalls)
+        assertEquals(0, installer.stageCalls)
+        assertEquals(0, installer.launchCalls)
         runtime.close()
     }
 
@@ -2303,6 +2369,9 @@ class InstallerRuntimeTest {
     }
 
     private class RecordingSelfUpdateInstaller(
+        var permissionStatus: SelfUpdateInstallPermissionStatus = SelfUpdateInstallPermissionStatus.GRANTED,
+        private val permissionRequestResult: SelfUpdatePermissionRequestResult =
+            SelfUpdatePermissionRequestResult.Started,
         private val verification: (ArtifactManifest) -> SelfUpdateVerificationResult = { manifest ->
             SelfUpdateVerificationResult.Confirmed(
                 InstalledArtifactEvidence(
@@ -2316,10 +2385,18 @@ class InstallerRuntimeTest {
             )
         },
     ) : SelfUpdateInstaller {
+        var permissionRequestCalls = 0
         var stageCalls = 0
         var launchCalls = 0
         var verifyCalls = 0
         var clearCalls = 0
+
+        override fun installPermissionStatus(): SelfUpdateInstallPermissionStatus = permissionStatus
+
+        override fun requestInstallPermission(): SelfUpdatePermissionRequestResult {
+            permissionRequestCalls += 1
+            return permissionRequestResult
+        }
 
         override fun stage(artifact: PreparedArtifact): SelfUpdateStageResult {
             stageCalls += 1

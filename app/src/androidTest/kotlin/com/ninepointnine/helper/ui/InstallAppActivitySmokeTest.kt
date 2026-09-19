@@ -2,12 +2,18 @@ package com.ninepointnine.helper.ui
 
 import android.content.Intent
 import android.graphics.Bitmap
+import android.os.ParcelFileDescriptor
 import android.view.WindowManager
 import androidx.activity.compose.setContent
 import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.graphics.asAndroidBitmap
+import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.captureToImage
+import androidx.compose.ui.test.hasAnyAncestor
+import androidx.compose.ui.test.hasText
+import androidx.compose.ui.test.isDialog
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
@@ -27,10 +33,17 @@ import com.ninepointnine.helper.domain.session.InstallationSessionCommand
 import com.ninepointnine.helper.domain.session.InstallationSessionEvent
 import com.ninepointnine.helper.domain.session.InstallationSessionSnapshot
 import com.ninepointnine.helper.domain.session.InstallationSessionState
+import com.ninepointnine.helper.domain.session.MaintenanceActionId
+import com.ninepointnine.helper.domain.session.MaintenanceApplicationActionId
+import com.ninepointnine.helper.domain.session.MaintenanceInventoryState
 import com.ninepointnine.helper.domain.session.MaintenanceSnapshot
+import com.ninepointnine.helper.domain.session.ManagedApplicationStatus
+import com.ninepointnine.helper.domain.device.ApplicationAuthorizationRequirement
+import com.ninepointnine.helper.domain.device.ApplicationAuthorizationResultValue
 import com.ninepointnine.helper.toInstallationSessionCommand
 import com.ninepointnine.helper.ui.state.failureReasonToUserMessage
 import java.io.File
+import java.util.concurrent.atomic.AtomicReference
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -117,6 +130,120 @@ class InstallAppActivitySmokeTest {
         }
     }
 
+    @Test
+    fun authorizationDialogUsesTerminalActionsAndKeepsSuccessNoticeAboveIt() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val component = ComponentDescriptor(
+            id = "browser",
+            displayName = "测试浏览器",
+            required = false,
+        )
+        val application = ManagedApplicationStatus(
+            componentId = component.id,
+            packageName = "com.example.browser",
+            installed = true,
+            versionLabel = "1.0",
+            versionCode = 1L,
+        )
+        val inspectionRequirements = AtomicReference(emptyList<ApplicationAuthorizationRequirement>())
+        val session = InstallationSession(
+            initialSnapshot = InstallationSessionSnapshot(
+                state = InstallationSessionState.MAINTENANCE,
+                device = DeviceSummary(
+                    id = "smoke-vehicle",
+                    displayName = "Smoke Vehicle",
+                    connectionStatus = DeviceConnectionStatus.CONFIRMED,
+                ),
+                components = listOf(component),
+                maintenance = MaintenanceSnapshot(
+                    routeAction = MaintenanceActionId.MANAGE_APPS,
+                    managedApplicationsState = MaintenanceInventoryState.READY,
+                    managedApplications = listOf(application),
+                ),
+            ),
+        )
+        val scenario = ActivityScenario.launch<DebugScenarioActivity>(
+            Intent(context, DebugScenarioActivity::class.java)
+                .putExtra(DebugScenarioActivity.EXTRA_SCENARIO, "maintenance"),
+        )
+        try {
+            scenario.onActivity { activity ->
+                activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                activity.setContent {
+                    InstallApp(session.snapshots.collectAsState().value, onIntent = { intent ->
+                        val command = intent.toInstallationSessionCommand()
+                        if (command is InstallationSessionCommand.MaintenanceApplicationAction) {
+                            session.dispatch(command)
+                            val requirements = when (command.actionId) {
+                                MaintenanceApplicationActionId.INSPECT_AUTHORIZATION ->
+                                    inspectionRequirements.get()
+                                MaintenanceApplicationActionId.AUTHORIZE ->
+                                    inspectionRequirements.get().map {
+                                        it.copy(
+                                            grantedAfter = true,
+                                            reasonCode = null,
+                                            authorizationAttempted = true,
+                                        )
+                                    }
+                                else -> emptyList()
+                            }
+                            if (command.actionId in setOf(
+                                    MaintenanceApplicationActionId.INSPECT_AUTHORIZATION,
+                                    MaintenanceApplicationActionId.AUTHORIZE,
+                                )
+                            ) {
+                                session.dispatchEvent(
+                                    InstallationSessionEvent.MaintenanceApplicationAuthorizationResolved(
+                                        actionId = command.actionId,
+                                        result = ApplicationAuthorizationResultValue(
+                                            componentId = application.componentId,
+                                            packageName = application.packageName,
+                                            requirements = requirements,
+                                        ),
+                                    ),
+                                )
+                            }
+                        }
+                    })
+                }
+            }
+
+            clickText(component.displayName)
+            clickText(context.getString(R.string.maintenance_authorize))
+            dialogText(context.getString(R.string.maintenance_install_done)).assertIsDisplayed()
+            dialogText(context.getString(R.string.maintenance_cancel)).assertDoesNotExist()
+            dialogText(context.getString(R.string.maintenance_install_done)).performClick()
+            compose.waitForIdle()
+
+            inspectionRequirements.set(
+                listOf(
+                    ApplicationAuthorizationRequirement(
+                        permission = "android.permission.CAMERA",
+                        grantedBefore = false,
+                        grantedAfter = false,
+                    ),
+                ),
+            )
+            clickText(context.getString(R.string.maintenance_authorize))
+            dialogText(context.getString(R.string.maintenance_authorize)).performClick()
+            compose.waitForIdle()
+
+            dialogText(context.getString(R.string.maintenance_finish)).assertIsDisplayed()
+            compose.onNodeWithTag("application_action_notice", useUnmergedTree = true).assertIsDisplayed()
+            compose.onNodeWithText(context.getString(R.string.maintenance_authorization_success)).assertIsDisplayed()
+            captureDeviceScreen("authorization-finished-top-layer")
+
+            dialogText(context.getString(R.string.maintenance_finish)).performClick()
+            compose.waitForIdle()
+            compose.onNodeWithText(
+                context.getString(R.string.maintenance_authorization_title, component.displayName),
+            ).assertDoesNotExist()
+        } finally {
+            scenario.close()
+            session.close()
+        }
+    }
+
     private fun captureScreen(name: String) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val bitmap = compose.onRoot().captureToImage().asAndroidBitmap()
@@ -128,6 +255,22 @@ class InstallAppActivitySmokeTest {
             bitmap.recycle()
         }
     }
+
+    private fun captureDeviceScreen(name: String) {
+        val instrumentation = InstrumentationRegistry.getInstrumentation()
+        ParcelFileDescriptor.AutoCloseInputStream(
+            instrumentation.uiAutomation.executeShellCommand(
+                "screencap -p /data/local/tmp/03helper-$name.png",
+            ),
+        ).use { output ->
+            output.readBytes()
+        }
+    }
+
+    private fun dialogText(text: String) = compose.onNode(
+        hasText(text) and hasAnyAncestor(isDialog()),
+        useUnmergedTree = true,
+    )
 
     private fun clickText(text: String) {
         compose.onNodeWithText(text).performClick()

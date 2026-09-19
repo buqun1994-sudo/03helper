@@ -337,8 +337,6 @@ object InstallUiStateMapper {
             ),
             completedStages = completedStages,
             installationFlow = snapshot.installationFlow,
-            selfUpdateReady = snapshot.installationFlow == InstallationFlow.SELF_UPDATE &&
-                snapshot.state == InstallationSessionState.ARTIFACTS_READY,
             selfUpdateInstallInProgress = snapshot.installationFlow == InstallationFlow.SELF_UPDATE &&
                 snapshot.state == InstallationSessionState.INSTALLING,
         )

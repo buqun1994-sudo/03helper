@@ -119,7 +119,6 @@
     <string name="maintenance_update_node_checking">正在检查%1$s</string>
     <string name="maintenance_update_action">更新</string>
     <string name="self_update_preparing">正在准备 03 车机助手更新</string>
-    <string name="self_update_install">安装更新</string>
     <string name="maintenance_update_current">当前已是最新版本</string>
     <string name="maintenance_available_version">最新 v%1$s</string>
     <string name="maintenance_installed_version">当前 %1$s</string>
@@ -173,6 +172,7 @@
     <string name="maintenance_uninstall_success">卸载完成</string>
     <string name="maintenance_uninstall_done">卸载完成</string>
     <string name="maintenance_cancel">取消</string>
+    <string name="maintenance_finish">完成</string>
     <string name="maintenance_install_start">开始下载并安装</string>
     <string name="maintenance_install_done">知道了</string>
     <string name="maintenance_detail_name">应用名</string>

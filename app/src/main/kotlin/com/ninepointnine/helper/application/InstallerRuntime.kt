@@ -114,6 +114,16 @@ sealed interface SelfUpdateStageResult {
     data class Failed(val reasonCode: String, val retryable: Boolean = true) : SelfUpdateStageResult
 }
 
+enum class SelfUpdateInstallPermissionStatus {
+    GRANTED,
+    REQUIRED,
+}
+
+sealed interface SelfUpdatePermissionRequestResult {
+    data object Started : SelfUpdatePermissionRequestResult
+    data class Failed(val reasonCode: String, val retryable: Boolean = true) : SelfUpdatePermissionRequestResult
+}
+
 sealed interface SelfUpdateLaunchResult {
     data object Started : SelfUpdateLaunchResult
     data class Failed(val reasonCode: String, val retryable: Boolean = true) : SelfUpdateLaunchResult
@@ -127,6 +137,8 @@ sealed interface SelfUpdateVerificationResult {
 
 /** Android-specific installer adapter; no UI or session state lives here. */
 interface SelfUpdateInstaller {
+    fun installPermissionStatus(): SelfUpdateInstallPermissionStatus
+    fun requestInstallPermission(): SelfUpdatePermissionRequestResult
     fun stage(artifact: PreparedArtifact): SelfUpdateStageResult
     fun launch(staged: StagedSelfUpdate): SelfUpdateLaunchResult
     fun verifyInstalled(manifest: ArtifactManifest): SelfUpdateVerificationResult
@@ -204,6 +216,7 @@ class InstallerRuntime(
     private var lastMaintenancePersistenceOperation: MaintenancePersistenceOperation? = null
     private var closed = false
     private var pendingSelfUpdate: PendingSelfUpdate? = null
+    private var pendingSelfUpdatePermissionComponentId: String? = null
 
     private data class PendingSelfUpdate(
         val sessionId: Long,
@@ -255,6 +268,7 @@ class InstallerRuntime(
     @Synchronized
     fun dispatch(command: InstallationSessionCommand): InstallationSessionSnapshot {
         if (closed) return session.currentSnapshot()
+        preflightSelfUpdate(command)?.let { return it }
         // Mark a manual maintenance disconnect before publishing the snapshot.
         // StateFlow collectors may reconcile synchronously on the same dispatcher;
         // setting this after dispatch lets the collector mistake the user action
@@ -513,6 +527,7 @@ class InstallerRuntime(
     @Synchronized
     fun onForeground(): InstallationSessionSnapshot {
         foregroundGeneration += 1L
+        resumeSelfUpdateAfterPermission()?.let { return it }
         pollSelfUpdate()
         val current = session.currentSnapshot()
         return when {
@@ -586,6 +601,79 @@ class InstallerRuntime(
                 )
             }
         }
+    }
+
+    private fun preflightSelfUpdate(
+        command: InstallationSessionCommand,
+    ): InstallationSessionSnapshot? {
+        if (command !is InstallationSessionCommand.StartMaintenanceComponentUpdate ||
+            !InstallerSelfIdentity.isSelfComponentId(command.componentId)
+        ) {
+            return null
+        }
+        val installer = selfUpdateInstaller
+            ?: return failSelfUpdateBeforePreparation(command, "self_update_installer_unavailable")
+        val permission = runCatching { installer.installPermissionStatus() }.getOrElse {
+            return failSelfUpdateBeforePreparation(command, "self_update_unknown_sources_settings_failed")
+        }
+        if (permission == SelfUpdateInstallPermissionStatus.GRANTED) {
+            pendingSelfUpdatePermissionComponentId = null
+            return null
+        }
+        return when (val request = runCatching { installer.requestInstallPermission() }.getOrElse {
+            SelfUpdatePermissionRequestResult.Failed(
+                "self_update_unknown_sources_settings_failed",
+                retryable = true,
+            )
+        }) {
+            SelfUpdatePermissionRequestResult.Started -> {
+                pendingSelfUpdatePermissionComponentId = command.componentId
+                session.currentSnapshot()
+            }
+
+            is SelfUpdatePermissionRequestResult.Failed ->
+                failSelfUpdateBeforePreparation(command, request.reasonCode)
+        }
+    }
+
+    private fun resumeSelfUpdateAfterPermission(): InstallationSessionSnapshot? {
+        val componentId = pendingSelfUpdatePermissionComponentId ?: return null
+        val installer = selfUpdateInstaller ?: run {
+            pendingSelfUpdatePermissionComponentId = null
+            return null
+        }
+        return when (runCatching { installer.installPermissionStatus() }.getOrNull()) {
+            SelfUpdateInstallPermissionStatus.GRANTED -> {
+                pendingSelfUpdatePermissionComponentId = null
+                dispatch(InstallationSessionCommand.StartMaintenanceComponentUpdate(componentId))
+            }
+
+            else -> {
+                pendingSelfUpdatePermissionComponentId = null
+                null
+            }
+        }
+    }
+
+    private fun failSelfUpdateBeforePreparation(
+        command: InstallationSessionCommand.StartMaintenanceComponentUpdate,
+        reasonCode: String,
+    ): InstallationSessionSnapshot {
+        pendingSelfUpdatePermissionComponentId = null
+        val before = session.currentSnapshot()
+        val started = session.dispatch(command)
+        if (started.sessionId != before.sessionId) cancelTransferWork()
+        if (started.state == InstallationSessionState.SELECTION_CONFIRMED &&
+            started.installationFlow == InstallationFlow.SELF_UPDATE
+        ) {
+            eventPortFor(started).emit(
+                InstallationSessionEvent.FatalError(
+                    category = FailureCategory.INSTALLATION,
+                    reasonCode = reasonCode,
+                ),
+            )
+        }
+        return session.currentSnapshot()
     }
 
     /** Reads the package manager only after the system installer has returned. */
@@ -678,6 +766,7 @@ class InstallerRuntime(
     )
 
     private fun clearPendingSelfUpdate() {
+        pendingSelfUpdatePermissionComponentId = null
         val pending = pendingSelfUpdate ?: return
         pendingSelfUpdate = null
         selfUpdateInstaller?.let { installer -> runCatching { installer.clear(pending.staged) } }
@@ -1101,6 +1190,7 @@ class InstallerRuntime(
                                     batchId = batchPlan.batchId,
                                     staged = staged.staged,
                                 )
+                                dispatch(InstallationSessionCommand.InstallPreparedSelfUpdate)
                             }
 
                             is SelfUpdateStageResult.Failed -> {

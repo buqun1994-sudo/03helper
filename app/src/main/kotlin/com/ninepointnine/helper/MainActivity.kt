@@ -137,7 +137,6 @@ internal fun InstallUiIntent.toInstallationSessionCommand(): InstallationSession
     InstallUiIntent.SkipInitialInstallation -> InstallationSessionCommand.SkipInitialInstallation
     is InstallUiIntent.StartMaintenanceComponentUpdate ->
         InstallationSessionCommand.StartMaintenanceComponentUpdate(componentId)
-    InstallUiIntent.InstallPreparedSelfUpdate -> InstallationSessionCommand.InstallPreparedSelfUpdate
     InstallUiIntent.CancelInstallation -> InstallationSessionCommand.CancelInstallation
     InstallUiIntent.ContinueInstallation -> InstallationSessionCommand.ContinueInstallation
     InstallUiIntent.RetryInstallation -> InstallationSessionCommand.RetryInstallation

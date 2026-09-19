@@ -1,3 +1,19 @@
+# 2026-09-20 1.0.17 staging 测试包与后台导入清单
+
+1. 按用户要求运行唯一版本脚本，将 Release 真值从 `1.0.16 (17)` 升级为 `1.0.17 (18)`；staging 由同一版本派生为 `com.ninepointnine.helper.test`、`1.0.17-test (18)`。Cloud 统一登记、助手身份档案和本机产物索引已同步；产物与本轮源码同批收口，保持 `releaseEligible=false`。
+2. 通过 Cloud `03app:package:staging` 唯一入口导出到桌面测试包目录：APK 为 `21,309,223` 字节、SHA-256 `9a46454bd3865a40df07937a5fb703c996b674db468efd6236a020cf2c11472b`；ZIP 为 `20,351,173` 字节、SHA-256 `46ca33dcf2467d69d31a024d118c582894aabc2e7680dc8f42b30a9d016c9fc0`。包名、版本、单一 staging signer、APK v2 和 ZIP 内外字节一致性均通过。
+3. 通过 `android-config:prepare` 从测试目录内 03桌面、03歌词、03投屏、03车机助手和文件管理器五个实际 APK 生成 `android-app-releases.json`，大小 `2,928` 字节、SHA-256 `f0d6a59a284484ad9b67fd9b85746ac61307d97599c9c76aeb75c1f9fad39354`。五个目标 ZIP 均逐一验证为单 APK，解压摘要与清单所列源 APK 完全一致；正式参考目录中但测试目录不存在的第三方条目未虚构进入清单。
+4. 03 APP 登记、staging 打包与发布资料定向测试 `20/20` 通过，helper 定向登记 Guard、项目文档、Skills 与差异格式检查通过。本轮未安装 staging、未上传蓝奏、未导入后台或部署；源码与台账按用户随后下达的提交推送指令收口。
+
+# 2026-09-20 授权弹窗与助手自更新交互收口
+
+1. 管理应用的一键授权弹窗改为由同一授权反馈与声明列表决定唯一底部动作：检查中 / 执行中不显示按钮；没有可自动授权项或声明读取失败时只显示右侧“知道了”；存在项目时显示“取消 / 一键授权”；授权成功、部分成功或失败后弹窗保持打开并只显示“完成”，点击后才关闭。授权动作不再通过副作用自动关闭弹窗。
+2. 当前唯一的应用动作底部通知改为透明、不可聚焦且不可触摸的顶层窗口，晚于业务弹窗呈现，不拦截下层操作。`RMX1901` Android 11 上的真实 Compose 用例完成“空计划 -> 知道了 -> 有项目授权 -> 完成 -> 授权成功通知”闭环，`1080 x 2340` 整屏截图确认通知位于授权弹窗半透明遮罩之上且未被压暗。
+3. 助手自更新在 `InstallerRuntime` 创建下载批次前查询“安装未知应用”授权；缺失时 `AndroidSelfUpdateInstaller` 只打开当前包的系统授权页，不开始准备或下载。回前台确认已授权后重新派发原单目标更新；制品校验与暂存完成后自动派发既有领域安装命令并进入系统安装器，UI 删除 `selfUpdateReady`、手动“安装更新”意图和按钮。系统安装返回后的 `PackageManager` 身份回读与普通批次收据保持不变。
+4. 指定 JDK 17 下 Debug JVM `396/396`（0 failures / 0 errors / 0 skipped）、Debug Lint、Debug 主 APK、AndroidTest APK 和项目文档、Skills、本机环境、`git diff --check` 均通过。新增运行时回归覆盖权限缺失不准备、授权返回自动继续、权限页启动失败、暂存完成自动拉起安装器；新增布局矩阵和设备 UI 用例覆盖授权弹窗四种底部动作与最高层通知。设备首次执行时因锁屏使 Activity 进入 `STOPPED`，唤醒后原样重跑通过，不属于产品失败。
+5. 最终 Debug APK 为 `com.ninepointnine.helper.test`、`1.0.16-test (17)`，大小 `21,888,541` 字节，SHA-256 `7645ad39180b8107ab5bcf8fcd7b8a905b2336c08fba6fb0797454f202118e9a`，单一 Android Debug signer、APK v2 有效，Launcher 为 `com.ninepointnine.helper.MainActivity`。测试框架结束后先恢复主包，再执行一次 `adb install -r` 真正覆盖安装；`firstInstallTime` 保持 `2026-09-20 04:02:50`，`lastUpdateTime` 更新为 `04:03:50`，冷启动返回 `Status: ok`。
+6. `check-03app-repository.mjs` 按预期 fail closed：共享 Cloud 登记仍记录 `1.0.15 (16)` / `f31a342d8979`，本仓库真值已是 `1.0.16 (17)` / `27abe66184ca` 且当前工作树有本轮未提交改动；未越权修改 Cloud 台账。真实 Cloud 新版制品下载、“安装未知应用”系统授权页和系统安装器回读仍需使用实际更高版本发布资料人工确认；本轮未操作三星设备、未对车机写入、未安装 Release、未提交、未推送或发布。
+
 # 2026-09-20 声明驱动一键授权与本机 APK 安装收口
 
 1. 一键授权已统一为“车机实际安装 APK 原始 Manifest -> 目标系统能力与本地有限白名单过滤 -> 冻结类型化计划 -> 逐项回读 -> 精确批次收据”。`AndroidBinaryManifestReader` 直接解析二进制 `AndroidManifest.xml`，手机和车机 PackageManager 均不能增删声明；管理页只展示原始声明且车机可自动处理的危险权限、固定 AppOp、无障碍 / 通知服务。初始化、更新、推荐应用、本机 APK 和管理页共用同一动作编译与证据语义；批次收据携带实际执行计划，会话校验版本、组件 / 包身份、声明、动作和 evidence，拒绝从旧 manifest、PackageManager 投影或状态回读重建计划。
