@@ -120,7 +120,7 @@ class MaintenanceLayoutTest {
     }
 
     @Test
-    fun `managed application card exposes six actions in the required order`() {
+    fun `managed application card exposes seven actions in the required order`() {
         assertEquals(
             listOf(
                 MaintenanceApplicationActionId.START,
@@ -129,6 +129,7 @@ class MaintenanceLayoutTest {
                 MaintenanceApplicationActionId.AUTHORIZE,
                 MaintenanceApplicationActionId.UNINSTALL,
                 MaintenanceApplicationActionId.DETAILS,
+                MaintenanceApplicationActionId.EXPORT_DIAGNOSTICS,
             ),
             MANAGED_APPLICATION_ACTIONS,
         )

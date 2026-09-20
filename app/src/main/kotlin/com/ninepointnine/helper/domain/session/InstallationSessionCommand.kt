@@ -53,6 +53,11 @@ sealed interface InstallationSessionCommand {
         val packageName: String,
         val actionId: MaintenanceApplicationActionId,
     ) : InstallationSessionCommand
+    /** Starts a typed diagnostic export after Android's save-document picker returns. */
+    data class ExportApplicationDiagnostics(
+        val packageName: String,
+        val destinationUri: String,
+    ) : InstallationSessionCommand
     data class ToggleMaintenanceInstallationComponent(
         val componentId: String,
         val selected: Boolean,

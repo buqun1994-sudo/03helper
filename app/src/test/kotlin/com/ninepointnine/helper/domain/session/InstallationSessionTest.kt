@@ -1476,6 +1476,42 @@ class InstallationSessionTest {
     }
 
     @Test
+    fun `diagnostic export enters the same running application action state`() {
+        val packageName = AuthorizationPlanFactory.DESKTOP_PACKAGE_NAME
+        val base = maintenanceSession().currentSnapshot()
+        val session = InstallationSession(
+            initialSnapshot = base.copy(
+                maintenance = base.maintenance.copy(
+                    routeAction = MaintenanceActionId.MANAGE_APPS,
+                    managedApplications = listOf(
+                        ManagedApplicationStatus(
+                            componentId = "desktop",
+                            packageName = packageName,
+                            installed = true,
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        session.dispatch(
+            InstallationSessionCommand.ExportApplicationDiagnostics(
+                packageName = packageName,
+                destinationUri = "content://documents/export.zip",
+            ),
+        )
+
+        assertEquals(
+            MaintenanceApplicationActionRecord(
+                packageName = packageName,
+                actionId = MaintenanceApplicationActionId.EXPORT_DIAGNOSTICS,
+                status = MaintenanceActionStatus.RUNNING,
+            ),
+            session.currentSnapshot().maintenance.applicationAction,
+        )
+    }
+
+    @Test
     fun `single application authorization progress updates requirements without completing action`() {
         val packageName = "com.example.player"
         val base = maintenanceSession().currentSnapshot()

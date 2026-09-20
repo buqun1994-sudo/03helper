@@ -475,7 +475,29 @@ class InstallerRuntime(
                     after.maintenance.applicationAction?.status == MaintenanceActionStatus.RUNNING
                 ) {
                     if (after.sessionId != before.sessionId) cancelTransferWork()
-                    launchMaintenanceApplicationAction(effectiveCommand, after)
+                    launchMaintenanceApplicationAction(
+                        packageName = effectiveCommand.packageName,
+                        actionId = effectiveCommand.actionId,
+                        snapshot = after,
+                    )
+                }
+            }
+
+            is InstallationSessionCommand.ExportApplicationDiagnostics -> {
+                if (
+                    before.state == InstallationSessionState.MAINTENANCE &&
+                    after.maintenance.applicationAction?.packageName == effectiveCommand.packageName &&
+                    after.maintenance.applicationAction?.actionId ==
+                    com.ninepointnine.helper.domain.session.MaintenanceApplicationActionId.EXPORT_DIAGNOSTICS &&
+                    after.maintenance.applicationAction?.status == MaintenanceActionStatus.RUNNING
+                ) {
+                    if (after.sessionId != before.sessionId) cancelTransferWork()
+                    launchMaintenanceApplicationAction(
+                        packageName = effectiveCommand.packageName,
+                        actionId = com.ninepointnine.helper.domain.session.MaintenanceApplicationActionId.EXPORT_DIAGNOSTICS,
+                        snapshot = after,
+                        diagnosticDestinationUri = effectiveCommand.destinationUri,
+                    )
                 }
             }
 
@@ -1410,8 +1432,10 @@ class InstallerRuntime(
     }
 
     private fun launchMaintenanceApplicationAction(
-        command: InstallationSessionCommand.MaintenanceApplicationAction,
+        packageName: String,
+        actionId: com.ninepointnine.helper.domain.session.MaintenanceApplicationActionId,
         snapshot: InstallationSessionSnapshot,
+        diagnosticDestinationUri: String? = null,
     ) {
         cancelMaintenanceIconHydration()
         maintenanceJob?.cancel()
@@ -1420,8 +1444,8 @@ class InstallerRuntime(
         if (controller == null) {
             port.emit(
                 InstallationSessionEvent.MaintenanceApplicationActionFailed(
-                    packageName = command.packageName,
-                    actionId = command.actionId,
+                    packageName = packageName,
+                    actionId = actionId,
                     reasonCode = "maintenance_controller_unavailable",
                     retryable = false,
                 ),
@@ -1432,19 +1456,20 @@ class InstallerRuntime(
         maintenanceJob = deviceWorkOwner.replace {
             try {
                 controller.executeApplicationAction(
-                    packageName = command.packageName,
-                    actionId = command.actionId,
+                    packageName = packageName,
+                    actionId = actionId,
                     snapshot = snapshot,
                     connection = connection,
                     eventPort = port,
+                    diagnosticDestinationUri = diagnosticDestinationUri,
                 )
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
                 port.emit(
                     InstallationSessionEvent.MaintenanceApplicationActionFailed(
-                        packageName = command.packageName,
-                        actionId = command.actionId,
+                        packageName = packageName,
+                        actionId = actionId,
                         reasonCode = "maintenance_application_action_failed",
                         retryable = true,
                     ),

@@ -110,6 +110,7 @@ enum class MaintenanceApplicationActionId {
     AUTHORIZE,
     UNINSTALL,
     DETAILS,
+    EXPORT_DIAGNOSTICS,
 }
 
 enum class MaintenanceActionId {

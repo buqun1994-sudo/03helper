@@ -15,6 +15,7 @@ import com.ninepointnine.helper.application.maintenance.MaintenanceController
 import com.ninepointnine.helper.application.maintenance.MaintenanceDiagnosticStore
 import com.ninepointnine.helper.application.maintenance.MaintenanceSessionStore
 import com.ninepointnine.helper.data.artifact.AndroidApkMetadataReader
+import com.ninepointnine.helper.data.artifact.AndroidApplicationDiagnosticExporter
 import com.ninepointnine.helper.data.artifact.AndroidUserSelectedApkPreparer
 import com.ninepointnine.helper.data.artifact.ApkIconRepository
 import com.ninepointnine.helper.data.artifact.ArchiveIdentityVerifier
@@ -108,6 +109,9 @@ object ProductionInstallerRuntimeFactory {
             artifactCache = artifactCache,
             diagnosticStore = MaintenanceDiagnosticStore(
                 File(applicationContext.cacheDir, DIAGNOSTIC_CACHE_DIRECTORY),
+            ),
+            applicationDiagnosticExporter = AndroidApplicationDiagnosticExporter(
+                applicationContext.contentResolver,
             ),
             loadDistributionConfig = { folderCatalogAdapter.loadConfiguration() },
             loadDistributionSelection = { folderCatalogAdapter.loadSelection() },

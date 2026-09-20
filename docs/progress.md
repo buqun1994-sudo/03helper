@@ -1,3 +1,13 @@
+# 2026-09-20 指定应用诊断日志导出（实现与测试手机 smoke 完成，待用户车机主测）
+
+1. 管理已安装应用卡片新增第七项“导出日志”，最后一项在双列操作区独占整行，避免七项操作留下视觉空位。点击后先打开 Android 系统 ZIP 保存位置选择器；只有用户返回有效 `content://` 目标后，现有维护会话才进入采集运行态，取消选择不会连接车机或读取日志。
+2. 日志导出沿现有 `InstallationSession -> InstallerRuntime -> MaintenanceController -> MaintenanceCommandGateway` 主链执行，只对当前受控库存中的精确包名采集。ZIP 包含目标包及已观察 PID 的应用 Logcat、明确引用目标包名的系统 Logcat，以及 package、process、Activity、Service 和 memory 状态；不使用 `run-as`、不读取 `/data/user/0`、不清空 Logcat，也不上传 Cloud。应用写入私有文件但未输出到 Logcat 的内部日志受 Android 沙箱限制，不在能力范围内。
+3. 采集固定为 Logcat 最近 `4,000` 行，每节最多 `512 KiB`、正文节总计最多 `4 MiB`；Authorization、Cookie、token、JWT、设备标识、邮箱、手机号和 MAC 等在写入前统一脱敏。相似包名按边界匹配，`com.example.player.other` 不会混入 `com.example.player`；ZIP 元数据固定，便于测试与重复核验。
+4. 指定 JDK 17 下 `:app:testDebugUnitTest`、`:app:lintDebug`、`:app:assembleDebug` 和 `:app:assembleDebugAndroidTest` 全部通过；Debug JVM `409/409`（0 failures / 0 errors / 0 skipped）。测试手机 `RMX1901`（Android 11、无线 ADB）上的完整 `InstallAppActivitySmokeTest` 为 `OK (7 tests)`，覆盖七项按钮、导出按钮整行宽度、点击只打开保存选择器，以及选择位置前会话不进入采集运行态。实机截图核对前三行双列、末行整行，文字、图标和边框无截断、重叠或异常留白。
+5. 最终 Debug APK 为 `com.ninepointnine.helper.test`、`1.0.19-test (20)`，大小 `21,494,591` 字节，SHA-256 `a721e65679140a4d3d1653e63379fbbbe7b43b568ebe3019b365800a93a1cd55`；单一 Android Debug signer，证书 SHA-256 `2990047fddf6d6ec1eb7f83731fcc1398616e5fb83aec97542a4f132c35a1a27`，APK Signature Scheme v2 通过。ColorOS 首次要求用户完成系统账号验证，验证后主包与 AndroidTest 包均安装成功；测试结束再次保留数据覆盖安装主包，`firstInstallTime` 保持 `2026-09-20 22:37:11`，`lastUpdateTime` 更新为 `22:40:03`。冷启动返回 `Status: ok / LaunchState: COLD`，进程存活、`MainActivity` resumed，最近日志无该包 FATAL / ANR；未绕过系统验证、未卸载或清数据。
+6. 规定车机发现入口再次扫描 253 个地址，未发现 `S56_HQX / SDK 28`；用户确认车机当前不在线，并将在车机上线后手动验证。最小验收范围：在“管理已安装应用”展开任一目标，点击“导出日志”，选择 ZIP 保存位置，确认成功提示；打开 ZIP 核对 `summary.txt`、应用 / 系统 Logcat 与状态文件存在，敏感样本显示为 `[REDACTED]`，相似包名日志未混入。应用仅写入私有文件且未输出到 Logcat 的内部日志不属于本能力范围。
+7. 本轮未安装 Release、未清数据、未卸载、未降级、未重启、未提交、未推送或发布。共享 03 APP 登记仍为 `1.0.18 (19)`，与客户端当前 `1.0.19 (20)` 及 dirty 工作树不一致；未越权修改 Cloud 台账。
+
 # 2026-09-20 1.0.19 Release APK / ZIP 与正式目录清单（已导出，未部署）
 
 1. 按用户要求将唯一 Release 版本从 `1.0.18 (19)` 递增为 `1.0.19 (20)`；正式包身份保持 `com.ninepointnine.helper`，staging / Debug 由同一版本文件派生测试身份。

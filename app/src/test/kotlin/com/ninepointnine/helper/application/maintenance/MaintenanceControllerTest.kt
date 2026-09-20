@@ -26,6 +26,8 @@ import com.ninepointnine.helper.domain.device.ApkServiceDeclaration
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationRequirement
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationResult
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationResultValue
+import com.ninepointnine.helper.domain.device.ApplicationDiagnosticReport
+import com.ninepointnine.helper.domain.device.ApplicationDiagnosticsResult
 import com.ninepointnine.helper.domain.device.InstalledArtifactEvidence
 import com.ninepointnine.helper.domain.device.ManagedApplicationProbe
 import com.ninepointnine.helper.domain.device.ManagedApplicationsResult
@@ -55,6 +57,59 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MaintenanceControllerTest {
+    @Test
+    fun `application diagnostics are collected for the live package and written only to the selected uri`() = runBlocking {
+        val packageName = "com.example.player"
+        val report = ApplicationDiagnosticReport(
+            packageName = packageName,
+            capturedAtEpochMillis = 1_800_000_000_000L,
+        )
+        val gateway = FakeGateway().apply {
+            applicationDiagnosticsResult = ApplicationDiagnosticsResult.Completed(report)
+        }
+        val base = maintenanceSnapshot(emptyList())
+        val snapshot = base.copy(
+            maintenance = base.maintenance.copy(
+                managedApplications = listOf(
+                    ManagedApplicationStatus("app-player", packageName, installed = true),
+                ),
+            ),
+        )
+        var exportedUri: String? = null
+        var exportedReport: ApplicationDiagnosticReport? = null
+        val events = mutableListOf<InstallationSessionEvent>()
+        val controller = MaintenanceController(
+            artifactCache = tempCache(),
+            diagnosticStore = tempDiagnostics(),
+            applicationDiagnosticExporter = ApplicationDiagnosticExporter { uri, value ->
+                exportedUri = uri
+                exportedReport = value
+                true
+            },
+        )
+
+        controller.executeApplicationAction(
+            packageName = packageName,
+            actionId = MaintenanceApplicationActionId.EXPORT_DIAGNOSTICS,
+            snapshot = snapshot,
+            connection = lease(gateway),
+            eventPort = InstallationSessionEventPort(events::add),
+            diagnosticDestinationUri = "content://documents/export.zip",
+        )
+
+        assertEquals(packageName, gateway.diagnosticApplication?.packageName)
+        assertEquals("content://documents/export.zip", exportedUri)
+        assertEquals(report, exportedReport)
+        assertEquals(
+            InstallationSessionEvent.MaintenanceApplicationActionCompleted(
+                packageName = packageName,
+                actionId = MaintenanceApplicationActionId.EXPORT_DIAGNOSTICS,
+                resultCode = "application_diagnostics_exported",
+            ),
+            events.single(),
+        )
+    }
+
     @Test
     fun `single application authorization forwards progress before final result`() = runBlocking {
         val gateway = FakeGateway()
@@ -817,6 +872,10 @@ class MaintenanceControllerTest {
             com.ninepointnine.helper.domain.device.DeviceActionFailure("unused", retryable = false),
         )
         var performedApplication: com.ninepointnine.helper.domain.device.ManagedComponent? = null
+        var diagnosticApplication: com.ninepointnine.helper.domain.device.ManagedComponent? = null
+        var applicationDiagnosticsResult: ApplicationDiagnosticsResult = ApplicationDiagnosticsResult.Failed(
+            com.ninepointnine.helper.domain.device.DeviceActionFailure("unused", retryable = false),
+        )
 
         override suspend fun installBatch(
             artifacts: List<InstallableArtifact>,
@@ -917,6 +976,13 @@ class MaintenanceControllerTest {
                     retryable = false,
                 ),
             )
+
+        override suspend fun collectApplicationDiagnostics(
+            component: com.ninepointnine.helper.domain.device.ManagedComponent,
+        ): ApplicationDiagnosticsResult {
+            diagnosticApplication = component
+            return applicationDiagnosticsResult
+        }
     }
 
     private fun ConnectedDevice.toSummary() = com.ninepointnine.helper.domain.session.DeviceSummary(

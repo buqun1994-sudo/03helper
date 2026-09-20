@@ -147,12 +147,52 @@ interface MaintenanceCommandGateway {
     suspend fun inspectManagedApplicationDetails(
         component: ManagedComponent,
     ): ManagedApplicationDetailsProbeResult
+
+    /** Collects one bounded, read-only diagnostic report for the exact installed package. */
+    suspend fun collectApplicationDiagnostics(
+        component: ManagedComponent,
+    ): ApplicationDiagnosticsResult = ApplicationDiagnosticsResult.Failed(
+        DeviceActionFailure("maintenance_diagnostics_unavailable", component.componentId, retryable = false),
+    )
 }
 
 sealed interface MaintenanceDeviceResult {
     data class Completed(val resultCode: String = "completed") : MaintenanceDeviceResult
 
     data class Failed(val failure: DeviceActionFailure) : MaintenanceDeviceResult
+}
+
+enum class ApplicationDiagnosticSectionId(val fileName: String) {
+    APPLICATION_LOGCAT("application-logcat.txt"),
+    RELATED_SYSTEM_LOGCAT("related-system-logcat.txt"),
+    PACKAGE_STATE("package-state.txt"),
+    PROCESS_STATE("process-state.txt"),
+    ACTIVITY_STATE("activity-state.txt"),
+    SERVICE_STATE("service-state.txt"),
+    MEMORY_STATE("memory-state.txt"),
+}
+
+data class ApplicationDiagnosticSection(
+    val id: ApplicationDiagnosticSectionId,
+    val content: String,
+    val truncated: Boolean = false,
+)
+
+data class ApplicationDiagnosticReport(
+    val packageName: String,
+    val capturedAtEpochMillis: Long,
+    val versionLabel: String? = null,
+    val versionCode: Long? = null,
+    val uid: Int? = null,
+    val processIds: List<Int> = emptyList(),
+    val sections: List<ApplicationDiagnosticSection> = emptyList(),
+    val warnings: List<String> = emptyList(),
+)
+
+sealed interface ApplicationDiagnosticsResult {
+    data class Completed(val report: ApplicationDiagnosticReport) : ApplicationDiagnosticsResult
+
+    data class Failed(val failure: DeviceActionFailure) : ApplicationDiagnosticsResult
 }
 
 data class ManagedApplicationProbe(

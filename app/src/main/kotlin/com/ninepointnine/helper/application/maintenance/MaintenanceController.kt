@@ -39,6 +39,7 @@ import kotlinx.coroutines.yield
 class MaintenanceController(
     private val artifactCache: ArtifactCache,
     private val diagnosticStore: MaintenanceDiagnosticStore,
+    private val applicationDiagnosticExporter: ApplicationDiagnosticExporter? = null,
     private val loadDistributionConfig: (suspend () -> DistributionConfigLoadResult)? = null,
     private val selfVersion: ArtifactVersion = ArtifactVersion("0.1.0", 1L),
     /** Lightweight signed config + folder listing used by the maintenance install page. */
@@ -139,6 +140,7 @@ class MaintenanceController(
         snapshot: InstallationSessionSnapshot,
         connection: com.ninepointnine.helper.domain.device.DeviceConnectionLease?,
         eventPort: InstallationSessionEventPort,
+        diagnosticDestinationUri: String? = null,
     ) {
         val inventoryApplication = snapshot.maintenance.managedApplications.singleOrNull {
             it.packageName == packageName && it.installed
@@ -239,6 +241,52 @@ class MaintenanceController(
                         ),
                     )
                 }
+                }
+                return
+            }
+            if (actionId == MaintenanceApplicationActionId.EXPORT_DIAGNOSTICS) {
+                val exporter = applicationDiagnosticExporter
+                if (exporter == null || diagnosticDestinationUri.isNullOrBlank()) {
+                    eventPort.emit(
+                        InstallationSessionEvent.MaintenanceApplicationActionFailed(
+                            packageName = packageName,
+                            actionId = actionId,
+                            reasonCode = "maintenance_diagnostics_destination_invalid",
+                            retryable = false,
+                        ),
+                    )
+                    return
+                }
+                when (val result = gateway.collectApplicationDiagnostics(component)) {
+                    is com.ninepointnine.helper.domain.device.ApplicationDiagnosticsResult.Failed -> eventPort.emit(
+                        InstallationSessionEvent.MaintenanceApplicationActionFailed(
+                            packageName = packageName,
+                            actionId = actionId,
+                            reasonCode = result.failure.reasonCode,
+                            retryable = result.failure.retryable,
+                        ),
+                    )
+
+                    is com.ninepointnine.helper.domain.device.ApplicationDiagnosticsResult.Completed -> {
+                        if (exporter.export(diagnosticDestinationUri, result.report)) {
+                            eventPort.emit(
+                                InstallationSessionEvent.MaintenanceApplicationActionCompleted(
+                                    packageName = packageName,
+                                    actionId = actionId,
+                                    resultCode = "application_diagnostics_exported",
+                                ),
+                            )
+                        } else {
+                            eventPort.emit(
+                                InstallationSessionEvent.MaintenanceApplicationActionFailed(
+                                    packageName = packageName,
+                                    actionId = actionId,
+                                    reasonCode = "maintenance_diagnostics_write_failed",
+                                    retryable = true,
+                                ),
+                            )
+                        }
+                    }
                 }
                 return
             }

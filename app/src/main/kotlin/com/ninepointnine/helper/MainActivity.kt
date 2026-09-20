@@ -19,6 +19,9 @@ import com.ninepointnine.helper.application.InstallerRuntime
 import com.ninepointnine.helper.domain.session.InstallationSessionCommand
 import com.ninepointnine.helper.ui.InstallApp
 import com.ninepointnine.helper.ui.state.InstallUiIntent
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
 
 class MainActivity : ComponentActivity() {
     private val webViewMountRegistry: com.ninepointnine.helper.data.web.LanzouWebViewMountRegistry
@@ -27,6 +30,7 @@ class MainActivity : ComponentActivity() {
     private val installerRuntime: InstallerRuntime
         get() = (application as InstallerApplication).installerRuntime
     private var storagePermissionPrompted = false
+    private var pendingDiagnosticPackageName: String? = null
     private val localApkLauncher = registerForActivityResult(
         ActivityResultContracts.OpenDocument(),
     ) { uri: Uri? ->
@@ -42,9 +46,24 @@ class MainActivity : ComponentActivity() {
         // the session can expose a recoverable public-Download error.
         installerRuntime.onForeground()
     }
+    private val diagnosticDestinationLauncher = registerForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip"),
+    ) { uri: Uri? ->
+        val packageName = pendingDiagnosticPackageName
+        pendingDiagnosticPackageName = null
+        if (uri != null && packageName != null) {
+            installerRuntime.dispatch(
+                InstallationSessionCommand.ExportApplicationDiagnostics(
+                    packageName = packageName,
+                    destinationUri = uri.toString(),
+                ),
+            )
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        pendingDiagnosticPackageName = savedInstanceState?.getString(STATE_DIAGNOSTIC_PACKAGE)
         enableEdgeToEdge()
         val root = FrameLayout(this)
         val webViewLayer = FrameLayout(this)
@@ -67,6 +86,10 @@ class MainActivity : ComponentActivity() {
                 // or omit a MIME type entirely. The preparer remains the sole
                 // APK identity gate, so the picker must not hide valid files.
                 onPickLocalApk = { localApkLauncher.launch(arrayOf("*/*")) },
+                onPickDiagnosticDestination = { packageName ->
+                    pendingDiagnosticPackageName = packageName
+                    diagnosticDestinationLauncher.launch(applicationDiagnosticFileName(packageName))
+                },
             )
         }
         root.addView(composeView)
@@ -98,10 +121,19 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        pendingDiagnosticPackageName?.let { outState.putString(STATE_DIAGNOSTIC_PACKAGE, it) }
+        super.onSaveInstanceState(outState)
+    }
+
     private fun requiresLegacyStoragePermission(): Boolean {
         if (Build.VERSION.SDK_INT > Build.VERSION_CODES.P) return false
         return checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED ||
             checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
+    }
+
+    private companion object {
+        const val STATE_DIAGNOSTIC_PACKAGE = "diagnostic_package"
     }
 }
 
@@ -109,15 +141,17 @@ class MainActivity : ComponentActivity() {
 private fun InstallerRoot(
     runtime: InstallerRuntime,
     onPickLocalApk: () -> Unit,
+    onPickDiagnosticDestination: (String) -> Unit,
 ) {
     val snapshot by runtime.session.snapshots.collectAsStateWithLifecycle()
     InstallApp(
         snapshot = snapshot,
         onIntent = { intent ->
-            if (intent == InstallUiIntent.PickLocalApk) {
-                onPickLocalApk()
-            } else {
-                intent.toInstallationSessionCommand()?.let(runtime::dispatch)
+            when (intent) {
+                InstallUiIntent.PickLocalApk -> onPickLocalApk()
+                is InstallUiIntent.PickApplicationDiagnosticsDestination ->
+                    onPickDiagnosticDestination(intent.packageName)
+                else -> intent.toInstallationSessionCommand()?.let(runtime::dispatch)
             }
         },
         apkIconRepository = runtime.apkIconRepository,
@@ -151,6 +185,7 @@ internal fun InstallUiIntent.toInstallationSessionCommand(): InstallationSession
         packageName = packageName,
         actionId = actionId,
     )
+    is InstallUiIntent.PickApplicationDiagnosticsDestination -> null
     is InstallUiIntent.ToggleMaintenanceInstallationComponent ->
         InstallationSessionCommand.ToggleMaintenanceInstallationComponent(componentId, selected)
     InstallUiIntent.StartMaintenanceInstallation -> InstallationSessionCommand.StartMaintenanceInstallation
@@ -158,3 +193,15 @@ internal fun InstallUiIntent.toInstallationSessionCommand(): InstallationSession
     is InstallUiIntent.LocalApkSelected -> InstallationSessionCommand.StartLocalApkInstallation(uri)
     InstallUiIntent.LocalApkSelectionCancelled -> InstallationSessionCommand.CancelLocalApkSelection
 }
+
+internal fun applicationDiagnosticFileName(
+    packageName: String,
+    nowEpochMillis: Long = System.currentTimeMillis(),
+): String {
+    val safePackage = packageName.replace(Regex("[^A-Za-z0-9_.-]"), "_").take(160)
+    val timestamp = DIAGNOSTIC_FILE_TIMESTAMP.format(Instant.ofEpochMilli(nowEpochMillis))
+    return "03helper-$safePackage-logs-$timestamp.zip"
+}
+
+private val DIAGNOSTIC_FILE_TIMESTAMP: DateTimeFormatter =
+    DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss").withZone(ZoneId.systemDefault())

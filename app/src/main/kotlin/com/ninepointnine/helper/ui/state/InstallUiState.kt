@@ -296,6 +296,7 @@ sealed interface InstallUiIntent {
         val packageName: String,
         val actionId: MaintenanceApplicationActionId,
     ) : InstallUiIntent
+    data class PickApplicationDiagnosticsDestination(val packageName: String) : InstallUiIntent
     data class ToggleMaintenanceInstallationComponent(
         val componentId: String,
         val selected: Boolean,

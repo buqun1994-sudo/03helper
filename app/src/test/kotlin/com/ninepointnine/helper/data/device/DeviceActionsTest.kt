@@ -17,6 +17,8 @@ import com.ninepointnine.helper.domain.device.ApkDeclarationMetadata
 import com.ninepointnine.helper.domain.device.ApkServiceDeclaration
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationResult
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationRequirementKind
+import com.ninepointnine.helper.domain.device.ApplicationDiagnosticSectionId
+import com.ninepointnine.helper.domain.device.ApplicationDiagnosticsResult
 import com.ninepointnine.helper.domain.device.AuthorizationAction
 import com.ninepointnine.helper.domain.device.AuthorizationActionEvidence
 import com.ninepointnine.helper.domain.device.AuthorizationDeclarationValidator
@@ -65,6 +67,78 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DeviceActionsTest {
+    @Test
+    fun `application diagnostics use only the fixed read only command set`() {
+        val packageName = "com.example.player"
+        val component = ManagedComponent("app-player", packageName)
+        val commands = mutableListOf<String>()
+        val packageDump = "versionCode=7 versionName=1.2.3\nuserId=10123\n"
+        val fakeDadb = Proxy.newProxyInstance(
+            Dadb::class.java.classLoader,
+            arrayOf(Dadb::class.java),
+        ) { _, method, args ->
+            when (method.name) {
+                "shell" -> {
+                    val command = args?.firstOrNull()?.toString().orEmpty()
+                    commands += command
+                    when (command) {
+                        "pm path $packageName" ->
+                            AdbShellResponse("package:/data/app/$packageName/base.apk\n", "", 0)
+                        "dumpsys package '$packageName'" -> AdbShellResponse(packageDump, "", 0)
+                        "stat -c %s '/data/app/$packageName/base.apk'" -> AdbShellResponse("42\n", "", 0)
+                        "pidof '$packageName'" -> AdbShellResponse("321 322\n", "", 0)
+                        "logcat -d -b main -b system -b crash -b events -v threadtime -t 4000" ->
+                            AdbShellResponse(
+                                "09-20 12:00:00.000   321   322 I Player: ready\n" +
+                                    "09-20 12:00:01.000   100   101 W ActivityManager: $packageName stopped\n",
+                                "",
+                                0,
+                            )
+                        "ps -A" -> AdbShellResponse(
+                            "USER PID PPID VSZ RSS WCHAN ADDR S NAME\n" +
+                                "u0_a123 321 1 1 1 0 0 S $packageName\n" +
+                                "u0_a124 999 1 1 1 0 0 S com.example.other\n",
+                            "",
+                            0,
+                        )
+                        "dumpsys activity activities '$packageName'" -> AdbShellResponse("activity-state\n", "", 0)
+                        "dumpsys activity services '$packageName'" -> AdbShellResponse("service-state\n", "", 0)
+                        "dumpsys meminfo '$packageName'" -> AdbShellResponse("memory-state\n", "", 0)
+                        else -> throw AssertionError("unexpected shell command: $command")
+                    }
+                }
+
+                "supportsFeature" -> false
+                "close" -> null
+                else -> null
+            }
+        } as Dadb
+        val gateway = DadbCommandGateway(
+            adb = fakeDadb,
+            closed = AtomicBoolean(false),
+            ioMutex = Mutex(),
+            installedApkCacheDirectory = null,
+            installedApkMetadataReader = null,
+        )
+
+        val result = runBlocking { gateway.collectApplicationDiagnostics(component) }
+
+        assertTrue("result=$result", result is ApplicationDiagnosticsResult.Completed)
+        val report = (result as ApplicationDiagnosticsResult.Completed).report
+        assertEquals(packageName, report.packageName)
+        assertEquals(listOf(321, 322), report.processIds)
+        assertEquals(ApplicationDiagnosticSectionId.entries.toSet(), report.sections.mapTo(linkedSetOf()) { it.id })
+        assertTrue(report.sections.single { it.id == ApplicationDiagnosticSectionId.APPLICATION_LOGCAT }.content.contains("Player: ready"))
+        assertTrue(report.sections.single { it.id == ApplicationDiagnosticSectionId.RELATED_SYSTEM_LOGCAT }.content.contains("ActivityManager"))
+        assertFalse(report.sections.single { it.id == ApplicationDiagnosticSectionId.PROCESS_STATE }.content.contains("com.example.other"))
+        assertEquals(10, commands.size)
+        assertTrue(commands.none { command ->
+            command.contains("run-as") ||
+                command.contains("/data/user") ||
+                command.contains("logcat -c")
+        })
+    }
+
     @Test
     fun `desktop is the only core and optional components extend the fixed plan`() {
         val ready = AuthorizationPlanFactory.createForComponents(

@@ -852,6 +852,13 @@ private fun String.toUserMessage(componentName: String? = null): String {
             "维护操作模块未启动：重新打开应用"
         reason == "maintenance_application_action_failed" ->
             "车机未返回应用操作结果：重新读取应用状态"
+        reason == "maintenance_diagnostics_destination_invalid" ->
+            "保存位置已失效：重新选择保存位置"
+        reason == "maintenance_diagnostics_unavailable" ||
+            reason == "maintenance_diagnostics_requires_export" ->
+            "当前车机无法读取应用日志：重新连接后重试"
+        reason == "maintenance_diagnostics_write_failed" ->
+            "日志保存失败：重新选择保存位置"
         reason == "maintenance_action_failed" ->
             "维护操作未完成：重新连接车机后重试"
         reason == "maintenance_install_transition_invalid" || reason == "maintenance_manifest_selection_mismatch" ->

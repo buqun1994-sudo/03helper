@@ -32,6 +32,10 @@ import com.ninepointnine.helper.domain.device.InstalledApplicationIconResult
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationRequirement
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationResult
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationResultValue
+import com.ninepointnine.helper.domain.device.ApplicationDiagnosticReport
+import com.ninepointnine.helper.domain.device.ApplicationDiagnosticSection
+import com.ninepointnine.helper.domain.device.ApplicationDiagnosticSectionId
+import com.ninepointnine.helper.domain.device.ApplicationDiagnosticsResult
 import com.ninepointnine.helper.domain.device.DeclaredApplicationAuthorizationPlanFactory
 import com.ninepointnine.helper.domain.device.DeclaredApplicationAuthorizationRequirement
 import com.ninepointnine.helper.domain.device.ManagedComponent
@@ -1488,6 +1492,104 @@ internal class DadbCommandGateway(
         is DeviceShortcutResult.Failed -> availabilityEvidence
     }
 
+    override suspend fun collectApplicationDiagnostics(
+        component: com.ninepointnine.helper.domain.device.ManagedComponent,
+    ): ApplicationDiagnosticsResult = withLease(
+        whenClosed = ApplicationDiagnosticsResult.Failed(
+            DeviceActionFailure("adb_connection_closed", component.componentId, retryable = true),
+        ),
+    ) {
+        if (!COMPONENT_ID_PATTERN.matches(component.componentId) ||
+            !PACKAGE_NAME_PATTERN.matches(component.packageName)
+        ) {
+            return@withLease ApplicationDiagnosticsResult.Failed(
+                DeviceActionFailure("maintenance_component_identity_invalid", component.componentId, retryable = false),
+            )
+        }
+        val packageInspection = when (val inspected = inspectInstalledPackage(component.componentId, component.packageName)) {
+            is PackageInspection.Failed -> return@withLease ApplicationDiagnosticsResult.Failed(inspected.failure)
+            is PackageInspection.Completed -> inspected
+        }
+        if (!packageInspection.installed) {
+            return@withLease ApplicationDiagnosticsResult.Failed(
+                DeviceActionFailure("maintenance_component_not_installed", component.componentId, retryable = false),
+            )
+        }
+
+        val warnings = mutableListOf<String>()
+        val observedProcessIds = shell("pidof ${shellArgument(component.packageName)}")
+            ?.takeIf { it.exitCode == 0 }
+            ?.output
+            ?.let(ApplicationDiagnosticLogFilter::parseProcessIds)
+            .orEmpty()
+        val rawLogcat = shell(DIAGNOSTIC_LOGCAT_COMMAND)
+        val splitLogcat = if (rawLogcat != null && rawLogcat.exitCode == 0) {
+            ApplicationDiagnosticLogFilter.split(
+                logcat = rawLogcat.output,
+                packageName = component.packageName,
+                observedProcessIds = observedProcessIds,
+            )
+        } else {
+            warnings += "logcat_unavailable"
+            ApplicationDiagnosticLogFilter.Split("", "", observedProcessIds)
+        }
+
+        val sections = mutableListOf<ApplicationDiagnosticSection>()
+        fun collectSection(
+            id: ApplicationDiagnosticSectionId,
+            command: String,
+            transform: (String) -> String = { it },
+        ) {
+            val response = shell(command)
+            if (response == null || response.exitCode != 0) {
+                warnings += "${id.name.lowercase(Locale.ROOT)}_unavailable"
+                return
+            }
+            val bounded = boundedDiagnosticText(transform(response.output))
+            sections += ApplicationDiagnosticSection(id, bounded.text, bounded.truncated)
+        }
+        fun addLogcatSection(id: ApplicationDiagnosticSectionId, content: String) {
+            val bounded = boundedDiagnosticText(content)
+            sections += ApplicationDiagnosticSection(id, bounded.text, bounded.truncated)
+        }
+
+        addLogcatSection(ApplicationDiagnosticSectionId.APPLICATION_LOGCAT, splitLogcat.application)
+        addLogcatSection(ApplicationDiagnosticSectionId.RELATED_SYSTEM_LOGCAT, splitLogcat.relatedSystem)
+        collectSection(
+            ApplicationDiagnosticSectionId.PACKAGE_STATE,
+            "dumpsys package ${shellArgument(component.packageName)}",
+        )
+        collectSection(
+            ApplicationDiagnosticSectionId.PROCESS_STATE,
+            "ps -A",
+        ) { output -> ApplicationDiagnosticLogFilter.filterProcessRows(output, component.packageName) }
+        collectSection(
+            ApplicationDiagnosticSectionId.ACTIVITY_STATE,
+            "dumpsys activity activities ${shellArgument(component.packageName)}",
+        )
+        collectSection(
+            ApplicationDiagnosticSectionId.SERVICE_STATE,
+            "dumpsys activity services ${shellArgument(component.packageName)}",
+        )
+        collectSection(
+            ApplicationDiagnosticSectionId.MEMORY_STATE,
+            "dumpsys meminfo ${shellArgument(component.packageName)}",
+        )
+
+        ApplicationDiagnosticsResult.Completed(
+            ApplicationDiagnosticReport(
+                packageName = component.packageName,
+                capturedAtEpochMillis = System.currentTimeMillis(),
+                versionLabel = packageInspection.versionLabel,
+                versionCode = packageInspection.versionCode,
+                uid = packageInspection.uid,
+                processIds = splitLogcat.processIds,
+                sections = sections,
+                warnings = warnings.distinct(),
+            ),
+        )
+    }
+
     override suspend fun performApplicationAction(
         component: com.ninepointnine.helper.domain.device.ManagedComponent,
         actionId: MaintenanceApplicationActionId,
@@ -1644,6 +1746,10 @@ internal class DadbCommandGateway(
 
             MaintenanceApplicationActionId.DETAILS -> MaintenanceDeviceResult.Failed(
                 DeviceActionFailure("maintenance_application_details_unavailable", component.componentId, retryable = false),
+            )
+
+            MaintenanceApplicationActionId.EXPORT_DIAGNOSTICS -> MaintenanceDeviceResult.Failed(
+                DeviceActionFailure("maintenance_diagnostics_requires_export", component.componentId, retryable = false),
             )
         }
     }
@@ -2177,6 +2283,19 @@ internal class DadbCommandGateway(
     private fun isSuccessful(response: AdbShellResponse?): Boolean =
         response != null && response.exitCode == 0
 
+    private fun boundedDiagnosticText(value: String): BoundedDiagnosticText {
+        val bytes = value.toByteArray(Charsets.UTF_8)
+        if (bytes.size <= MAX_DIAGNOSTIC_SECTION_BYTES) {
+            return BoundedDiagnosticText(value, truncated = false)
+        }
+        var end = MAX_DIAGNOSTIC_SECTION_BYTES
+        while (end > 0 && (bytes[end].toInt() and 0xC0) == 0x80) end -= 1
+        return BoundedDiagnosticText(
+            String(bytes, 0, end, Charsets.UTF_8),
+            truncated = true,
+        )
+    }
+
     private fun isClearDataAccepted(response: AdbShellResponse?): Boolean =
         isSuccessful(response) && response?.output.orEmpty().lineSequence().any { it.trim() == "Success" }
 
@@ -2247,6 +2366,11 @@ internal class DadbCommandGateway(
         val declarations: com.ninepointnine.helper.domain.device.ApkDeclarationMetadata,
     )
 
+    private data class BoundedDiagnosticText(
+        val text: String,
+        val truncated: Boolean,
+    )
+
     private sealed interface PackageInspection {
         data class Completed(
             val installed: Boolean,
@@ -2280,6 +2404,9 @@ internal class DadbCommandGateway(
         const val TAG = "03helper-device"
         const val REMOTE_FILE_MODE = 420
         const val PROGRESS_REPORT_INTERVAL_BYTES = 256L * 1024L
+        const val MAX_DIAGNOSTIC_SECTION_BYTES = 512 * 1024
+        const val DIAGNOSTIC_LOGCAT_COMMAND =
+            "logcat -d -b main -b system -b crash -b events -v threadtime -t 4000"
         val COMPONENT_ID_PATTERN = Regex("^[a-z][a-z0-9-]{0,63}$")
         val PACKAGE_NAME_PATTERN = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$")
         val COMPONENT_NAME_PATTERN = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)*/[A-Za-z0-9_.$]+$")

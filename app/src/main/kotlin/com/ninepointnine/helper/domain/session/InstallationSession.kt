@@ -142,6 +142,11 @@ class InstallationSession(
             is InstallationSessionCommand.MaintenanceAction -> handleMaintenanceAction(command)
             is InstallationSessionCommand.MaintenanceApplicationAction ->
                 handleMaintenanceApplicationAction(command)
+            is InstallationSessionCommand.ExportApplicationDiagnostics ->
+                handleMaintenanceApplicationAction(
+                    packageName = command.packageName,
+                    actionId = MaintenanceApplicationActionId.EXPORT_DIAGNOSTICS,
+                )
             is InstallationSessionCommand.ToggleMaintenanceInstallationComponent ->
                 toggleMaintenanceInstallationComponent(command)
             InstallationSessionCommand.StartMaintenanceInstallation -> startSelectedMaintenanceInstallation()
@@ -1691,6 +1696,11 @@ class InstallationSession(
 
     private fun handleMaintenanceApplicationAction(
         command: InstallationSessionCommand.MaintenanceApplicationAction,
+    ) = handleMaintenanceApplicationAction(command.packageName, command.actionId)
+
+    private fun handleMaintenanceApplicationAction(
+        packageName: String,
+        actionId: MaintenanceApplicationActionId,
     ) {
         val current = _snapshot.value
         if (current.state != InstallationSessionState.MAINTENANCE ||
@@ -1707,8 +1717,8 @@ class InstallationSession(
                 current.copy(
                     maintenance = current.maintenance.copy(
                         applicationAction = MaintenanceApplicationActionRecord(
-                            packageName = command.packageName,
-                            actionId = command.actionId,
+                            packageName = packageName,
+                            actionId = actionId,
                             status = MaintenanceActionStatus.FAILED,
                             reasonCode = "maintenance_route_invalid",
                             retryable = false,
@@ -1725,8 +1735,8 @@ class InstallationSession(
                     maintenance = current.maintenance.copy(
                         applicationDetails = null,
                         applicationAction = MaintenanceApplicationActionRecord(
-                            packageName = command.packageName,
-                            actionId = command.actionId,
+                            packageName = packageName,
+                            actionId = actionId,
                             status = MaintenanceActionStatus.FAILED,
                             reasonCode = "device_disconnected",
                             retryable = true,
@@ -1737,15 +1747,15 @@ class InstallationSession(
             return
         }
         val known = current.maintenance.managedApplications.any {
-            it.installed && it.packageName == command.packageName
+            it.installed && it.packageName == packageName
         }
         if (!known) {
             startNewGeneration(
                 current.copy(
                     maintenance = current.maintenance.copy(
                         applicationAction = MaintenanceApplicationActionRecord(
-                            packageName = command.packageName,
-                            actionId = command.actionId,
+                            packageName = packageName,
+                            actionId = actionId,
                             status = MaintenanceActionStatus.FAILED,
                             reasonCode = "maintenance_component_unavailable",
                             retryable = false,
@@ -1764,15 +1774,15 @@ class InstallationSession(
                 maintenance = current.maintenance.copy(
                     applicationDetails = null,
                     applicationAuthorizationRequirements = if (
-                        command.actionId == MaintenanceApplicationActionId.AUTHORIZE
+                        actionId == MaintenanceApplicationActionId.AUTHORIZE
                     ) {
                         current.maintenance.applicationAuthorizationRequirements
                     } else {
                         emptyList()
                     },
                     applicationAction = MaintenanceApplicationActionRecord(
-                        packageName = command.packageName,
-                        actionId = command.actionId,
+                        packageName = packageName,
+                        actionId = actionId,
                         status = MaintenanceActionStatus.RUNNING,
                     ),
                 ),

@@ -684,6 +684,9 @@ private fun MaintenanceManageAppsPage(
                                         pendingAction = app to action
                                         onIntent(InstallUiIntent.MaintenanceApplicationAction(app.packageName, action))
                                     }
+                                    MaintenanceApplicationActionId.EXPORT_DIAGNOSTICS -> onIntent(
+                                        InstallUiIntent.PickApplicationDiagnosticsDestination(app.packageName),
+                                    )
                                     else -> onIntent(InstallUiIntent.MaintenanceApplicationAction(app.packageName, action))
                                 }
                             },
@@ -921,6 +924,7 @@ private fun MaintenanceManageAppsPage(
                 MaintenanceApplicationActionId.CLEAR_DATA,
                 MaintenanceApplicationActionId.AUTHORIZE,
                 MaintenanceApplicationActionId.UNINSTALL,
+                MaintenanceApplicationActionId.EXPORT_DIAGNOSTICS,
             )
         }
         ?.let { feedback -> ApplicationActionToast(feedback, state.applications) }
@@ -971,11 +975,18 @@ private fun ManagedApplicationCard(
                                     text = applicationActionLabel(actionId),
                                     iconName = applicationActionIcon(actionId),
                                     onClick = { onAction(actionId) },
-                                    modifier = Modifier.weight(1f),
+                                    modifier = if (actions.size == 1) {
+                                        Modifier
+                                            .fillMaxWidth()
+                                            .testTag("maintenance_application_action_${actionId.name.lowercase()}")
+                                    } else {
+                                        Modifier
+                                            .weight(1f)
+                                            .testTag("maintenance_application_action_${actionId.name.lowercase()}")
+                                    },
                                     enabled = enabled,
                                 )
                             }
-                            if (actions.size == 1) Spacer(modifier = Modifier.weight(1f))
                         }
                     }
                 }
@@ -991,6 +1002,7 @@ internal val MANAGED_APPLICATION_ACTIONS = listOf(
     MaintenanceApplicationActionId.AUTHORIZE,
     MaintenanceApplicationActionId.UNINSTALL,
     MaintenanceApplicationActionId.DETAILS,
+    MaintenanceApplicationActionId.EXPORT_DIAGNOSTICS,
 )
 
 internal fun nextExpandedApplicationId(currentId: String?, selectedId: String): String? =
@@ -1039,6 +1051,7 @@ private fun applicationActionLabel(actionId: MaintenanceApplicationActionId): St
         MaintenanceApplicationActionId.AUTHORIZE -> R.string.maintenance_authorize
         MaintenanceApplicationActionId.UNINSTALL -> R.string.maintenance_uninstall
         MaintenanceApplicationActionId.DETAILS -> R.string.maintenance_details
+        MaintenanceApplicationActionId.EXPORT_DIAGNOSTICS -> R.string.maintenance_export_logs
         MaintenanceApplicationActionId.INSPECT_AUTHORIZATION -> R.string.maintenance_authorize
     },
 )
@@ -1051,6 +1064,7 @@ private fun applicationActionIcon(actionId: MaintenanceApplicationActionId): Str
     MaintenanceApplicationActionId.INSPECT_AUTHORIZATION -> "lock_keyhole"
     MaintenanceApplicationActionId.UNINSTALL -> "trash_2"
     MaintenanceApplicationActionId.DETAILS -> "info"
+    MaintenanceApplicationActionId.EXPORT_DIAGNOSTICS -> "file_down"
 }
 
 @Composable
@@ -1249,6 +1263,7 @@ internal fun successfulApplicationActionMessage(feedback: MaintenanceApplication
             R.string.maintenance_authorization_success
         }
         MaintenanceApplicationActionId.UNINSTALL -> R.string.maintenance_uninstall_success
+        MaintenanceApplicationActionId.EXPORT_DIAGNOSTICS -> R.string.maintenance_export_logs_success
         MaintenanceApplicationActionId.INSPECT_AUTHORIZATION,
         MaintenanceApplicationActionId.DETAILS,
         -> null

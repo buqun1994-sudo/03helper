@@ -43,6 +43,7 @@ import com.ninepointnine.helper.domain.session.ManagedApplicationStatus
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationRequirement
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationResultValue
 import com.ninepointnine.helper.toInstallationSessionCommand
+import com.ninepointnine.helper.ui.state.InstallUiIntent
 import com.ninepointnine.helper.ui.state.failureReasonToUserMessage
 import java.io.File
 import java.util.concurrent.atomic.AtomicReference
@@ -240,6 +241,85 @@ class InstallAppActivitySmokeTest {
             compose.onNodeWithText(
                 context.getString(R.string.maintenance_authorization_title, component.displayName),
             ).assertDoesNotExist()
+        } finally {
+            scenario.close()
+            session.close()
+        }
+    }
+
+    @Test
+    fun managedApplicationShowsSevenActionsAndDefersExportUntilDestinationSelection() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val component = ComponentDescriptor(
+            id = "player",
+            displayName = "测试播放器",
+            required = false,
+        )
+        val application = ManagedApplicationStatus(
+            componentId = component.id,
+            packageName = "com.example.player",
+            installed = true,
+            versionLabel = "1.0",
+            versionCode = 1L,
+        )
+        val session = InstallationSession(
+            initialSnapshot = InstallationSessionSnapshot(
+                state = InstallationSessionState.MAINTENANCE,
+                device = DeviceSummary(
+                    id = "smoke-vehicle",
+                    displayName = "Smoke Vehicle",
+                    connectionStatus = DeviceConnectionStatus.CONFIRMED,
+                ),
+                components = listOf(component),
+                maintenance = MaintenanceSnapshot(
+                    routeAction = MaintenanceActionId.MANAGE_APPS,
+                    managedApplicationsState = MaintenanceInventoryState.READY,
+                    managedApplications = listOf(application),
+                ),
+            ),
+        )
+        val observedIntent = AtomicReference<InstallUiIntent?>()
+        val scenario = ActivityScenario.launch<DebugScenarioActivity>(
+            Intent(context, DebugScenarioActivity::class.java)
+                .putExtra(DebugScenarioActivity.EXTRA_SCENARIO, "maintenance"),
+        )
+        try {
+            scenario.onActivity { activity ->
+                activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                activity.setContent {
+                    InstallApp(
+                        snapshot = session.snapshots.collectAsState().value,
+                        onIntent = observedIntent::set,
+                    )
+                }
+            }
+
+            clickText(component.displayName)
+            listOf(
+                R.string.maintenance_start,
+                R.string.maintenance_force_stop,
+                R.string.maintenance_clear_data,
+                R.string.maintenance_authorize,
+                R.string.maintenance_uninstall,
+                R.string.maintenance_details,
+                R.string.maintenance_export_logs,
+            ).forEach { label ->
+                compose.onNodeWithText(context.getString(label)).assertExists()
+            }
+            val export = compose.onNodeWithTag("maintenance_application_action_export_diagnostics")
+            export.performScrollTo()
+            val startWidth = compose.onNodeWithTag("maintenance_application_action_start")
+                .fetchSemanticsNode().boundsInRoot.width
+            val exportWidth = export.fetchSemanticsNode().boundsInRoot.width
+            assertTrue("exportWidth=$exportWidth startWidth=$startWidth", exportWidth > startWidth * 1.8f)
+            captureScreen("maintenance-seven-application-actions")
+
+            export.performClick()
+            assertEquals(
+                InstallUiIntent.PickApplicationDiagnosticsDestination(application.packageName),
+                observedIntent.get(),
+            )
+            assertEquals(null, session.currentSnapshot().maintenance.applicationAction)
         } finally {
             scenario.close()
             session.close()

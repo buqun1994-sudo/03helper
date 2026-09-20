@@ -143,6 +143,7 @@
     <string name="maintenance_authorize">一键授权</string>
     <string name="maintenance_uninstall">卸载应用</string>
     <string name="maintenance_details">应用详情</string>
+    <string name="maintenance_export_logs">导出日志</string>
     <string name="maintenance_details_title">%1$s详情</string>
     <string name="maintenance_start_success">启动成功</string>
     <string name="maintenance_force_stop_success">强行停止成功</string>
@@ -171,6 +172,7 @@
     <string name="maintenance_application_action_failed">车机未返回应用操作结果：重新读取应用状态</string>
     <string name="maintenance_uninstall_title">卸载应用</string>
     <string name="maintenance_uninstall_success">卸载完成</string>
+    <string name="maintenance_export_logs_success">日志已保存</string>
     <string name="maintenance_uninstall_done">卸载完成</string>
     <string name="maintenance_cancel">取消</string>
     <string name="maintenance_finish">完成</string>
