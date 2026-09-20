@@ -141,7 +141,28 @@ class ArtifactPreparationCoordinator(
                 return@forEach
             }
             when (val result = prepareFromLocalCandidate(plan.config, component, candidate)) {
-                is PlanAttemptResult.Success -> prepared += result.value
+                is PlanAttemptResult.Success -> {
+                    prepared += result.value
+                    // A local candidate is only a final source after the second
+                    // identity read succeeds. Until then it remains part of
+                    // source acquisition, so a disappearing candidate cannot
+                    // make the stable UI regress from CHECK back to FETCH.
+                    emitProgress(
+                        component.componentId,
+                        InstallPhase.FETCH,
+                        ComponentProgressStatus.COMPLETED,
+                        indeterminate = false,
+                    )
+                    emitProgress(component.componentId, InstallPhase.CHECK, ComponentProgressStatus.RUNNING)
+                    emitProgress(
+                        component.componentId,
+                        InstallPhase.CHECK,
+                        ComponentProgressStatus.COMPLETED,
+                        bytesWritten = result.value.manifest.apkSizeBytes,
+                        totalBytes = result.value.manifest.apkSizeBytes,
+                        indeterminate = false,
+                    )
+                }
                 is PlanAttemptResult.Failed -> {
                     // A candidate can become unreadable between the inventory
                     // scan and the identity read. Treat that as a remote miss
@@ -424,6 +445,15 @@ class ArtifactPreparationCoordinator(
                     ),
                 )
             }
+            emitProgress(
+                component.componentId,
+                InstallPhase.FETCH,
+                ComponentProgressStatus.COMPLETED,
+                bytesWritten = archive.sizeBytes,
+                totalBytes = archive.sizeBytes,
+                indeterminate = false,
+            )
+            emitProgress(component.componentId, InstallPhase.CHECK, ComponentProgressStatus.RUNNING)
             val inspection = inspectDynamicArchive(
                 archive.file,
                 apkFile,

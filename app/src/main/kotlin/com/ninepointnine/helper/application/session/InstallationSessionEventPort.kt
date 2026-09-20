@@ -41,7 +41,11 @@ class InstallationSessionEventDispatcher(
     override fun isBatchActive(batchId: Long): Boolean {
         val snapshot = session.currentSnapshot()
         return snapshot.sessionId == sessionId &&
-            snapshot.state == InstallationSessionState.INSTALLING &&
+            snapshot.state in setOf(
+                InstallationSessionState.INSTALLING,
+                InstallationSessionState.AUTHORIZING,
+                InstallationSessionState.VERIFYING_DEVICE,
+            ) &&
             snapshot.installationBatch?.batchId == batchId &&
             snapshot.installationBatchReceipt == null
     }

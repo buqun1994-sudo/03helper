@@ -228,6 +228,7 @@ class InstallationSession(
                 currentComponentName = if (maintenanceReconnect) current.currentComponentName else null,
                 progress = if (maintenanceReconnect) current.progress else null,
                 componentProgress = if (maintenanceReconnect) current.componentProgress else emptyMap(),
+                phaseProgress = if (maintenanceReconnect) current.phaseProgress else emptyMap(),
                 failedComponentIds = if (maintenanceReconnect) current.failedComponentIds else emptySet(),
                 failure = null,
                 checkpoint = null,
@@ -376,6 +377,7 @@ class InstallationSession(
                 currentComponentName = null,
                 progress = null,
                 componentProgress = emptyMap(),
+                phaseProgress = emptyMap(),
                 failedComponentIds = emptySet(),
                 componentFailureRetryable = emptyMap(),
                 failure = null,
@@ -488,6 +490,7 @@ class InstallationSession(
                 currentComponentName = null,
                 progress = null,
                 componentProgress = emptyMap(),
+                phaseProgress = emptyMap(),
                 failedComponentIds = emptySet(),
                 componentFailureRetryable = emptyMap(),
                 failure = null,
@@ -575,6 +578,13 @@ class InstallationSession(
             catalogIdentity = catalogIdentity(current),
         )
         val batchSnapshot = current.copy(installationBatch = batchPlan)
+        val initialComponentProgress = selected.filter { it.id in batchSelectedIds }.associate { component ->
+            component.id to ComponentProgress(
+                componentId = component.id,
+                phase = InstallPhase.FETCH,
+                status = ComponentProgressStatus.PENDING,
+            )
+        }
         val next = current.copy(
             state = InstallationSessionState.SELECTION_CONFIRMED,
             installationStrategy = InstallationStrategy.INSTALL_MISSING_ONLY,
@@ -585,13 +595,8 @@ class InstallationSession(
                 totalCount = batchSelectedIds.size,
                 indeterminate = true,
             ),
-            componentProgress = selected.filter { it.id in batchSelectedIds }.associate { component ->
-                component.id to ComponentProgress(
-                    componentId = component.id,
-                    phase = InstallPhase.FETCH,
-                    status = ComponentProgressStatus.PENDING,
-                )
-            },
+            componentProgress = initialComponentProgress,
+            phaseProgress = mapOf(InstallPhase.FETCH to initialComponentProgress),
             failedComponentIds = emptySet(),
             componentFailureRetryable = emptyMap(),
             failure = null,
@@ -625,6 +630,16 @@ class InstallationSession(
                 current.copy(
                     state = InstallationSessionState.PREPARING_ARTIFACTS,
                     progress = current.progress?.copy(indeterminate = true, fraction = null),
+                    componentProgress = markComponents(
+                        current,
+                        InstallPhase.FETCH,
+                        ComponentProgressStatus.RUNNING,
+                    ),
+                    phaseProgress = recordSelectedPhase(
+                        current,
+                        InstallPhase.FETCH,
+                        ComponentProgressStatus.RUNNING,
+                    ),
                 ),
             ),
         )
@@ -716,6 +731,7 @@ class InstallationSession(
             currentComponentName = checkpoint.currentComponentName,
             progress = checkpoint.progress,
             componentProgress = checkpoint.componentProgress,
+            phaseProgress = checkpoint.phaseProgress,
             failedComponentIds = checkpoint.failedComponentIds,
             componentFailureRetryable = checkpoint.componentFailureRetryable,
             failure = null,
@@ -763,6 +779,7 @@ class InstallationSession(
                 currentComponentName = null,
                 progress = null,
                 componentProgress = emptyMap(),
+                phaseProgress = emptyMap(),
                 failedComponentIds = emptySet(),
                 componentFailureRetryable = emptyMap(),
                 failure = null,
@@ -835,6 +852,7 @@ class InstallationSession(
                 currentComponentName = null,
                 progress = null,
                 componentProgress = emptyMap(),
+                phaseProgress = emptyMap(),
                 failedComponentIds = emptySet(),
                 componentFailureRetryable = emptyMap(),
                 failure = null,
@@ -877,6 +895,7 @@ class InstallationSession(
                 currentComponentName = null,
                 progress = null,
                 componentProgress = emptyMap(),
+                phaseProgress = emptyMap(),
                 failedComponentIds = emptySet(),
                 componentFailureRetryable = emptyMap(),
                 failure = null,
@@ -1015,6 +1034,7 @@ class InstallationSession(
                 currentComponentName = null,
                 progress = null,
                 componentProgress = emptyMap(),
+                phaseProgress = emptyMap(),
                 failedComponentIds = emptySet(),
                 componentFailureRetryable = emptyMap(),
                 failure = null,
@@ -1097,6 +1117,7 @@ class InstallationSession(
                 currentComponentName = null,
                 progress = null,
                 componentProgress = emptyMap(),
+                phaseProgress = emptyMap(),
                 failedComponentIds = emptySet(),
                 componentFailureRetryable = emptyMap(),
                 failure = null,
@@ -1171,6 +1192,7 @@ class InstallationSession(
                 currentComponentName = null,
                 progress = null,
                 componentProgress = emptyMap(),
+                phaseProgress = emptyMap(),
                 failedComponentIds = emptySet(),
                 componentFailureRetryable = emptyMap(),
                 failure = null,
@@ -1229,6 +1251,7 @@ class InstallationSession(
                 currentComponentName = null,
                 progress = null,
                 componentProgress = emptyMap(),
+                phaseProgress = emptyMap(),
                 failedComponentIds = emptySet(),
                 componentFailureRetryable = emptyMap(),
                 failure = null,
@@ -1604,6 +1627,15 @@ class InstallationSession(
                     status = ComponentProgressStatus.PENDING,
                 ),
             ),
+            phaseProgress = mapOf(
+                InstallPhase.FETCH to mapOf(
+                    InstallerSelfIdentity.COMPONENT_ID to ComponentProgress(
+                        componentId = InstallerSelfIdentity.COMPONENT_ID,
+                        phase = InstallPhase.FETCH,
+                        status = ComponentProgressStatus.PENDING,
+                    ),
+                ),
+            ),
             failedComponentIds = emptySet(),
             componentFailureRetryable = emptyMap(),
             failure = null,
@@ -1653,6 +1685,7 @@ class InstallationSession(
             state = InstallationSessionState.INSTALLING,
             progress = progress(0.75f, indeterminate = true),
             componentProgress = markComponents(current, InstallPhase.SEND, ComponentProgressStatus.RUNNING),
+            phaseProgress = recordSelectedPhase(current, InstallPhase.SEND, ComponentProgressStatus.RUNNING),
         )
     }
 
@@ -1793,6 +1826,7 @@ class InstallationSession(
             failedComponentIds = emptySet(),
             componentFailureRetryable = emptyMap(),
             componentProgress = emptyMap(),
+            phaseProgress = emptyMap(),
             selectedSources = emptyMap(),
             sourceFailures = emptyList(),
             archiveDownloads = emptyMap(),
@@ -1867,6 +1901,13 @@ class InstallationSession(
             return
         }
         val selected = selectedComponents(candidate)
+        val initialComponentProgress = selected.associate { component ->
+            component.id to ComponentProgress(
+                componentId = component.id,
+                phase = InstallPhase.FETCH,
+                status = ComponentProgressStatus.PENDING,
+            )
+        }
         val retainedBaselineIds = preinstalledIds
         val baselineEvidence = current.evidence.copy(
             // APK preparation evidence belongs only to this attempt. Installed
@@ -1894,13 +1935,8 @@ class InstallationSession(
                 totalCount = selected.size,
                 indeterminate = true,
             ),
-            componentProgress = selected.associate { component ->
-                component.id to ComponentProgress(
-                    componentId = component.id,
-                    phase = InstallPhase.FETCH,
-                    status = ComponentProgressStatus.PENDING,
-                )
-            },
+            componentProgress = initialComponentProgress,
+            phaseProgress = mapOf(InstallPhase.FETCH to initialComponentProgress),
             evidence = baselineEvidence,
             componentResults = buildComponentResults(baselineEvidence, candidate),
             maintenance = candidate.maintenance,
@@ -2032,6 +2068,7 @@ class InstallationSession(
             currentComponentName = null,
             progress = null,
             componentProgress = emptyMap(),
+            phaseProgress = emptyMap(),
             failedComponentIds = emptySet(),
             componentFailureRetryable = emptyMap(),
             failure = null,
@@ -2271,6 +2308,9 @@ class InstallationSession(
                 indeterminate = false,
             ),
         )
+        val completedFetch = progress.mapValues { (_, item) ->
+            item.copy(phase = InstallPhase.FETCH)
+        }
         val prepared = current.copy(
             state = InstallationSessionState.ARTIFACTS_READY,
             installationStrategy = InstallationStrategy.REINSTALL_SELECTED,
@@ -2279,6 +2319,10 @@ class InstallationSession(
             currentComponentName = manifest.displayName,
             progress = SessionProgress(1, 1, 0.6f, false),
             componentProgress = progress,
+            phaseProgress = mapOf(
+                InstallPhase.FETCH to completedFetch,
+                InstallPhase.CHECK to progress,
+            ),
             failedComponentIds = emptySet(),
             componentFailureRetryable = emptyMap(),
             failure = null,
@@ -2767,6 +2811,49 @@ class InstallationSession(
                 )
             }
         }
+        val nextPhaseProgress = current.phaseProgress.toMutableMap()
+        val fetchProgress = current.phaseProgress[InstallPhase.FETCH].orEmpty().toMutableMap()
+        val checkProgress = current.phaseProgress[InstallPhase.CHECK].orEmpty().toMutableMap()
+        preparationIds.forEach { componentId ->
+            val failure = failuresById[componentId]
+            val failedWhileFetching = failure?.phase in setOf(
+                com.ninepointnine.helper.domain.artifact.ArtifactFailurePhase.CATALOG,
+                com.ninepointnine.helper.domain.artifact.ArtifactFailurePhase.SOURCE_RESOLUTION,
+                com.ninepointnine.helper.domain.artifact.ArtifactFailurePhase.DOWNLOAD,
+            )
+            val previousFetch = fetchProgress[componentId]
+            fetchProgress[componentId] = ComponentProgress(
+                componentId = componentId,
+                phase = InstallPhase.FETCH,
+                status = if (failedWhileFetching) {
+                    ComponentProgressStatus.FAILED
+                } else {
+                    ComponentProgressStatus.COMPLETED
+                },
+                bytesWritten = previousFetch?.bytesWritten ?: 0L,
+                totalBytes = previousFetch?.totalBytes ?: 0L,
+                fraction = if (failedWhileFetching) previousFetch?.fraction else 1f,
+                indeterminate = false,
+            )
+            if (!failedWhileFetching) {
+                val previousCheck = checkProgress[componentId]
+                checkProgress[componentId] = ComponentProgress(
+                    componentId = componentId,
+                    phase = InstallPhase.CHECK,
+                    status = if (failure == null) {
+                        ComponentProgressStatus.COMPLETED
+                    } else {
+                        ComponentProgressStatus.FAILED
+                    },
+                    bytesWritten = previousCheck?.bytesWritten ?: 0L,
+                    totalBytes = previousCheck?.totalBytes ?: 0L,
+                    fraction = if (failure == null) 1f else previousCheck?.fraction,
+                    indeterminate = false,
+                )
+            }
+        }
+        nextPhaseProgress[InstallPhase.FETCH] = fetchProgress
+        if (checkProgress.isNotEmpty()) nextPhaseProgress[InstallPhase.CHECK] = checkProgress
         val next = current.copy(
             state = InstallationSessionState.ARTIFACTS_READY,
             artifactManifests = event.manifests,
@@ -2797,10 +2884,12 @@ class InstallationSession(
                 failedComponentIds = failedIds,
                 componentFailureRetryable = failuresById.mapValues { it.value.retryable },
                 componentProgress = nextProgress,
+                phaseProgress = nextPhaseProgress,
                 artifactManifests = event.manifests,
                 artifactCatalogStage = ArtifactCatalogStage.PREPARED,
             )),
             componentProgress = nextProgress,
+            phaseProgress = nextPhaseProgress,
             progress = progress(
                 fraction = 0.6f,
                 indeterminate = false,
@@ -2932,47 +3021,101 @@ class InstallationSession(
         if (event.componentId !in selectedComponentIds(current) || event.componentId in current.failedComponentIds) {
             return
         }
-        val total = event.totalBytes.coerceAtLeast(0L)
+        val previousPhaseProgress = current.phaseProgress[event.phase]?.get(event.componentId)
+        val total = maxOf(event.totalBytes.coerceAtLeast(0L), previousPhaseProgress?.totalBytes ?: 0L)
         val written = event.bytesWritten.coerceIn(0L, total.takeIf { it > 0L } ?: Long.MAX_VALUE)
-        val fraction = event.fraction?.takeIf { it.isFinite() }?.coerceIn(0f, 1f)
+        val reportedFraction = event.fraction?.takeIf { it.isFinite() }?.coerceIn(0f, 1f)
             ?: total.takeIf { it > 0L }?.let { written.toFloat() / it.toFloat() }
-        val status = event.status
+        val status = when {
+            previousPhaseProgress?.status == ComponentProgressStatus.FAILED ->
+                ComponentProgressStatus.FAILED
+            previousPhaseProgress?.status == ComponentProgressStatus.COMPLETED &&
+                event.status in setOf(
+                    ComponentProgressStatus.PENDING,
+                    ComponentProgressStatus.RUNNING,
+                ) -> ComponentProgressStatus.COMPLETED
+            else -> event.status
+        }
+        val fraction = when (status) {
+            ComponentProgressStatus.COMPLETED -> 1f
+            ComponentProgressStatus.RUNNING -> maxOf(
+                previousPhaseProgress?.fraction ?: 0f,
+                reportedFraction ?: 0f,
+            ).takeIf { reportedFraction != null || previousPhaseProgress?.fraction != null }
+            ComponentProgressStatus.PENDING,
+            ComponentProgressStatus.FAILED,
+            -> reportedFraction ?: previousPhaseProgress?.fraction
+        }
         val updated = ComponentProgress(
             componentId = event.componentId,
             phase = event.phase,
             status = status,
-            bytesWritten = written,
+            bytesWritten = if (
+                status == previousPhaseProgress?.status &&
+                status in setOf(ComponentProgressStatus.COMPLETED, ComponentProgressStatus.FAILED)
+            ) {
+                previousPhaseProgress.bytesWritten
+            } else {
+                maxOf(written, previousPhaseProgress?.bytesWritten ?: 0L)
+            },
             totalBytes = total,
-            fraction = if (status == ComponentProgressStatus.COMPLETED) 1f else fraction,
+            fraction = fraction,
             indeterminate = status == ComponentProgressStatus.RUNNING &&
                 event.indeterminate && fraction == null,
         )
-        val progressByComponent = current.componentProgress + (event.componentId to updated)
-        val selectedIds = selectedComponentIds(current)
-        val completedCount = progressByComponent.values.count {
-            it.componentId in selectedIds && it.status == ComponentProgressStatus.COMPLETED
+        val phaseProgress = current.phaseProgress + (
+            event.phase to current.phaseProgress[event.phase].orEmpty() + (event.componentId to updated)
+            )
+        val previousLatest = current.componentProgress[event.componentId]
+        val progressByComponent = if (
+            previousLatest == null || event.phase.ordinal >= previousLatest.phase.ordinal ||
+            status == ComponentProgressStatus.FAILED
+        ) {
+            current.componentProgress + (event.componentId to updated)
+        } else {
+            current.componentProgress
         }
-        val running = progressByComponent.values.firstOrNull {
-            it.componentId in selectedIds && it.status == ComponentProgressStatus.RUNNING
+        val selectedIds = selectedComponentIds(current)
+        val currentPhaseProgress = phaseProgress[event.phase].orEmpty()
+        val completedCount = selectedIds.count {
+            currentPhaseProgress[it]?.status == ComponentProgressStatus.COMPLETED
         }
         val aggregateFraction = if (selectedIds.isEmpty()) {
             null
         } else {
-            val completed = completedCount.toFloat()
-            val activeFraction = running?.fraction ?: 0f
-            ((completed + activeFraction) / selectedIds.size.toFloat()).coerceIn(0f, 1f)
+            selectedIds.sumOf { componentId ->
+                when (val item = currentPhaseProgress[componentId]) {
+                    null -> 0.0
+                    else -> when (item.status) {
+                        ComponentProgressStatus.COMPLETED -> 1.0
+                        else -> (item.fraction ?: 0f).toDouble()
+                    }
+                }
+            }.div(selectedIds.size.toDouble()).toFloat().coerceIn(0f, 1f)
         }
+        val advancedState = when (event.phase) {
+            InstallPhase.CONFIGURE -> InstallationSessionState.AUTHORIZING
+            InstallPhase.VERIFY -> InstallationSessionState.VERIFYING_DEVICE
+            else -> current.state
+        }
+        val nextState = if (installStateRank(advancedState) > installStateRank(current.state)) {
+            advancedState
+        } else current.state
         publish(
-            current.copy(
+            withCheckpoint(current.copy(
+                state = nextState,
                 componentProgress = progressByComponent,
+                phaseProgress = phaseProgress,
                 currentComponentName = componentName(current, event.componentId),
                 progress = current.progress?.copy(
                     completedCount = completedCount,
                     totalCount = selectedIds.size,
                     fraction = aggregateFraction,
-                    indeterminate = running?.indeterminate ?: false,
+                    indeterminate = currentPhaseProgress.values.any {
+                        it.componentId in selectedIds && it.status == ComponentProgressStatus.RUNNING && it.indeterminate
+                    },
                 ),
-            ),
+            )),
             acceptedEventSequence,
         )
     }
@@ -2997,12 +3140,21 @@ class InstallationSession(
             state = InstallationSessionState.INSTALLING,
             progress = progress(0.65f, indeterminate = true),
             componentProgress = markComponents(current, InstallPhase.SEND, ComponentProgressStatus.RUNNING),
+            phaseProgress = recordSelectedPhase(current, InstallPhase.SEND, ComponentProgressStatus.RUNNING),
         )
     }
 
     /** Commits the complete device receipt exactly once for the active batch. */
     private fun handleInstallationBatchCompleted(event: InstallationSessionEvent.InstallationBatchCompleted) {
-        if (!requireState(InstallationSessionState.INSTALLING, "installation_batch_event_out_of_order")) return
+        if (_snapshot.value.state !in setOf(
+                InstallationSessionState.INSTALLING,
+                InstallationSessionState.AUTHORIZING,
+                InstallationSessionState.VERIFYING_DEVICE,
+            )
+        ) {
+            fail(FailureCategory.UNKNOWN, reasonCode = "installation_batch_event_out_of_order")
+            return
+        }
         val current = _snapshot.value
         val batch = current.installationBatch
         if (batch == null) {
@@ -3102,7 +3254,7 @@ class InstallationSession(
                 phase = when (result.status) {
                     ComponentResultStatus.NOT_INSTALLED,
                     ComponentResultStatus.INSTALLATION_PENDING_CONFIRMATION,
-                    -> InstallPhase.SEND
+                    -> InstallPhase.INSTALL
                     ComponentResultStatus.AUTHORIZATION_INCOMPLETE -> InstallPhase.CONFIGURE
                     ComponentResultStatus.AVAILABILITY_INCOMPLETE,
                     ComponentResultStatus.READY,
@@ -3130,7 +3282,44 @@ class InstallationSession(
             progress = progress(1f, indeterminate = false, completedCount = selectedComponents(current).size),
             checkpoint = null,
             componentProgress = terminalProgress,
+            phaseProgress = terminalPhaseProgress(current, results),
         )
+    }
+
+    private fun terminalPhaseProgress(
+        snapshot: InstallationSessionSnapshot,
+        results: List<ComponentResult>,
+    ): Map<InstallPhase, Map<String, ComponentProgress>> {
+        val ledger = snapshot.phaseProgress.toMutableMap()
+        results.forEach { result ->
+            val componentId = result.componentId ?: return@forEach
+            val terminalPhase = result.failurePhase ?: when (result.status) {
+                ComponentResultStatus.NOT_INSTALLED,
+                ComponentResultStatus.INSTALLATION_PENDING_CONFIRMATION,
+                -> InstallPhase.INSTALL
+                ComponentResultStatus.AUTHORIZATION_INCOMPLETE -> InstallPhase.CONFIGURE
+                ComponentResultStatus.AVAILABILITY_INCOMPLETE,
+                ComponentResultStatus.READY,
+                -> InstallPhase.VERIFY
+            }
+            InstallPhase.entries.forEach { phase ->
+                if (phase.ordinal > terminalPhase.ordinal) return@forEach
+                val previous = ledger[phase].orEmpty()
+                val failed = result.status != ComponentResultStatus.READY && phase == terminalPhase
+                ledger[phase] = previous + (
+                    componentId to ComponentProgress(
+                        componentId = componentId,
+                        phase = phase,
+                        status = if (failed) ComponentProgressStatus.FAILED else ComponentProgressStatus.COMPLETED,
+                        bytesWritten = previous[componentId]?.totalBytes ?: previous[componentId]?.bytesWritten ?: 0L,
+                        totalBytes = previous[componentId]?.totalBytes ?: 0L,
+                        fraction = if (failed) previous[componentId]?.fraction else 1f,
+                        indeterminate = false,
+                    )
+                    )
+            }
+        }
+        return ledger
     }
 
     private fun validateAuthorizationEvidence(
@@ -4014,6 +4203,7 @@ class InstallationSession(
         state: InstallationSessionState,
         progress: SessionProgress? = _snapshot.value.progress,
         componentProgress: Map<String, ComponentProgress> = _snapshot.value.componentProgress,
+        phaseProgress: Map<InstallPhase, Map<String, ComponentProgress>> = _snapshot.value.phaseProgress,
         evidence: SessionEvidence = _snapshot.value.evidence,
         maintenance: MaintenanceSnapshot = _snapshot.value.maintenance,
         componentResults: List<ComponentResult> = _snapshot.value.componentResults,
@@ -4029,6 +4219,7 @@ class InstallationSession(
             state = state,
             progress = progress,
             componentProgress = componentProgress,
+            phaseProgress = phaseProgress,
             evidence = evidence,
             maintenance = maintenance,
             componentResults = componentResults,
@@ -4089,6 +4280,45 @@ class InstallationSession(
             indeterminate = status == ComponentProgressStatus.RUNNING && previous?.fraction == null,
         )
         }
+    }
+
+    private fun recordSelectedPhase(
+        snapshot: InstallationSessionSnapshot,
+        phase: InstallPhase,
+        status: ComponentProgressStatus,
+    ): Map<InstallPhase, Map<String, ComponentProgress>> = snapshot.phaseProgress + (
+        phase to selectedComponents(snapshot).associate { component ->
+            val previous = snapshot.phaseProgress[phase]?.get(component.id)
+            component.id to if (component.id in snapshot.failedComponentIds) {
+                previous ?: ComponentProgress(
+                    componentId = component.id,
+                    phase = phase,
+                    status = ComponentProgressStatus.FAILED,
+                    indeterminate = false,
+                )
+            } else {
+                ComponentProgress(
+                    componentId = component.id,
+                    phase = phase,
+                    status = status,
+                    bytesWritten = previous?.bytesWritten ?: 0L,
+                    totalBytes = previous?.totalBytes ?: 0L,
+                    fraction = if (status == ComponentProgressStatus.COMPLETED) 1f else previous?.fraction,
+                    indeterminate = status == ComponentProgressStatus.RUNNING && previous?.fraction == null,
+                )
+            }
+        }
+        )
+
+    private fun installStateRank(state: InstallationSessionState): Int = when (state) {
+        InstallationSessionState.SELECTION_CONFIRMED,
+        InstallationSessionState.PREPARING_ARTIFACTS,
+        InstallationSessionState.ARTIFACTS_READY,
+        -> 0
+        InstallationSessionState.INSTALLING -> 1
+        InstallationSessionState.AUTHORIZING -> 2
+        InstallationSessionState.VERIFYING_DEVICE -> 3
+        else -> -1
     }
 
     private fun Map<String, ComponentProgress>.markPhase(
@@ -4515,6 +4745,7 @@ class InstallationSession(
         currentComponentName = snapshot.currentComponentName,
         progress = snapshot.progress,
         componentProgress = snapshot.componentProgress,
+        phaseProgress = snapshot.phaseProgress,
         failedComponentIds = snapshot.failedComponentIds,
         componentFailureRetryable = snapshot.componentFailureRetryable,
         evidence = snapshot.evidence,

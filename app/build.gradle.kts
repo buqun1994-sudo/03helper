@@ -193,6 +193,8 @@ dependencies {
         // dadb publishes its JUnit platform helper as runtime metadata; it is not needed in the APK.
         exclude(group = "org.graalvm.buildtools", module = "junit-platform-native")
     }
+    // Used directly to count DADB upload bytes; do not rely on DADB's transitive API leak.
+    implementation("com.squareup.okio:okio:2.10.0")
 
     implementation(platform("androidx.compose:compose-bom:2024.12.01"))
     implementation("androidx.compose.animation:animation")

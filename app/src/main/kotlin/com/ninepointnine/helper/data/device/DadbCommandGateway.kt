@@ -18,8 +18,10 @@ import com.ninepointnine.helper.domain.device.DeviceActionFailure
 import com.ninepointnine.helper.domain.device.DeviceAuthorizationConfirmation
 import com.ninepointnine.helper.domain.device.DeviceShortcut
 import com.ninepointnine.helper.domain.device.DeviceShortcutFailureStage
+import com.ninepointnine.helper.domain.device.DeviceShortcutProgress
 import com.ninepointnine.helper.domain.device.DeviceShortcutResult
 import com.ninepointnine.helper.domain.device.DeviceAvailabilityEvidence
+import com.ninepointnine.helper.domain.device.DeviceInstallProgress
 import com.ninepointnine.helper.domain.device.DeviceInstallResult
 import com.ninepointnine.helper.domain.device.DeviceInstallWarning
 import com.ninepointnine.helper.domain.device.InstallableArtifact
@@ -61,6 +63,9 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import okio.Buffer
+import okio.ForwardingSource
+import okio.source
 
 /**
  * DADB-backed device port. The install batch is separate from the single
@@ -85,6 +90,12 @@ internal class DadbCommandGateway(
     override suspend fun installBatch(
         artifacts: List<InstallableArtifact>,
         strategy: InstallationStrategy,
+    ): DeviceInstallResult = installBatch(artifacts, strategy) {}
+
+    override suspend fun installBatch(
+        artifacts: List<InstallableArtifact>,
+        strategy: InstallationStrategy,
+        onProgress: (DeviceInstallProgress) -> Unit,
     ): DeviceInstallResult = withLease(
         whenClosed = DeviceInstallResult.Failed(
             DeviceActionFailure("adb_connection_closed", retryable = true),
@@ -193,8 +204,25 @@ internal class DadbCommandGateway(
             }
         }
 
-        // Installation never launches an application. The only launch occurs
-        // during the versioned authorization plan after every package has been installed.
+        fun report(progress: DeviceInstallProgress) {
+            runCatching { onProgress(progress) }
+        }
+
+        fun cleanupRemote(artifact: InstallableArtifact, remotePath: String) {
+            if (!deleteRemoteStagingFile(remotePath)) {
+                // Staging cleanup is housekeeping. It must never replace a
+                // successful PackageManager result with a user-visible failure.
+                Log.w(TAG, "remote staging cleanup failed component=${artifact.manifest.componentId}")
+                installationWarnings += DeviceInstallWarning(
+                    reasonCode = "remote_staging_cleanup_failed",
+                    componentId = artifact.manifest.componentId,
+                )
+            }
+        }
+
+        // Keep the user-visible batch phases truthful: every APK is transferred
+        // before PackageManager receives the first install command.
+        val stagedArtifacts = mutableListOf<Pair<InstallableArtifact, String>>()
         artifacts.forEach { artifact ->
             if (artifact.manifest.componentId in reusableMissingOnlyIds ||
                 (strategy == InstallationStrategy.INSTALL_MISSING_ONLY &&
@@ -203,6 +231,7 @@ internal class DadbCommandGateway(
                 // The package is already present. The identity readback below
                 // remains mandatory; presence alone is never accepted as proof.
                 operationConfirmedComponentIds += artifact.manifest.componentId
+                report(DeviceInstallProgress.Sent(artifact.manifest.componentId))
                 return@forEach
             }
             val remotePath = remoteApkPath(artifact)
@@ -215,38 +244,92 @@ internal class DadbCommandGateway(
                     failure = DeviceActionFailure("install_apk_file_invalid", artifact.manifest.componentId, retryable = false),
                     operationConfirmedComponentIds = operationConfirmedComponentIds.toSet(),
                 )
-            var failure: DeviceActionFailure? = null
+            stagedArtifacts += artifact to remotePath
+            val totalBytes = apkFile.length().coerceAtLeast(0L)
+            report(DeviceInstallProgress.Sending(artifact.manifest.componentId, 0L, totalBytes))
             try {
-                adb.push(
-                    apkFile,
-                    remotePath,
-                    REMOTE_FILE_MODE,
-                    apkFile.lastModified().coerceAtLeast(1L),
-                )
-                val installResponse = adb.shell("pm install -r $remotePath")
-                if (!isPmInstallSuccessful(installResponse)) {
-                    failure = DeviceActionFailure("adb_pm_install_failed", artifact.manifest.componentId, retryable = true)
+                var bytesWritten = 0L
+                var lastReported = 0L
+                val countingSource = object : ForwardingSource(apkFile.source()) {
+                    override fun read(sink: Buffer, byteCount: Long): Long {
+                        val read = super.read(sink, byteCount)
+                        if (read > 0L) {
+                            bytesWritten = (bytesWritten + read).coerceAtMost(totalBytes)
+                            if (
+                                bytesWritten == totalBytes ||
+                                bytesWritten - lastReported >= PROGRESS_REPORT_INTERVAL_BYTES
+                            ) {
+                                lastReported = bytesWritten
+                                report(
+                                    DeviceInstallProgress.Sending(
+                                        artifact.manifest.componentId,
+                                        bytesWritten,
+                                        totalBytes,
+                                    ),
+                                )
+                            }
+                        }
+                        return read
+                    }
                 }
-            } catch (_: IOException) {
-                failure = DeviceActionFailure("adb_install_transport_failed", artifact.manifest.componentId, retryable = true)
-            } catch (_: Exception) {
-                failure = DeviceActionFailure("adb_install_failed", artifact.manifest.componentId, retryable = true)
-            } finally {
-                if (!deleteRemoteStagingFile(remotePath)) {
-                    // Staging cleanup is housekeeping. It must never replace a
-                    // successful PackageManager result with a user-visible
-                    // installation failure; the next attempt safely reuses the
-                    // deterministic path and overwrites it.
-                    Log.w(TAG, "remote staging cleanup failed component=${artifact.manifest.componentId}")
-                    installationWarnings += DeviceInstallWarning(
-                        reasonCode = "remote_staging_cleanup_failed",
-                        componentId = artifact.manifest.componentId,
+                countingSource.use { source ->
+                    adb.push(
+                        source,
+                        remotePath,
+                        REMOTE_FILE_MODE,
+                        apkFile.lastModified().coerceAtLeast(1L),
                     )
                 }
+                report(DeviceInstallProgress.Sent(artifact.manifest.componentId))
+            } catch (_: IOException) {
+                report(DeviceInstallProgress.SendFailed(artifact.manifest.componentId))
+                stagedArtifacts.forEach { (stagedArtifact, path) -> cleanupRemote(stagedArtifact, path) }
+                return@withLease DeviceInstallResult.Failed(
+                    failure = DeviceActionFailure("adb_push_transport_failed", artifact.manifest.componentId, retryable = true),
+                    operationConfirmedComponentIds = operationConfirmedComponentIds.toSet(),
+                    warnings = installationWarnings.toList(),
+                )
+            } catch (_: Exception) {
+                report(DeviceInstallProgress.SendFailed(artifact.manifest.componentId))
+                stagedArtifacts.forEach { (stagedArtifact, path) -> cleanupRemote(stagedArtifact, path) }
+                return@withLease DeviceInstallResult.Failed(
+                    failure = DeviceActionFailure("adb_push_failed", artifact.manifest.componentId, retryable = true),
+                    operationConfirmedComponentIds = operationConfirmedComponentIds.toSet(),
+                    warnings = installationWarnings.toList(),
+                )
+            }
+        }
+
+        // Installation never launches an application. The only launch occurs
+        // during the versioned authorization plan after every package is installed.
+        // The install phase includes PackageManager execution and the mandatory
+        // installed-APK identity readback. Start every selected component here,
+        // but only report 100% after that readback succeeds below.
+        artifacts.forEach { artifact ->
+            report(DeviceInstallProgress.Installing(artifact.manifest.componentId))
+        }
+        stagedArtifacts.forEachIndexed { index, (artifact, remotePath) ->
+            val failure = try {
+                val installResponse = adb.shell("pm install -r $remotePath")
+                if (isPmInstallSuccessful(installResponse)) {
+                    null
+                } else {
+                    DeviceActionFailure("adb_pm_install_failed", artifact.manifest.componentId, retryable = true)
+                }
+            } catch (_: IOException) {
+                DeviceActionFailure("adb_install_transport_failed", artifact.manifest.componentId, retryable = true)
+            } catch (_: Exception) {
+                DeviceActionFailure("adb_install_failed", artifact.manifest.componentId, retryable = true)
+            } finally {
+                cleanupRemote(artifact, remotePath)
             }
             if (failure != null) {
+                report(DeviceInstallProgress.InstallFailed(artifact.manifest.componentId))
+                stagedArtifacts.drop(index + 1).forEach { (remainingArtifact, path) ->
+                    cleanupRemote(remainingArtifact, path)
+                }
                 return@withLease DeviceInstallResult.Failed(
-                    failure = checkNotNull(failure),
+                    failure = failure,
                     writeConfirmedComponentIds = writeConfirmedComponentIds.toSet(),
                     operationConfirmedComponentIds = operationConfirmedComponentIds.toSet(),
                     warnings = installationWarnings.toList(),
@@ -262,8 +345,12 @@ internal class DadbCommandGateway(
         val installed = mutableListOf<InstalledArtifactEvidence>()
         artifacts.forEach { artifact ->
             when (val identity = verifyInstalledArtifactIdentity(artifact, metadataReader, verificationDirectory)) {
-                is InstalledArtifactIdentityResult.Verified -> installed += identity.evidence
+                is InstalledArtifactIdentityResult.Verified -> {
+                    installed += identity.evidence
+                    report(DeviceInstallProgress.Installed(artifact.manifest.componentId))
+                }
                 is InstalledArtifactIdentityResult.Failed -> {
+                    report(DeviceInstallProgress.InstallFailed(artifact.manifest.componentId))
                     if (operationConfirmedComponentIds.isNotEmpty()) {
                         val identityMismatch = identity.failure.reasonCode in setOf(
                             "installation_installed_package_mismatch",
@@ -332,19 +419,32 @@ internal class DadbCommandGateway(
         shortcut: DeviceShortcut,
         selectedComponentIds: Set<String>,
         authorizationPlan: com.ninepointnine.helper.domain.device.AuthorizationPlan,
-    ): DeviceShortcutResult = runShortcutWithPlan(shortcut, selectedComponentIds, authorizationPlan)
+    ): DeviceShortcutResult = runShortcutWithPlan(shortcut, selectedComponentIds, authorizationPlan) {}
+
+    override suspend fun runShortcut(
+        shortcut: DeviceShortcut,
+        selectedComponentIds: Set<String>,
+        authorizationPlan: com.ninepointnine.helper.domain.device.AuthorizationPlan,
+        onProgress: (DeviceShortcutProgress) -> Unit,
+    ): DeviceShortcutResult = runShortcutWithPlan(
+        shortcut,
+        selectedComponentIds,
+        authorizationPlan,
+        onProgress,
+    )
 
     private suspend fun runShortcutWithPlan(
         shortcut: DeviceShortcut,
         selectedComponentIds: Set<String>,
         authorizationPlan: com.ninepointnine.helper.domain.device.AuthorizationPlan,
+        onProgress: (DeviceShortcutProgress) -> Unit,
     ): DeviceShortcutResult = withLease(
         whenClosed = DeviceShortcutResult.Failed(
             stage = DeviceShortcutFailureStage.AUTHORIZATION,
             failure = DeviceActionFailure("adb_connection_closed", retryable = true),
         ),
     ) {
-        runShortcutWithPlanLocked(shortcut, selectedComponentIds, authorizationPlan)
+        runShortcutWithPlanLocked(shortcut, selectedComponentIds, authorizationPlan, onProgress)
     }
 
     /** Executes a validated plan while the caller owns the connection lease. */
@@ -352,7 +452,15 @@ internal class DadbCommandGateway(
         shortcut: DeviceShortcut,
         selectedComponentIds: Set<String>,
         authorizationPlan: com.ninepointnine.helper.domain.device.AuthorizationPlan,
+        onProgress: (DeviceShortcutProgress) -> Unit,
     ): DeviceShortcutResult {
+        var verificationReported = false
+        fun reportVerificationBoundary() {
+            if (verificationReported) return
+            verificationReported = true
+            runCatching { onProgress(DeviceShortcutProgress.AuthorizationCompleted) }
+            runCatching { onProgress(DeviceShortcutProgress.VerificationStarted) }
+        }
         val launchDesktop = shortcut == DeviceShortcut.CONFIGURE_ALL_INSTALLED_APPS_AND_START_DESKTOP
         if (shortcut !in setOf(
                 DeviceShortcut.CONFIGURE_ALL_INSTALLED_APPS_AND_START_DESKTOP,
@@ -399,9 +507,13 @@ internal class DadbCommandGateway(
         val structuralFailure = (parsed as? DeviceShortcutResult.Failed)
             ?.takeIf { isNonMaskableAuthorizationFailure(it.failure.reasonCode) }
         val result = if (structuralFailure != null) {
+            if (structuralFailure.stage == DeviceShortcutFailureStage.VERIFICATION) {
+                reportVerificationBoundary()
+            }
             structuralFailure
         } else when (val postcondition = readAuthorizationPostcondition(authorizationPlan)) {
             is AuthorizationPostcondition.Satisfied -> {
+                reportVerificationBoundary()
                 val completed = DeviceShortcutResult.Completed(
                     configuredComponentIds = postcondition.configuredComponentIds -
                         (parsed as? DeviceShortcutResult.Failed)?.skippedComponentIds.orEmpty(),
@@ -431,6 +543,7 @@ internal class DadbCommandGateway(
 
             is AuthorizationPostcondition.Unavailable -> when (parsed) {
                 is DeviceShortcutResult.Completed -> {
+                    reportVerificationBoundary()
                     // The combined command already emitted a complete, validated
                     // receipt. A separate readback outage lowers confidence but
                     // cannot rewrite that command into an authorization failure.
@@ -440,7 +553,11 @@ internal class DadbCommandGateway(
                     if (launchDesktop) verifyDesktopRuntime(completed, authorizationPlan) else completed
                 }
 
-                is DeviceShortcutResult.Failed -> parsed
+                is DeviceShortcutResult.Failed -> parsed.also {
+                    if (it.stage == DeviceShortcutFailureStage.VERIFICATION) {
+                        reportVerificationBoundary()
+                    }
+                }
             }
         }
         Log.d(
@@ -852,6 +969,7 @@ internal class DadbCommandGateway(
             shortcut = DeviceShortcut.CONFIGURE_SELECTED_APPS,
             selectedComponentIds = setOf(component.componentId),
             authorizationPlan = plan,
+            onProgress = {},
         )
         val executionFailure = (execution as? DeviceShortcutResult.Failed)?.failure
         val finalRequirements = projectAuthorizationRequirements(
@@ -2161,6 +2279,7 @@ internal class DadbCommandGateway(
     private companion object {
         const val TAG = "03helper-device"
         const val REMOTE_FILE_MODE = 420
+        const val PROGRESS_REPORT_INTERVAL_BYTES = 256L * 1024L
         val COMPONENT_ID_PATTERN = Regex("^[a-z][a-z0-9-]{0,63}$")
         val PACKAGE_NAME_PATTERN = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$")
         val COMPONENT_NAME_PATTERN = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)*/[A-Za-z0-9_.$]+$")

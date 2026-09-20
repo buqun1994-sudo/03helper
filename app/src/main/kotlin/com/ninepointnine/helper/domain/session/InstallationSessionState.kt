@@ -39,6 +39,7 @@ enum class InstallPhase {
     FETCH,
     CHECK,
     SEND,
+    INSTALL,
     CONFIGURE,
     VERIFY,
 }
@@ -211,6 +212,12 @@ fun componentStatusForReasonCode(reasonCode: String): ComponentStatus = when {
 /** Maps a reason to the phase that produced the user-visible fact. */
 fun installPhaseForReasonCode(reasonCode: String): InstallPhase = when {
     reasonCode in setOf(
+        "adb_push_transport_failed",
+        "adb_push_failed",
+        "remote_staging_path_invalid",
+    ) -> InstallPhase.SEND
+
+    reasonCode in setOf(
         "installation_package_path_missing",
         "installation_installed_apk_metadata_unreadable",
         "installation_installed_apk_read_failed",
@@ -227,11 +234,33 @@ fun installPhaseForReasonCode(reasonCode: String): InstallPhase = when {
         "maintenance_installed_certificate_mismatch",
         "maintenance_installed_version_mismatch",
         "maintenance_installed_apk_hash_mismatch",
-        "distribution_apk_version_mismatch",
         "installation_detail_invalid",
         "installation_evidence_invalid",
         "installation_evidence_missing",
         "installation_write_receipt_invalid",
+        "installation_identity_unavailable",
+        "installation_result_invalid",
+        "installation_not_attempted_after_failure",
+        "installation_batch_execution_failed",
+        "installation_failed",
+        "adb_pm_install_failed",
+        "adb_install_transport_failed",
+        "adb_install_failed",
+        "install_exception",
+        "install_apk_file_invalid",
+        "install_manifest_invalid",
+        "installation_batch_plan_invalid",
+    ) -> InstallPhase.INSTALL
+
+    reasonCode.startsWith("archive_") ||
+        reasonCode.startsWith("dynamic_archive_") ||
+        reasonCode.startsWith("distribution_archive_") ||
+        reasonCode.startsWith("distribution_apk_") ||
+        reasonCode.startsWith("apk_entry_") ||
+        reasonCode.startsWith("apk_extraction_") ||
+        reasonCode == "download_not_zip" -> InstallPhase.CHECK
+
+    reasonCode in setOf(
         "success_evidence_incomplete",
         "availability_detail_invalid",
         "availability_evidence_missing",
@@ -244,16 +273,6 @@ fun installPhaseForReasonCode(reasonCode: String): InstallPhase = when {
         "desktop_launch_evidence_invalid",
     ) -> InstallPhase.VERIFY
 
-    reasonCode in setOf(
-        "adb_pm_install_failed",
-        "adb_install_transport_failed",
-        "adb_install_failed",
-        "install_exception",
-        "install_apk_file_invalid",
-        "install_manifest_invalid",
-        "installation_batch_plan_invalid",
-    ) -> InstallPhase.SEND
-
     reasonCode.startsWith("authorization_") ||
         reasonCode.startsWith("configuration_") ||
         reasonCode in setOf(
@@ -265,13 +284,7 @@ fun installPhaseForReasonCode(reasonCode: String): InstallPhase = when {
             "unexpected_desktop_launch",
         ) -> InstallPhase.CONFIGURE
 
-    reasonCode.startsWith("archive_") ||
-        reasonCode.startsWith("dynamic_archive_") ||
-        reasonCode.startsWith("distribution_archive_") ||
-        reasonCode.startsWith("apk_entry_") ||
-        reasonCode.startsWith("apk_extraction_") ||
-        reasonCode == "download_not_zip" ||
-        reasonCode.startsWith("artifact_") ||
+    reasonCode.startsWith("artifact_") ||
         reasonCode.startsWith("catalog_") ||
         reasonCode.startsWith("distribution_config_") ||
         reasonCode.startsWith("download_") ||

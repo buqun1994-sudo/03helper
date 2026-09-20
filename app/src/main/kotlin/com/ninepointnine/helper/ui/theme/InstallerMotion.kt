@@ -14,6 +14,8 @@ object InstallerMotion {
     const val ReleaseDuration = 160
     const val StateChangeDuration = 160
     const val ProgressDuration = 180
+    const val CompletedPhaseMinimumDuration = 360L
+    const val TerminalProgressHoldDuration = 320L
 
     val Easing: Easing = FastOutSlowInEasing
 

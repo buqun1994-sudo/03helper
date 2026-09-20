@@ -41,6 +41,7 @@
     <string name="phase_fetch">正在获取安装包</string>
     <string name="phase_check">正在检查安装包</string>
     <string name="phase_send">正在发送到车机</string>
+    <string name="phase_install">正在车机上安装</string>
     <string name="phase_configure">正在授权</string>
     <string name="phase_verify">正在检查是否可用</string>
     <string name="install_progress_percent">%1$d%%</string>

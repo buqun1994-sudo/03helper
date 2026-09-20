@@ -306,35 +306,97 @@ object InstallUiStateMapper {
         )
     }
 
+    internal fun installationProgress(snapshot: InstallationSessionSnapshot): InstallUiState.Installing =
+        installingState(snapshot)
+
     private fun installingState(snapshot: InstallationSessionSnapshot): InstallUiState.Installing {
+        val selectedIds = snapshot.installationBatch?.selectedComponentIds
+            ?.takeIf { it.isNotEmpty() }
+            ?: snapshot.componentProgress.keys
+        val phaseProgress = InstallPhase.entries.mapNotNull { phase ->
+            val entries = snapshot.phaseProgress[phase].orEmpty()
+            if (entries.isEmpty() || selectedIds.isEmpty()) return@mapNotNull null
+            val completedCount = selectedIds.count { componentId ->
+                entries[componentId]?.status ==
+                    com.ninepointnine.helper.domain.session.ComponentProgressStatus.COMPLETED
+            }
+            val aggregate = selectedIds.sumOf { componentId ->
+                when (val item = entries[componentId]) {
+                    null -> 0.0
+                    else -> when (item.status) {
+                        com.ninepointnine.helper.domain.session.ComponentProgressStatus.COMPLETED -> 1.0
+                        else -> (item.fraction ?: 0f).toDouble()
+                    }
+                }
+            }.div(selectedIds.size.toDouble()).toFloat().coerceIn(0f, 1f)
+            phase to UiProgress(
+                completedCount = completedCount,
+                totalCount = selectedIds.size,
+                fraction = aggregate,
+                indeterminate = entries.values.any { item ->
+                    item.componentId in selectedIds &&
+                        item.status == com.ninepointnine.helper.domain.session.ComponentProgressStatus.RUNNING &&
+                        item.indeterminate
+                },
+            )
+        }.toMap()
         val currentPhase = when (snapshot.state) {
-            InstallationSessionState.PREPARING_ARTIFACTS -> snapshot.componentProgress.values
-                .firstOrNull { it.status == com.ninepointnine.helper.domain.session.ComponentProgressStatus.RUNNING }
-                ?.phase
-                ?: InstallPhase.FETCH
+            InstallationSessionState.PREPARING_ARTIFACTS -> {
+                val fetch = snapshot.phaseProgress[InstallPhase.FETCH].orEmpty()
+                val fetchFinished = selectedIds.isNotEmpty() && selectedIds.all { componentId ->
+                    fetch[componentId]?.status in setOf(
+                        com.ninepointnine.helper.domain.session.ComponentProgressStatus.COMPLETED,
+                        com.ninepointnine.helper.domain.session.ComponentProgressStatus.FAILED,
+                    )
+                }
+                if (fetchFinished && snapshot.phaseProgress[InstallPhase.CHECK].orEmpty().isNotEmpty()) {
+                    InstallPhase.CHECK
+                } else {
+                    InstallPhase.FETCH
+                }
+            }
 
             InstallationSessionState.ARTIFACTS_READY -> InstallPhase.CHECK
 
-            InstallationSessionState.INSTALLING -> InstallPhase.SEND
+            InstallationSessionState.INSTALLING -> {
+                val send = snapshot.phaseProgress[InstallPhase.SEND].orEmpty()
+                val sendFinished = selectedIds.isNotEmpty() && selectedIds.all { componentId ->
+                    send[componentId]?.status in setOf(
+                        com.ninepointnine.helper.domain.session.ComponentProgressStatus.COMPLETED,
+                        com.ninepointnine.helper.domain.session.ComponentProgressStatus.FAILED,
+                    )
+                }
+                if (sendFinished && snapshot.phaseProgress[InstallPhase.INSTALL].orEmpty().isNotEmpty()) {
+                    InstallPhase.INSTALL
+                } else {
+                    InstallPhase.SEND
+                }
+            }
             InstallationSessionState.AUTHORIZING -> InstallPhase.CONFIGURE
             InstallationSessionState.VERIFYING_DEVICE -> InstallPhase.VERIFY
+            InstallationSessionState.SUCCEEDED,
+            InstallationSessionState.COMPLETED_WITH_ERRORS,
+            -> InstallPhase.VERIFY
             InstallationSessionState.SELECTION_CONFIRMED -> InstallPhase.FETCH
             else -> InstallPhase.FETCH
         }
         val completedStages = InstallPhase.entries
             .filter { it.ordinal < currentPhase.ordinal }
             .toSet()
-        val progress = snapshot.progress
+        val progress = phaseProgress[currentPhase] ?: snapshot.progress?.let {
+            UiProgress(
+                completedCount = it.completedCount,
+                totalCount = it.totalCount,
+                fraction = it.fraction?.takeIf(Float::isFinite)?.coerceIn(0f, 1f),
+                indeterminate = it.indeterminate,
+            )
+        }
         return InstallUiState.Installing(
             deviceName = snapshot.device?.displayName ?: "车机未连接",
             currentComponentName = snapshot.currentComponentName,
             currentPhase = currentPhase,
-            progress = UiProgress(
-                completedCount = progress?.completedCount ?: 0,
-                totalCount = progress?.totalCount ?: 0,
-                fraction = progress?.fraction?.takeIf { it.isFinite() }?.coerceIn(0f, 1f),
-                indeterminate = progress?.indeterminate ?: true,
-            ),
+            progress = progress ?: UiProgress(0, selectedIds.size, null, true),
+            phaseProgress = phaseProgress,
             completedStages = completedStages,
             installationFlow = snapshot.installationFlow,
             selfUpdateInstallInProgress = snapshot.installationFlow == InstallationFlow.SELF_UPDATE &&
@@ -401,6 +463,34 @@ object InstallUiStateMapper {
         errorReason = errorReason?.toUserMessage(componentName = displayName),
         )
     }
+}
+
+/** Projects one queued presentation frame without changing domain truth. */
+internal fun presentInstallationPhase(
+    truth: InstallUiState.Installing,
+    phase: InstallPhase,
+    markCurrentComplete: Boolean = false,
+): InstallUiState.Installing {
+    val truthIsAhead = phase.ordinal < truth.currentPhase.ordinal
+    val phaseTruth = truth.phaseProgress[phase]
+    val fallbackTotal = maxOf(truth.progress.totalCount, phaseTruth?.totalCount ?: 0)
+    val visibleProgress = if (truthIsAhead || markCurrentComplete) {
+        UiProgress(
+            completedCount = fallbackTotal,
+            totalCount = fallbackTotal,
+            fraction = 1f,
+            indeterminate = false,
+        )
+    } else {
+        phaseTruth ?: truth.progress
+    }
+    val completed = InstallPhase.entries.filterTo(linkedSetOf()) { it.ordinal < phase.ordinal }
+    if (markCurrentComplete) completed += phase
+    return truth.copy(
+        currentPhase = phase,
+        progress = visibleProgress,
+        completedStages = completed,
+    )
 }
 
 internal fun failureReasonToUserMessage(

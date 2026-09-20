@@ -19,14 +19,19 @@ import com.ninepointnine.helper.domain.artifact.ArtifactSourceKind
 import com.ninepointnine.helper.domain.artifact.ArtifactVerification
 import com.ninepointnine.helper.domain.artifact.ArtifactVersion
 import com.ninepointnine.helper.domain.artifact.CompatibilityRange
+import com.ninepointnine.helper.domain.artifact.ReleaseSourceMode
+import com.ninepointnine.helper.domain.artifact.ReleaseSourcePolicy
 import com.ninepointnine.helper.domain.artifact.SourceSelectionEvidence
 import com.ninepointnine.helper.domain.device.AuthorizationAction
 import com.ninepointnine.helper.domain.device.AuthorizationActionEvidence
 import com.ninepointnine.helper.domain.device.AuthorizationPlanBuildResult
 import com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
 import com.ninepointnine.helper.domain.device.AuthorizationValueState
+import com.ninepointnine.helper.domain.device.ApkDeclarationMetadata
+import com.ninepointnine.helper.domain.device.ApkServiceDeclaration
 import com.ninepointnine.helper.domain.device.DeviceAvailabilityEvidence
 import com.ninepointnine.helper.domain.device.InstalledArtifactEvidence
+import com.ninepointnine.helper.domain.device.ManagedComponent
 import com.ninepointnine.helper.domain.session.ArtifactCatalogStage
 import com.ninepointnine.helper.domain.session.AuthorizationStageReceipt
 import com.ninepointnine.helper.domain.session.AuthorizationStageReceiptStatus
@@ -92,6 +97,7 @@ private fun DebugScenarioRoot(scenario: String) {
                     artifactManifests = DebugScenarioFixtures.manifests,
                     artifactCatalogStage = ArtifactCatalogStage.PREPARED,
                 ),
+                sourcePolicy = ReleaseSourcePolicy(mode = ReleaseSourceMode.DEBUG_REAL_COMPONENTS),
             )
         }
     }
@@ -345,9 +351,6 @@ internal object DebugScenarioFixtures {
             "found" -> driver.discover()
             "selection" -> {
                 driver.connect(selectOptional = false)
-                // Exercise the same catalog boundary as production so this
-                // scenario visibly demonstrates the default optional set.
-                driver.resolveCatalog()
             }
             "progress" -> {
                 driver.connect(selectOptional = false)
@@ -431,16 +434,21 @@ private class FakeSessionDriver(
             animated,
         )
         event(InstallationSessionEvent.InitialInstalledApplicationsResolved(emptyList()), animated)
-        if (selectOptional) {
-            command(
-                InstallationSessionCommand.ToggleOptionalComponent("lyrics", selected = true),
-                animated,
-            )
-            command(
-                InstallationSessionCommand.ToggleOptionalComponent("file-manager", selected = true),
-                animated,
-            )
-        }
+        // Connection intentionally invalidates any catalog carried by the
+        // initial fixture. Re-submit it through the production event boundary
+        // before changing selection or starting a batch.
+        resolveCatalog(animated)
+        DebugScenarioFixtures.components
+            .filterNot { it.required }
+            .forEach { component ->
+                command(
+                    InstallationSessionCommand.ToggleOptionalComponent(
+                        component.id,
+                        selected = selectOptional,
+                    ),
+                    animated,
+                )
+            }
     }
 
     suspend fun resolveCatalog(animated: Boolean = false) {
@@ -519,16 +527,26 @@ private class FakeSessionDriver(
         val batch = checkNotNull(snapshot.installationBatch)
         val manifests = snapshot.artifactManifests
             .filter { it.componentId in batch.selectedComponentIds }
-        val plan = when (val result = AuthorizationPlanFactory.createForManifests(
-            manifests = manifests,
+        val plan = when (val result = AuthorizationPlanFactory.createForComponents(
+            components = manifests.map { manifest ->
+                ManagedComponent(
+                    componentId = manifest.componentId,
+                    packageName = manifest.packageName,
+                    setup = manifest.deviceSetup,
+                    order = manifest.sortOrder,
+                )
+            },
             requireDesktop = false,
+            declarationsByComponent = manifests.associate { manifest ->
+                manifest.componentId to authorizationDeclarations(manifest)
+            },
         )) {
             is AuthorizationPlanBuildResult.Ready -> result.plan
             is AuthorizationPlanBuildResult.Rejected -> error(result.reasonCode)
         }
         val authorizationEvidence = plan.actions.map(::authorizationEvidence)
         val manifestsById = manifests.associateBy { it.componentId }
-        return InstallationBatchReceipt(
+        val receipt = InstallationBatchReceipt(
             batchId = batch.batchId,
             components = snapshot.components
                 .map { it.id }
@@ -579,13 +597,28 @@ private class FakeSessionDriver(
                         },
                     )
                 },
+            authorizationPlan = plan,
         )
+        check(
+            receipt.validationFailure(
+                plan = batch,
+                manifests = manifestsById,
+                baseline = snapshot.evidence,
+            ) == null,
+        ) {
+            receipt.validationFailure(
+                plan = batch,
+                manifests = manifestsById,
+                baseline = snapshot.evidence,
+            ).orEmpty()
+        }
+        return receipt
     }
 
     private fun preparationManifests(): List<ArtifactManifest> {
         val snapshot = session.currentSnapshot()
         val preparationIds = checkNotNull(snapshot.installationBatch).preparationComponentIds
-        return snapshot.artifactManifests.filter { it.componentId in preparationIds }
+        return DebugScenarioFixtures.manifests.filter { it.componentId in preparationIds }
     }
 
     private fun authorizationEvidence(action: AuthorizationAction): AuthorizationActionEvidence = when (action) {
@@ -623,6 +656,52 @@ private class FakeSessionDriver(
             after = AuthorizationValueState.COMPONENT_PRESENT,
             preservedEntryCount = 0,
         )
+    }
+
+    private fun authorizationDeclarations(manifest: ArtifactManifest): ApkDeclarationMetadata {
+        val packageName = manifest.packageName
+        return when (manifest.componentId) {
+            AuthorizationPlanFactory.DESKTOP_COMPONENT_ID -> ApkDeclarationMetadata(
+                requestedPermissions = setOf(
+                    "android.permission.SYSTEM_ALERT_WINDOW",
+                    "android.permission.REQUEST_INSTALL_PACKAGES",
+                ),
+                services = setOf(
+                    ApkServiceDeclaration(
+                        "$packageName/com.tcrrry.desktop.debug.NavigationDemoAccessibilityService",
+                        "android.permission.BIND_ACCESSIBILITY_SERVICE",
+                    ),
+                ),
+            )
+
+            AuthorizationPlanFactory.LYRICS_COMPONENT_ID -> ApkDeclarationMetadata(
+                requestedPermissions = setOf("android.permission.SYSTEM_ALERT_WINDOW"),
+                services = setOf(
+                    ApkServiceDeclaration(
+                        "$packageName/com.tcrrry.desktoplyrics.MediaListenerService",
+                        "android.permission.BIND_NOTIFICATION_LISTENER_SERVICE",
+                    ),
+                    ApkServiceDeclaration(
+                        "$packageName/com.tcrrry.desktoplyrics.IcarDockAccessibilityService",
+                        "android.permission.BIND_ACCESSIBILITY_SERVICE",
+                    ),
+                ),
+            )
+
+            AuthorizationPlanFactory.FILE_MANAGER_COMPONENT_ID -> ApkDeclarationMetadata(
+                requestedPermissions = setOf(
+                    "android.permission.READ_EXTERNAL_STORAGE",
+                    "android.permission.WRITE_EXTERNAL_STORAGE",
+                    "android.permission.REQUEST_INSTALL_PACKAGES",
+                ),
+                runtimeGrantPermissions = setOf(
+                    "android.permission.READ_EXTERNAL_STORAGE",
+                    "android.permission.WRITE_EXTERNAL_STORAGE",
+                ),
+            )
+
+            else -> ApkDeclarationMetadata()
+        }
     }
 
 }

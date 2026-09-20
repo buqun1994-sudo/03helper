@@ -1,12 +1,7 @@
 package com.ninepointnine.helper.ui.screens
 
-import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
-import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,7 +20,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -44,12 +38,12 @@ import androidx.compose.ui.res.stringResource
 import com.ninepointnine.helper.R
 import com.ninepointnine.helper.domain.session.DeviceConnectionStatus
 import com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
-import com.ninepointnine.helper.domain.session.InstallPhase
 import com.ninepointnine.helper.domain.session.ResultKind
 import com.ninepointnine.helper.ui.state.ResultFailureStage
 import com.ninepointnine.helper.ui.components.AnimatedEntry
 import com.ninepointnine.helper.ui.components.ComponentLogo
 import com.ninepointnine.helper.ui.components.InstallStepIndicator
+import com.ninepointnine.helper.ui.components.InstallationPhaseList
 import com.ninepointnine.helper.ui.components.InstallationResultRow
 import com.ninepointnine.helper.ui.components.IconTextActionButton
 import com.ninepointnine.helper.ui.components.PressableSurface
@@ -64,8 +58,6 @@ import com.ninepointnine.helper.ui.state.InstallUiState
 import com.ninepointnine.helper.ui.state.isMandatory
 import com.ninepointnine.helper.ui.theme.InstallerColors
 import com.ninepointnine.helper.ui.theme.InstallerDimensions
-import com.ninepointnine.helper.ui.theme.InstallerMotion
-import kotlin.math.roundToInt
 
 @Composable
 fun FirstInstallScreen(
@@ -611,13 +603,6 @@ private fun InstallingScreen(
     state: InstallUiState.Installing,
     modifier: Modifier,
 ) {
-    val phases = listOf(
-        InstallPhase.FETCH to R.string.phase_fetch,
-        InstallPhase.CHECK to R.string.phase_check,
-        InstallPhase.SEND to R.string.phase_send,
-        InstallPhase.CONFIGURE to R.string.phase_configure,
-        InstallPhase.VERIFY to R.string.phase_verify,
-    )
     Column(
         modifier = modifier
             .fillMaxSize()
@@ -632,22 +617,12 @@ private fun InstallingScreen(
             Text(text = current, style = MaterialTheme.typography.headlineSmall, color = InstallerColors.White)
         }
         Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
-        LazyColumn(
+        InstallationPhaseList(
+            state = state,
+            testTag = "install_phases",
             modifier = Modifier
-                .weight(1f)
-                .testTag("install_phases"),
-            verticalArrangement = Arrangement.spacedBy(InstallerDimensions.ListSpacing),
-        ) {
-            itemsIndexed(phases, key = { _, item -> item.first }) { index, (phase, label) ->
-                AnimatedEntry(visible = true, index = index) {
-                    PhaseRow(
-                        label = stringResource(label),
-                        phase = phase,
-                        state = state,
-                    )
-                }
-            }
-        }
+                .weight(1f),
+        )
         Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
         Text(
             text = stringResource(R.string.install_keep_screen_on),
@@ -657,96 +632,6 @@ private fun InstallingScreen(
             modifier = Modifier.fillMaxWidth(),
         )
         Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
-    }
-}
-
-@Composable
-private fun PhaseRow(
-    label: String,
-    phase: InstallPhase,
-    state: InstallUiState.Installing,
-) {
-    val completed = phase in state.completedStages
-    val current = phase == state.currentPhase
-    val animatedProgress by animateFloatAsState(
-        targetValue = state.progress.fraction ?: 0f,
-        animationSpec = InstallerMotion.progress(),
-        label = "phaseProgress",
-    )
-    PressableSurface(
-        onClick = {},
-        enabled = false,
-        minHeight = InstallerDimensions.ListItemMinHeight,
-        containerColor = if (current) InstallerColors.WhiteSurface else Color.Transparent,
-        borderColor = if (current) InstallerColors.WhiteBorder else Color.Transparent,
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            AnimatedContent(
-                targetState = when {
-                    completed -> PhaseVisual.COMPLETED
-                    current -> PhaseVisual.CURRENT
-                    else -> PhaseVisual.PENDING
-                },
-                transitionSpec = {
-                    (fadeIn(InstallerMotion.stateChange()) + scaleIn(InstallerMotion.stateChange(), initialScale = 0.92f))
-                        .togetherWith(fadeOut(InstallerMotion.stateChange()) + scaleOut(InstallerMotion.stateChange(), targetScale = 0.92f))
-                },
-                label = "phaseStatus",
-            ) { visual ->
-                StatusIcon(
-                    name = when (visual) {
-                        PhaseVisual.COMPLETED -> "circle_check"
-                        PhaseVisual.CURRENT -> "loader_circle"
-                        PhaseVisual.PENDING -> "circle"
-                    },
-                    contentDescription = label,
-                    tint = if (visual == PhaseVisual.COMPLETED) InstallerColors.Success else InstallerColors.White,
-                    size = InstallerDimensions.SmallIconSize,
-                )
-            }
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(
-                    text = label,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = if (current || completed) InstallerColors.White else InstallerColors.AuxiliaryWhite,
-                )
-                if (current) {
-                    if (state.progress.indeterminate || state.progress.fraction == null) {
-                        LinearProgressIndicator(
-                            color = InstallerColors.White,
-                            trackColor = InstallerColors.WhiteBorder,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                    } else {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            LinearProgressIndicator(
-                                progress = { animatedProgress },
-                                color = InstallerColors.White,
-                                trackColor = InstallerColors.WhiteBorder,
-                                modifier = Modifier.weight(1f),
-                            )
-                            Text(
-                                text = stringResource(
-                                    R.string.install_progress_percent,
-                                    (animatedProgress * 100f).roundToInt(),
-                                ),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = InstallerColors.White,
-                                modifier = Modifier.width(44.dp),
-                            )
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -875,9 +760,3 @@ private data class ResultCopy(
     val actionText: Int,
     val action: () -> Unit,
 )
-
-private enum class PhaseVisual {
-    COMPLETED,
-    CURRENT,
-    PENDING,
-}

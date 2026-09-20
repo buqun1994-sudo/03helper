@@ -34,6 +34,7 @@ import com.ninepointnine.helper.domain.device.DeviceEndpoint
 import com.ninepointnine.helper.domain.device.DeviceIdentity
 import com.ninepointnine.helper.domain.device.DeviceActionFailure
 import com.ninepointnine.helper.domain.device.DeviceInstallResult
+import com.ninepointnine.helper.domain.device.DeviceInstallProgress
 import com.ninepointnine.helper.domain.device.DeviceShortcut
 import com.ninepointnine.helper.domain.device.DeviceShortcutFailureStage
 import com.ninepointnine.helper.domain.device.DeviceShortcutResult
@@ -45,6 +46,7 @@ import com.ninepointnine.helper.domain.session.AuthorizationStageReceiptStatus
 import com.ninepointnine.helper.domain.session.AvailabilityStageReceiptStatus
 import com.ninepointnine.helper.domain.session.InstallationStageReceiptStatus
 import com.ninepointnine.helper.domain.session.InstallationFlow
+import com.ninepointnine.helper.domain.session.InstallPhase
 import com.ninepointnine.helper.domain.session.InstallationStrategy
 import com.ninepointnine.helper.domain.session.MaintenanceApplicationActionId
 import dadb.AdbShellResponse
@@ -1045,6 +1047,7 @@ class DeviceActionsTest {
         assertTrue(legacyWrites.none { it.startsWith("pm install -r ") })
 
         val (reinstallGateway, reinstallWrites) = gatewayFixture()
+        val reinstallProgress = mutableListOf<DeviceInstallProgress>()
         val reinstallResult = runBlocking {
             reinstallGateway.installBatch(
                 listOf(
@@ -1052,11 +1055,24 @@ class DeviceActionsTest {
                     com.ninepointnine.helper.domain.device.InstallableArtifact(lyrics.manifest, lyrics.finalApk),
                 ),
                 InstallationStrategy.REINSTALL_SELECTED,
+                reinstallProgress::add,
             )
         }
         assertTrue(reinstallResult is DeviceInstallResult.Installed)
         assertEquals(2, reinstallWrites.count { it.startsWith("push:") })
         assertEquals(2, reinstallWrites.count { it.startsWith("pm install -r ") })
+        assertTrue(
+            reinstallWrites.indexOfLast { it.startsWith("push:") } <
+                reinstallWrites.indexOfFirst { it.startsWith("pm install -r ") },
+        )
+        assertTrue(
+            reinstallProgress.indexOfLast { it is DeviceInstallProgress.Sent } <
+                reinstallProgress.indexOfFirst { it is DeviceInstallProgress.Installing },
+        )
+        assertTrue(
+            reinstallProgress.indexOfLast { it is DeviceInstallProgress.Installing } <
+                reinstallProgress.indexOfFirst { it is DeviceInstallProgress.Installed },
+        )
 
         val (splitGateway, splitWrites) = gatewayFixture(splitPackagePaths = true)
         val splitResult = runBlocking {
@@ -1523,6 +1539,12 @@ class DeviceActionsTest {
             }.map { it::class },
         )
         assertTrue(events.any { it is InstallationSessionEvent.ComponentProgressUpdated })
+        assertEquals(
+            listOf(InstallPhase.SEND, InstallPhase.INSTALL, InstallPhase.CONFIGURE, InstallPhase.VERIFY),
+            events.filterIsInstance<InstallationSessionEvent.ComponentProgressUpdated>()
+                .map { it.phase }
+                .distinct(),
+        )
         val receipt = events.filterIsInstance<InstallationSessionEvent.InstallationBatchCompleted>()
             .single().receipt.components.associateBy { it.componentId }
         assertEquals(AvailabilityStageReceiptStatus.NOT_REQUIRED, receipt.getValue("lyrics").availability.status)

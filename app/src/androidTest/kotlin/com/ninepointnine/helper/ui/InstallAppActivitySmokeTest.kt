@@ -13,11 +13,13 @@ import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isDialog
 import androidx.compose.ui.test.junit4.createEmptyComposeRule
+import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToNode
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -244,6 +246,72 @@ class InstallAppActivitySmokeTest {
         }
     }
 
+    @Test
+    fun installationProgressShowsAllSixPhasesAndNumericPercentage() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val scenario = ActivityScenario.launch<DebugScenarioActivity>(
+            Intent(context, DebugScenarioActivity::class.java)
+                .putExtra(DebugScenarioActivity.EXTRA_SCENARIO, "progress"),
+        )
+        try {
+            scenario.onActivity { activity ->
+                activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+            waitForText("25%", timeoutMillis = 5_000L)
+            compose.onNodeWithText("25%", useUnmergedTree = true).assertIsDisplayed()
+
+            val labels = listOf(
+                R.string.phase_fetch,
+                R.string.phase_check,
+                R.string.phase_send,
+                R.string.phase_install,
+                R.string.phase_configure,
+                R.string.phase_verify,
+            ).map(context::getString)
+            labels.forEach { label ->
+                compose.onNodeWithTag("install_phases")
+                    .performScrollToNode(hasText(label))
+                compose.onNodeWithText(label).assertIsDisplayed()
+            }
+            captureScreen("installation-six-phase-progress")
+        } finally {
+            scenario.close()
+        }
+    }
+
+    @Test
+    fun successfulInstallReplaysProgressButFailureIsImmediate() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val successScenario = ActivityScenario.launch<DebugScenarioActivity>(
+            Intent(context, DebugScenarioActivity::class.java)
+                .putExtra(DebugScenarioActivity.EXTRA_SCENARIO, "success"),
+        )
+        try {
+            successScenario.onActivity { activity ->
+                activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+            waitForText(context.getString(R.string.phase_fetch), timeoutMillis = 1_000L)
+            compose.onNodeWithText(context.getString(R.string.result_success_title)).assertDoesNotExist()
+            waitForText(context.getString(R.string.result_success_title), timeoutMillis = 5_000L)
+            compose.onNodeWithText(context.getString(R.string.result_success_title)).assertIsDisplayed()
+        } finally {
+            successScenario.close()
+        }
+
+        val failureScenario = ActivityScenario.launch<DebugScenarioActivity>(
+            Intent(context, DebugScenarioActivity::class.java)
+                .putExtra(DebugScenarioActivity.EXTRA_SCENARIO, "failed"),
+        )
+        try {
+            failureScenario.onActivity { activity ->
+                activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            }
+            waitForText(context.getString(R.string.result_failure_title), timeoutMillis = 1_000L)
+        } finally {
+            failureScenario.close()
+        }
+    }
+
     private fun captureScreen(name: String) {
         val instrumentation = InstrumentationRegistry.getInstrumentation()
         val bitmap = compose.onRoot().captureToImage().asAndroidBitmap()
@@ -253,6 +321,15 @@ class InstallAppActivitySmokeTest {
             }
         } finally {
             bitmap.recycle()
+        }
+    }
+
+    private fun waitForText(text: String, timeoutMillis: Long) {
+        compose.waitUntil(timeoutMillis = timeoutMillis) {
+            runCatching {
+                compose.onAllNodesWithText(text, useUnmergedTree = true)
+                    .fetchSemanticsNodes().isNotEmpty()
+            }.getOrDefault(false)
         }
     }
 

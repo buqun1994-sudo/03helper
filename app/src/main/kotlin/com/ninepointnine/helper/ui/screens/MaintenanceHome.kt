@@ -42,7 +42,6 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -77,7 +76,6 @@ import com.ninepointnine.helper.domain.device.ApplicationAuthorizationRequiremen
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationRequirementKind
 import com.ninepointnine.helper.domain.session.MaintenanceAuthorizationFlowState
 import com.ninepointnine.helper.domain.session.MaintenanceInventoryState
-import com.ninepointnine.helper.domain.session.InstallPhase
 import com.ninepointnine.helper.domain.session.ResultKind
 import com.ninepointnine.helper.domain.session.requiresConnectedDevice
 import com.ninepointnine.helper.domain.session.isApplicationInstallation
@@ -87,6 +85,7 @@ import com.ninepointnine.helper.ui.components.ComponentLogo
 import com.ninepointnine.helper.ui.components.DividerLine
 import com.ninepointnine.helper.ui.components.IconTextActionButton
 import com.ninepointnine.helper.ui.components.InstallationResultRow
+import com.ninepointnine.helper.ui.components.InstallationPhaseList
 import com.ninepointnine.helper.ui.components.PressableSurface
 import com.ninepointnine.helper.ui.components.PrimaryActionButton
 import com.ninepointnine.helper.ui.components.StatusIcon
@@ -105,7 +104,6 @@ import com.ninepointnine.helper.ui.state.failureReasonToUserMessage
 import com.ninepointnine.helper.ui.theme.InstallerColors
 import com.ninepointnine.helper.ui.theme.InstallerDimensions
 import com.ninepointnine.helper.ui.theme.InstallerMotion
-import kotlin.math.roundToInt
 
 @Composable
 fun MaintenanceHome(
@@ -1511,13 +1509,6 @@ fun MaintenanceActionFlowPage(
 private fun MaintenanceInstallProgress(
     state: InstallUiState.Installing,
 ) {
-    val phases = listOf(
-        InstallPhase.FETCH to R.string.phase_fetch,
-        InstallPhase.CHECK to R.string.phase_check,
-        InstallPhase.SEND to R.string.phase_send,
-        InstallPhase.CONFIGURE to R.string.phase_configure,
-        InstallPhase.VERIFY to R.string.phase_verify,
-    )
     Column(modifier = Modifier.fillMaxSize()) {
         Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
         Text(
@@ -1535,20 +1526,12 @@ private fun MaintenanceInstallProgress(
         }
         Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
         Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
-        LazyColumn(
+        InstallationPhaseList(
+            state = state,
+            testTag = "maintenance_action_phases",
             modifier = Modifier
-                .weight(1f)
-                .testTag("maintenance_action_phases"),
-            verticalArrangement = Arrangement.spacedBy(InstallerDimensions.ListSpacing),
-        ) {
-            items(phases, key = { it.first }) { (phase, label) ->
-                MaintenancePhaseRow(
-                    phase = phase,
-                    label = stringResource(label),
-                    state = state,
-                )
-            }
-        }
+                .weight(1f),
+        )
         Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
         Text(
             text = stringResource(R.string.install_keep_screen_on),
@@ -1558,83 +1541,6 @@ private fun MaintenanceInstallProgress(
             modifier = Modifier.fillMaxWidth(),
         )
         Spacer(modifier = Modifier.height(InstallerDimensions.ContentSpacing))
-    }
-}
-
-@Composable
-private fun MaintenancePhaseRow(
-    phase: InstallPhase,
-    label: String,
-    state: InstallUiState.Installing,
-) {
-    val completed = phase in state.completedStages
-    val current = phase == state.currentPhase
-    val animatedProgress by animateFloatAsState(
-        targetValue = state.progress.fraction ?: 0f,
-        animationSpec = InstallerMotion.progress(),
-        label = "maintenancePhaseProgress",
-    )
-    PressableSurface(
-        onClick = {},
-        enabled = false,
-        minHeight = InstallerDimensions.ListItemMinHeight,
-        containerColor = if (current) InstallerColors.WhiteSurface else InstallerColors.PageBlue,
-        borderColor = if (current) InstallerColors.WhiteBorder else InstallerColors.WhiteBorder,
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            StatusIcon(
-                name = when {
-                    completed -> "circle_check"
-                    current -> "loader_circle"
-                    else -> "circle"
-                },
-                contentDescription = label,
-                tint = if (completed) InstallerColors.Success else InstallerColors.White,
-                size = InstallerDimensions.SmallIconSize,
-            )
-            Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text(
-                    text = label,
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = if (current || completed) InstallerColors.White else InstallerColors.AuxiliaryWhite,
-                )
-                if (current) {
-                    if (state.progress.indeterminate || state.progress.fraction == null) {
-                        LinearProgressIndicator(
-                            color = InstallerColors.White,
-                            trackColor = InstallerColors.WhiteBorder,
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                    } else {
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                        ) {
-                            LinearProgressIndicator(
-                                progress = { animatedProgress },
-                                color = InstallerColors.White,
-                                trackColor = InstallerColors.WhiteBorder,
-                                modifier = Modifier.weight(1f),
-                            )
-                            Text(
-                                text = stringResource(
-                                    R.string.install_progress_percent,
-                                    (animatedProgress * 100f).roundToInt(),
-                                ),
-                                style = MaterialTheme.typography.bodySmall,
-                                color = InstallerColors.White,
-                                modifier = Modifier.width(44.dp),
-                            )
-                        }
-                    }
-                }
-            }
-        }
     }
 }
 

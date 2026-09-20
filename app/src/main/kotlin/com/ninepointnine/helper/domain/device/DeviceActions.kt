@@ -27,6 +27,13 @@ interface AdbCommandGateway {
         strategy: InstallationStrategy,
     ): DeviceInstallResult
 
+    /** Same typed operation with optional, non-authoritative progress evidence. */
+    suspend fun installBatch(
+        artifacts: List<InstallableArtifact>,
+        strategy: InstallationStrategy,
+        onProgress: (DeviceInstallProgress) -> Unit,
+    ): DeviceInstallResult = installBatch(artifacts, strategy)
+
     /** Builds the versioned plan from the verified installed APK Manifest and target capabilities. */
     suspend fun buildAuthorizationPlan(
         artifacts: List<InstallableArtifact>,
@@ -52,6 +59,14 @@ interface AdbCommandGateway {
         selectedComponentIds: Set<String>,
         authorizationPlan: AuthorizationPlan,
     ): DeviceShortcutResult
+
+    /** Reports the real boundary between authorization readback and availability verification. */
+    suspend fun runShortcut(
+        shortcut: DeviceShortcut,
+        selectedComponentIds: Set<String>,
+        authorizationPlan: AuthorizationPlan,
+        onProgress: (DeviceShortcutProgress) -> Unit,
+    ): DeviceShortcutResult = runShortcut(shortcut, selectedComponentIds, authorizationPlan)
 }
 
 /** Fixed, non-shell maintenance operations available after a confirmed lease. */
@@ -454,6 +469,33 @@ data class InstallableArtifact(
     val apkFile: File?,
     val declarations: ApkDeclarationMetadata? = null,
 )
+
+/** Typed observations emitted by the device adapter; none of them adjudicate success. */
+sealed interface DeviceInstallProgress {
+    val componentId: String
+
+    data class Sending(
+        override val componentId: String,
+        val bytesWritten: Long,
+        val totalBytes: Long,
+    ) : DeviceInstallProgress
+
+    data class Sent(override val componentId: String) : DeviceInstallProgress
+
+    data class SendFailed(override val componentId: String) : DeviceInstallProgress
+
+    data class Installing(override val componentId: String) : DeviceInstallProgress
+
+    data class Installed(override val componentId: String) : DeviceInstallProgress
+
+    data class InstallFailed(override val componentId: String) : DeviceInstallProgress
+}
+
+sealed interface DeviceShortcutProgress {
+    data object AuthorizationCompleted : DeviceShortcutProgress
+
+    data object VerificationStarted : DeviceShortcutProgress
+}
 
 /**
  * Cloud may request only these typed setup primitives. The declaration is

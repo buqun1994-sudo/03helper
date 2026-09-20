@@ -30,6 +30,12 @@ data class InstallationSessionSnapshot(
     val progress: SessionProgress? = null,
     /** Per-application progress projected from the same installation event stream. */
     val componentProgress: Map<String, ComponentProgress> = emptyMap(),
+    /**
+     * Bounded progress history for the six stable installation phases. This is
+     * the domain-owned record used when several real device events arrive
+     * faster than Compose can render them; UI animation never writes back here.
+     */
+    val phaseProgress: Map<InstallPhase, Map<String, ComponentProgress>> = emptyMap(),
     /** Selected applications that were attempted but failed in one phase. */
     val failedComponentIds: Set<String> = emptySet(),
     /** Retryability of the latest structured failure for each component. */
@@ -240,6 +246,7 @@ private fun resolveComponentResultStatus(
             InstallPhase.FETCH,
             InstallPhase.CHECK,
             InstallPhase.SEND,
+            InstallPhase.INSTALL,
             -> ComponentResultStatus.NOT_INSTALLED
         }
     }
@@ -792,6 +799,7 @@ data class SessionCheckpoint(
     val currentComponentName: String?,
     val progress: SessionProgress?,
     val componentProgress: Map<String, ComponentProgress> = emptyMap(),
+    val phaseProgress: Map<InstallPhase, Map<String, ComponentProgress>> = emptyMap(),
     val failedComponentIds: Set<String> = emptySet(),
     val componentFailureRetryable: Map<String, Boolean> = emptyMap(),
     val evidence: SessionEvidence,

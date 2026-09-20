@@ -55,6 +55,8 @@ sealed interface InstallUiState {
         val currentComponentName: String?,
         val currentPhase: InstallPhase,
         val progress: UiProgress,
+        /** Immutable projection of every real phase observed in this batch. */
+        val phaseProgress: Map<InstallPhase, UiProgress> = emptyMap(),
         val completedStages: Set<InstallPhase>,
         /** Business flow owning this installation page; never inferred by UI route state. */
         val installationFlow: InstallationFlow = InstallationFlow.INITIAL_INSTALL,

@@ -510,10 +510,14 @@ internal fun InstallationBatchReceipt.toComponentResults(
             !availabilityVerified -> item.availability.reasonCode ?: "availability_evidence_missing"
             else -> null
         }
+        val observedFailurePhase = InstallPhase.entries.firstOrNull { phase ->
+            snapshot.phaseProgress[phase]?.get(item.componentId)?.status == ComponentProgressStatus.FAILED
+        }
         val phase = when (status) {
-            ComponentResultStatus.NOT_INSTALLED,
-            ComponentResultStatus.INSTALLATION_PENDING_CONFIRMATION,
-            -> InstallPhase.SEND
+            ComponentResultStatus.NOT_INSTALLED -> observedFailurePhase
+                ?: reason?.let(::installPhaseForReasonCode)
+                ?: InstallPhase.INSTALL
+            ComponentResultStatus.INSTALLATION_PENDING_CONFIRMATION -> InstallPhase.INSTALL
             ComponentResultStatus.AUTHORIZATION_INCOMPLETE -> InstallPhase.CONFIGURE
             ComponentResultStatus.AVAILABILITY_INCOMPLETE -> InstallPhase.VERIFY
             ComponentResultStatus.READY -> null

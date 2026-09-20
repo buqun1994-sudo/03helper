@@ -1,3 +1,20 @@
+# 2026-09-20 1.0.19 Release APK / ZIP 与正式目录清单（已导出，未部署）
+
+1. 按用户要求将唯一 Release 版本从 `1.0.18 (19)` 递增为 `1.0.19 (20)`；正式包身份保持 `com.ninepointnine.helper`，staging / Debug 由同一版本文件派生测试身份。
+2. 使用仓库外 production signing properties 完成 `:app:testReleaseUnitTest`、`:app:lintRelease` 和 `:app:assembleRelease`；Release 单测 `404/404`（0 failures / 0 errors / 0 skipped）。APK 包名、Launcher、单一 production signer、RSA 4096 证书及 APK Signature Scheme v2 均核对通过，证书 SHA-256 为 `31ca80dd21a5208eaabd5f3e1440a3db2f7dc79122e03eaa6ba01730fb31f18b`。
+3. 正式目录已导出 `03车机助手-v1.0.19.apk`（`14,443,736` 字节，SHA-256 `c995c70096d085811f653d0639ea98b97cb21825801afbb6da917c02d110d435`）和 `03车机助手-v1.0.19.zip`（`13,628,329` 字节，SHA-256 `470615fd21b580402b2d3be052a2c0ff7d9fe05b8611ecee20d825ce3bc38dc7`）。ZIP 只有一个同名 APK 条目，解压摘要与外部 APK 完全一致。
+4. 同目录 `android-app-releases.json` 已保留原有 `folderUrl`、`expiresAt` 和其它六个应用，只更新 `03helper` 的文件名、版本、大小、包名、证书和 SHA-256；JSON SHA-256 为 `21c3cafb8233471be024df1fe4ab78f2f8934695756bb54f24783d26a8f88c81`。Cloud production / release V5 本地预检通过，状态仍为 `local-only`，未上传、未导入后台或切换线上配置。
+5. 本轮源码、版本与文档将随本提交推送；不提交签名材料、APK、ZIP 或桌面 JSON 到 Git。
+
+# 2026-09-20 六阶段安装进度主链与 Debug 主测交付（完成，待用户车机主测）
+
+1. 初始化安装、安装推荐应用、安装本机应用三条入口已统一消费同一个 `InstallationSession` 六阶段账本：`获取安装包 → 检查安装包 → 发送到车机 → 车机上安装 → 授权 → 检查是否可用`。每个组件按阶段保存状态、百分比和失败原因，检查点恢复不会倒退，迟到事件不能覆盖完成 / 失败。
+2. 发送阶段按实际字节进度推进；只有整批 APK 发送完成且车机身份回读通过，才进入“车机上安装”；只有设备安装成功且身份证据齐全，才进入“授权”；授权计划与回读完成后才进入“检查是否可用”。DADB 不再在发送未完成时提前调用 `pm install`。
+3. 无连续真实值的阶段使用受限预测动画：`0ms=0%`、`1.6s=70%`、`4.8s=90%`，之后单调逼近但不超过 `96%`；只有真实完成事件显示 `100%`。快速阶段至少展示 `360ms`，最终 `100%` 保留 `320ms`；失败、暂停、断线立即反馈。三类入口共用同一阶段列表与百分比呈现，窄屏六行自动滚动且百分比数字与进度条不重叠。
+4. 指定 JDK 17 执行 `:app:testDebugUnitTest :app:lintDebug :app:assembleDebug :app:assembleDebugAndroidTest` 通过；Debug JVM 测试 `401/401`（0 failures / 0 errors / 0 skipped）。测试机 `RMX1901`（Android 11，1080×2340，约 360×780dp）通过 `InstallAppActivitySmokeTest` 原生 instrumentation `6/6`；截图 `/tmp/03helper-installation-six-phase-progress.png` 已核对六行、进度条、百分比和底部提示无截断 / 重叠。首次 Gradle UTP 跑批的单项失败是 Compose 页面树尚未挂载，测试已增加可重试查询；同一测试 APK 直接 instrumentation 重跑 `OK (6 tests)`。
+5. 最终 Debug APK 为 `com.ninepointnine.helper.test`、`1.0.18-test (19)`，`21,396,887` 字节，SHA-256 `048666bc9c07ef1da3ebd01dd74057fa4ce9258225d1225ed2d3421feef8b44c`；Launcher 为 `com.ninepointnine.helper.MainActivity`，单一 Android Debug signer（证书 SHA-256 `2990047fddf6d6ec1eb7f83731fcc1398616e5fb83aec97542a4f132c35a1a27`），APK Signature Scheme v2 通过。已在显式测试手机上保留数据覆盖安装；未清数据、未卸载、未降级、未重启，未向车机写入。
+6. 待用户主测的最小范围：分别执行初始化安装、安装推荐应用、安装本机应用，重点确认“发送到车机”完成后才出现“车机上安装”，“车机上安装”完成后才出现“授权”，每一阶段都有持续百分比与数字；任一阶段失败时应立即停在对应行并给出原因。真实 Cloud / ZIP 下载和车机写入不被本机 fixture 或 instrumentation 结果替代。
+
 # 2026-09-20 1.0.18 Release APK / ZIP 与正式目录清单（未部署）
 
 1. 按用户要求将唯一 Release 版本从 `1.0.17 (18)` 递增为 `1.0.18 (19)`，Cloud 双环境身份同步为 production `com.ninepointnine.helper / 1.0.18 (19)` 与 staging `com.ninepointnine.helper.test / 1.0.18-test (19)`；包名、namespace、证书与配置签名根均未改变。

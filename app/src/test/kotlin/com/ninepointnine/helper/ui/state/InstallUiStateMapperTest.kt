@@ -11,6 +11,8 @@ import com.ninepointnine.helper.domain.session.AuthorizationStageReceiptStatus
 import com.ninepointnine.helper.domain.session.AvailabilityStageReceipt
 import com.ninepointnine.helper.domain.session.AvailabilityStageReceiptStatus
 import com.ninepointnine.helper.domain.session.ComponentDescriptor
+import com.ninepointnine.helper.domain.session.ComponentProgress
+import com.ninepointnine.helper.domain.session.ComponentProgressStatus
 import com.ninepointnine.helper.domain.session.DeviceConnectionStatus
 import com.ninepointnine.helper.domain.session.DeviceSummary
 import com.ninepointnine.helper.domain.session.FailureCategory
@@ -330,8 +332,77 @@ class InstallUiStateMapperTest {
         ) as InstallUiState.Installing
 
         assertEquals(InstallPhase.CONFIGURE, state.currentPhase)
-        assertEquals(setOf(InstallPhase.FETCH, InstallPhase.CHECK, InstallPhase.SEND), state.completedStages)
+        assertEquals(
+            setOf(InstallPhase.FETCH, InstallPhase.CHECK, InstallPhase.SEND, InstallPhase.INSTALL),
+            state.completedStages,
+        )
         assertEquals(1f, state.progress.fraction)
+    }
+
+    @Test
+    fun `installing projection uses the six phase ledger and keeps transfer progress bounded`() {
+        val snapshot = InstallationSessionSnapshot(
+            state = InstallationSessionState.INSTALLING,
+            device = device,
+            componentProgress = mapOf(
+                "desktop" to ComponentProgress(
+                    componentId = "desktop",
+                    phase = InstallPhase.INSTALL,
+                    status = ComponentProgressStatus.RUNNING,
+                ),
+            ),
+            phaseProgress = mapOf(
+                InstallPhase.SEND to mapOf(
+                    "desktop" to ComponentProgress(
+                        componentId = "desktop",
+                        phase = InstallPhase.SEND,
+                        status = ComponentProgressStatus.COMPLETED,
+                        fraction = 1f,
+                        indeterminate = false,
+                    ),
+                ),
+                InstallPhase.INSTALL to mapOf(
+                    "desktop" to ComponentProgress(
+                        componentId = "desktop",
+                        phase = InstallPhase.INSTALL,
+                        status = ComponentProgressStatus.RUNNING,
+                        fraction = 0.35f,
+                        indeterminate = false,
+                    ),
+                ),
+            ),
+        )
+
+        val state = InstallUiStateMapper.map(snapshot) as InstallUiState.Installing
+
+        assertEquals(InstallPhase.INSTALL, state.currentPhase)
+        assertEquals(0.35f, state.progress.fraction)
+        assertEquals(1f, state.phaseProgress.getValue(InstallPhase.SEND).fraction)
+        assertEquals(6, InstallPhase.entries.size)
+    }
+
+    @Test
+    fun `presentation projection replays skipped completed phases before terminal result`() {
+        val truth = InstallUiState.Installing(
+            deviceName = "iCAR 03",
+            currentComponentName = "03桌面",
+            currentPhase = InstallPhase.VERIFY,
+            progress = UiProgress(1, 1, 1f, false),
+            phaseProgress = InstallPhase.entries.associateWith { UiProgress(1, 1, 1f, false) },
+            completedStages = InstallPhase.entries.dropLast(1).toSet(),
+        )
+
+        val installing = presentInstallationPhase(truth, InstallPhase.INSTALL)
+        val terminal = presentInstallationPhase(truth, InstallPhase.VERIFY, markCurrentComplete = true)
+
+        assertEquals(InstallPhase.INSTALL, installing.currentPhase)
+        assertEquals(1f, installing.progress.fraction)
+        assertEquals(
+            setOf(InstallPhase.FETCH, InstallPhase.CHECK, InstallPhase.SEND),
+            installing.completedStages,
+        )
+        assertTrue(InstallPhase.VERIFY in terminal.completedStages)
+        assertEquals(1f, terminal.progress.fraction)
     }
 
     @Test

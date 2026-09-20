@@ -24,6 +24,8 @@ import com.ninepointnine.helper.domain.artifact.ReleaseSourceMode
 import com.ninepointnine.helper.domain.artifact.ReleaseSourcePolicy
 import com.ninepointnine.helper.domain.artifact.ResolvedDownloadRequest
 import com.ninepointnine.helper.domain.session.InstallationBatchPlan
+import com.ninepointnine.helper.domain.session.ComponentProgressStatus
+import com.ninepointnine.helper.domain.session.InstallPhase
 import com.ninepointnine.helper.domain.session.InstallationCatalogIdentity
 import com.ninepointnine.helper.domain.session.InstallationFlow
 import com.ninepointnine.helper.application.session.InstallationSessionBoundary
@@ -153,6 +155,76 @@ class ArtifactPreparationCoordinatorTest {
             assertEquals(1, shareCalls)
             assertEquals(1, downloadCalls)
             assertTrue(publicDownload.resolve("old-desktop.apk").exists())
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun `local candidate fallback keeps visible phases monotonic`() = runBlocking {
+        val root = Files.createTempDirectory("artifact-local-fallback-progress").toFile()
+        val publicDownload = root.resolve("Download").apply { mkdirs() }
+        val config = config()
+        val target = component(config, "desktop")
+        val apkBytes = byteArrayOf(1, 2, 3, 4)
+        publicDownload.resolve("manual-desktop.apk").writeBytes(apkBytes)
+        val events = mutableListOf<InstallationSessionEvent>()
+        var localReads = 0
+        val reader = ApkMetadataReader { apk ->
+            if (apk.name == "manual-desktop.apk" && ++localReads > 1) {
+                error("local_candidate_changed")
+            }
+            ApkMetadata(
+                packageName = target.packageName,
+                version = com.ninepointnine.helper.domain.artifact.ArtifactVersion(
+                    target.versionName,
+                    target.versionCode,
+                ),
+                certificateSha256s = setOf(target.certificateSha256),
+            )
+        }
+        try {
+            val result = coordinator(
+                config = config,
+                cache = ArtifactCache(root.resolve("private"), publicDownload),
+                metadataReader = reader,
+                folderHost = {
+                    FolderHost(listOf(LanzouFolderEntry("idesktop", target.archiveFileName)))
+                },
+                shareHost = {
+                    ShareHost {
+                        ResolvedDownloadRequest(
+                            ArtifactSourceKind.LANZOU_SHARE,
+                            "https://zip1.webgetstore.com/desktop",
+                            userAgent = "test",
+                        )
+                    }
+                },
+                transport = { _, _ ->
+                    val bytes = zip(target.apkEntryName, apkBytes)
+                    ArtifactTransportResponse(
+                        200,
+                        bytes.size.toLong(),
+                        "application/zip",
+                        ByteArrayInputStream(bytes),
+                    )
+                },
+                eventPort = activeBoundary { events += it },
+            ).prepare(plan(config, setOf(target.componentId)))
+
+            assertTrue(result is ArtifactPreparationResult.Prepared)
+            assertEquals(
+                ArtifactSourceKind.LANZOU_SHARE,
+                (result as ArtifactPreparationResult.Prepared).artifacts.single().sourceKind,
+            )
+            val progress = events.filterIsInstance<InstallationSessionEvent.ComponentProgressUpdated>()
+                .filter { it.componentId == target.componentId }
+            assertTrue(progress.any {
+                it.phase == InstallPhase.FETCH && it.status == ComponentProgressStatus.RUNNING
+            })
+            assertTrue(progress.zipWithNext().all { (previous, next) ->
+                previous.phase.ordinal <= next.phase.ordinal
+            })
         } finally {
             root.deleteRecursively()
         }

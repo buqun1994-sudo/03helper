@@ -14,10 +14,12 @@ import com.ninepointnine.helper.domain.device.DeviceAuthorizationConfirmation
 import com.ninepointnine.helper.domain.device.DeviceAvailabilityEvidence
 import com.ninepointnine.helper.domain.device.DeviceConnectionLease
 import com.ninepointnine.helper.domain.device.DeviceInstallResult
+import com.ninepointnine.helper.domain.device.DeviceInstallProgress
 import com.ninepointnine.helper.domain.device.DeviceInstallWarning
 import com.ninepointnine.helper.domain.device.DeviceShortcut
 import com.ninepointnine.helper.domain.device.DeviceShortcutFailureStage
 import com.ninepointnine.helper.domain.device.DeviceShortcutResult
+import com.ninepointnine.helper.domain.device.DeviceShortcutProgress
 import com.ninepointnine.helper.domain.device.InstallableArtifact
 import com.ninepointnine.helper.domain.device.InstalledArtifactEvidence
 import com.ninepointnine.helper.domain.device.ManagedApplicationAvailabilityEvidence
@@ -36,6 +38,7 @@ import com.ninepointnine.helper.domain.session.InstallationFlow
 import com.ninepointnine.helper.domain.session.InstallationSessionEvent
 import com.ninepointnine.helper.domain.session.InstallationStageReceipt
 import com.ninepointnine.helper.domain.session.InstallationStageReceiptStatus
+import com.ninepointnine.helper.domain.session.installPhaseForReasonCode
 import kotlinx.coroutines.CancellationException
 
 sealed interface DeviceInstallationExecutionResult {
@@ -184,7 +187,50 @@ class DeviceInstallationCoordinator(
         DeviceInstallResult.Installed(emptyList())
     } else {
         try {
-            gateway.installBatch(artifacts, batchPlan.strategy)
+            gateway.installBatch(artifacts, batchPlan.strategy) { progress ->
+                when (progress) {
+                    is DeviceInstallProgress.Sending -> emitProgress(
+                        componentId = progress.componentId,
+                        phase = InstallPhase.SEND,
+                        status = ComponentProgressStatus.RUNNING,
+                        bytesWritten = progress.bytesWritten,
+                        totalBytes = progress.totalBytes,
+                        fraction = progress.totalBytes.takeIf { it > 0L }?.let {
+                            progress.bytesWritten.toFloat() / it.toFloat()
+                        },
+                        indeterminate = progress.totalBytes <= 0L,
+                    )
+                    is DeviceInstallProgress.Sent -> emitProgress(
+                        progress.componentId,
+                        InstallPhase.SEND,
+                        ComponentProgressStatus.COMPLETED,
+                        indeterminate = false,
+                    )
+                    is DeviceInstallProgress.SendFailed -> emitProgress(
+                        progress.componentId,
+                        InstallPhase.SEND,
+                        ComponentProgressStatus.FAILED,
+                        indeterminate = false,
+                    )
+                    is DeviceInstallProgress.Installing -> emitProgress(
+                        progress.componentId,
+                        InstallPhase.INSTALL,
+                        ComponentProgressStatus.RUNNING,
+                    )
+                    is DeviceInstallProgress.Installed -> emitProgress(
+                        progress.componentId,
+                        InstallPhase.INSTALL,
+                        ComponentProgressStatus.COMPLETED,
+                        indeterminate = false,
+                    )
+                    is DeviceInstallProgress.InstallFailed -> emitProgress(
+                        progress.componentId,
+                        InstallPhase.INSTALL,
+                        ComponentProgressStatus.FAILED,
+                        indeterminate = false,
+                    )
+                }
+            }
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (_: Exception) {
@@ -583,6 +629,25 @@ class DeviceInstallationCoordinator(
             },
             selectedComponentIds = candidates.mapTo(linkedSetOf()) { it.manifest.componentId },
             authorizationPlan = plan,
+            onProgress = { progress ->
+                when (progress) {
+                    DeviceShortcutProgress.AuthorizationCompleted -> candidates.forEach { artifact ->
+                        emitProgress(
+                            artifact.manifest.componentId,
+                            InstallPhase.CONFIGURE,
+                            ComponentProgressStatus.COMPLETED,
+                            indeterminate = false,
+                        )
+                    }
+                    DeviceShortcutProgress.VerificationStarted -> candidates.forEach { artifact ->
+                        emitProgress(
+                            artifact.manifest.componentId,
+                            InstallPhase.VERIFY,
+                            ComponentProgressStatus.RUNNING,
+                        )
+                    }
+                }
+            },
         )
     } catch (cancelled: CancellationException) {
         throw cancelled
@@ -974,20 +1039,41 @@ class DeviceInstallationCoordinator(
     }
 
     private fun emitInstallationProgress(stages: Map<String, InstallationStageReceipt>) {
+        val resolved = stages.mapValues { (_, receipt) ->
+            val successful = receipt.status in setOf(
+                InstallationStageReceiptStatus.VERIFIED,
+                InstallationStageReceiptStatus.WRITE_CONFIRMED_PENDING_IDENTITY,
+            )
+            val failurePhase = receipt.reasonCode?.let(::installPhaseForReasonCode) ?: InstallPhase.INSTALL
+            successful to failurePhase
+        }
         stages.forEach { (componentId, receipt) ->
+            val (successful, failurePhase) = checkNotNull(resolved[componentId])
             emitProgress(
                 componentId = componentId,
                 phase = InstallPhase.SEND,
-                status = when (receipt.status) {
-                    InstallationStageReceiptStatus.VERIFIED,
-                    InstallationStageReceiptStatus.WRITE_CONFIRMED_PENDING_IDENTITY,
-                    -> ComponentProgressStatus.COMPLETED
-                    InstallationStageReceiptStatus.FAILED,
-                    InstallationStageReceiptStatus.NOT_ATTEMPTED,
-                    -> ComponentProgressStatus.FAILED
+                status = if (successful || failurePhase != InstallPhase.SEND) {
+                    ComponentProgressStatus.COMPLETED
+                } else {
+                    ComponentProgressStatus.FAILED
                 },
                 indeterminate = false,
             )
+        }
+        stages.forEach { (componentId, _) ->
+            val (successful, failurePhase) = checkNotNull(resolved[componentId])
+            if (successful || failurePhase != InstallPhase.SEND) {
+                emitProgress(
+                    componentId = componentId,
+                    phase = InstallPhase.INSTALL,
+                    status = if (successful) {
+                        ComponentProgressStatus.COMPLETED
+                    } else {
+                        ComponentProgressStatus.FAILED
+                    },
+                    indeterminate = false,
+                )
+            }
         }
     }
 
@@ -995,21 +1081,36 @@ class DeviceInstallationCoordinator(
         facts: PostInstallationFacts,
         componentIds: Set<String>,
     ) {
-        componentIds.forEach { componentId ->
+        val resolved = componentIds.associateWith { componentId ->
             val authorization = checkNotNull(facts.authorization[componentId]).status
             val availability = checkNotNull(facts.availability[componentId]).status
-            val authorizationSatisfied = authorization in AUTHORIZATION_SATISFIED
-            val availabilitySatisfied = availability in AVAILABILITY_SATISFIED
+            (authorization in AUTHORIZATION_SATISFIED) to (availability in AVAILABILITY_SATISFIED)
+        }
+        componentIds.forEach { componentId ->
+            val (authorizationSatisfied, _) = checkNotNull(resolved[componentId])
             emitProgress(
                 componentId = componentId,
-                phase = if (authorizationSatisfied) InstallPhase.VERIFY else InstallPhase.CONFIGURE,
-                status = if (authorizationSatisfied && availabilitySatisfied) {
-                    ComponentProgressStatus.COMPLETED
-                } else {
+                phase = InstallPhase.CONFIGURE,
+                status = if (authorizationSatisfied) ComponentProgressStatus.COMPLETED else {
                     ComponentProgressStatus.FAILED
                 },
                 indeterminate = false,
             )
+        }
+        componentIds.forEach { componentId ->
+            val (authorizationSatisfied, availabilitySatisfied) = checkNotNull(resolved[componentId])
+            if (authorizationSatisfied) {
+                emitProgress(
+                    componentId = componentId,
+                    phase = InstallPhase.VERIFY,
+                    status = if (availabilitySatisfied) {
+                        ComponentProgressStatus.COMPLETED
+                    } else {
+                        ComponentProgressStatus.FAILED
+                    },
+                    indeterminate = false,
+                )
+            }
         }
     }
 
@@ -1021,7 +1122,7 @@ class DeviceInstallationCoordinator(
             emitProgress(
                 componentId = componentId,
                 phase = when (category) {
-                    FailureCategory.INSTALLATION -> InstallPhase.SEND
+                    FailureCategory.INSTALLATION -> installPhaseForReasonCode(failure.reasonCode)
                     FailureCategory.CONFIGURATION -> InstallPhase.CONFIGURE
                     else -> InstallPhase.VERIFY
                 },
@@ -1051,6 +1152,9 @@ class DeviceInstallationCoordinator(
         componentId: String,
         phase: InstallPhase,
         status: ComponentProgressStatus,
+        bytesWritten: Long = 0L,
+        totalBytes: Long = 0L,
+        fraction: Float? = if (status == ComponentProgressStatus.COMPLETED) 1f else null,
         indeterminate: Boolean = status == ComponentProgressStatus.RUNNING,
     ) {
         try {
@@ -1059,7 +1163,9 @@ class DeviceInstallationCoordinator(
                     componentId = componentId,
                     phase = phase,
                     status = status,
-                    fraction = if (status == ComponentProgressStatus.COMPLETED) 1f else null,
+                    bytesWritten = bytesWritten,
+                    totalBytes = totalBytes,
+                    fraction = fraction,
                     indeterminate = indeterminate,
                 ),
             )

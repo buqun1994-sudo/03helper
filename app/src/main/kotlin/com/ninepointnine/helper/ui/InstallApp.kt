@@ -32,6 +32,7 @@ import com.ninepointnine.helper.domain.artifact.ArtifactManifest
 import com.ninepointnine.helper.domain.session.InstallationSessionSnapshot
 import com.ninepointnine.helper.domain.session.ArtifactCatalogStage
 import com.ninepointnine.helper.domain.session.InstallationFlow
+import com.ninepointnine.helper.domain.session.InstallPhase
 import com.ninepointnine.helper.ui.screens.FirstInstallScreen
 import com.ninepointnine.helper.ui.screens.MaintenanceActionFlowPage
 import com.ninepointnine.helper.ui.screens.MaintenanceHome
@@ -40,10 +41,12 @@ import com.ninepointnine.helper.domain.session.isApplicationInstallation
 import com.ninepointnine.helper.ui.state.InstallUiIntent
 import com.ninepointnine.helper.ui.state.InstallUiState
 import com.ninepointnine.helper.ui.state.InstallUiStateMapper
+import com.ninepointnine.helper.ui.state.presentInstallationPhase
 import com.ninepointnine.helper.ui.components.LocalApkIcons
 import com.ninepointnine.helper.ui.theme.InstallerColors
 import com.ninepointnine.helper.ui.theme.InstallerMotion
 import com.ninepointnine.helper.ui.theme.InstallerTheme
+import kotlinx.coroutines.delay
 
 @Composable
 fun InstallApp(
@@ -52,7 +55,8 @@ fun InstallApp(
     modifier: Modifier = Modifier,
     apkIconRepository: ApkIconRepository? = null,
 ) {
-    val uiState = InstallUiStateMapper.map(snapshot)
+    val mappedUiState = InstallUiStateMapper.map(snapshot)
+    val uiState = rememberPresentedInstallUiState(snapshot, mappedUiState)
     // The session snapshot is the sole owner of the secondary maintenance
     // route. No remembered action may survive a flow transition or process
     // recreation and redirect an initial-install result into maintenance.
@@ -200,6 +204,55 @@ fun InstallApp(
                 }
             }
         }
+    }
+}
+
+@Composable
+private fun rememberPresentedInstallUiState(
+    snapshot: InstallationSessionSnapshot,
+    mappedState: InstallUiState,
+): InstallUiState {
+    val successfulTerminal = mappedState is InstallUiState.Result &&
+        mappedState.kind == com.ninepointnine.helper.domain.session.ResultKind.SUCCESS
+    val truth = when {
+        mappedState is InstallUiState.Installing -> mappedState
+        successfulTerminal -> InstallUiStateMapper.installationProgress(snapshot)
+        else -> null
+    }
+    val presentationKey = snapshot.installationBatch?.batchId ?: snapshot.sessionId
+    var displayedPhase by remember(presentationKey) { mutableStateOf(InstallPhase.FETCH) }
+    var revealTerminal by remember(presentationKey) { mutableStateOf(false) }
+    var markCurrentComplete by remember(presentationKey) { mutableStateOf(false) }
+    val targetPhase = truth?.currentPhase
+
+    LaunchedEffect(presentationKey, targetPhase, successfulTerminal) {
+        if (targetPhase == null) {
+            revealTerminal = true
+            markCurrentComplete = false
+            return@LaunchedEffect
+        }
+        revealTerminal = false
+        markCurrentComplete = false
+        if (displayedPhase.ordinal > targetPhase.ordinal) displayedPhase = targetPhase
+        while (displayedPhase.ordinal < targetPhase.ordinal) {
+            delay(InstallerMotion.CompletedPhaseMinimumDuration)
+            displayedPhase = InstallPhase.entries[displayedPhase.ordinal + 1]
+        }
+        if (successfulTerminal) {
+            markCurrentComplete = true
+            delay(InstallerMotion.TerminalProgressHoldDuration)
+            revealTerminal = true
+        }
+    }
+
+    return if (truth != null && (!successfulTerminal || !revealTerminal)) {
+        presentInstallationPhase(
+            truth = truth,
+            phase = displayedPhase,
+            markCurrentComplete = markCurrentComplete,
+        )
+    } else {
+        mappedState
     }
 }
 

@@ -1,5 +1,6 @@
 package com.ninepointnine.helper.domain.session
 
+import com.ninepointnine.helper.application.session.InstallationSessionEventDispatcher
 import com.ninepointnine.helper.domain.artifact.ArtifactManifest
 import com.ninepointnine.helper.domain.artifact.ArtifactManifestValidator
 import com.ninepointnine.helper.domain.artifact.ArtifactFailure
@@ -69,10 +70,16 @@ class InstallationSessionTest {
             installPhaseForReasonCode("authorization_appop_not_allowed"),
         )
         assertEquals(
-            InstallPhase.VERIFY,
+            InstallPhase.INSTALL,
             installPhaseForReasonCode("installation_installed_package_mismatch"),
         )
-        assertEquals(InstallPhase.FETCH, installPhaseForReasonCode("download_not_zip"))
+        assertEquals(
+            InstallPhase.CHECK,
+            installPhaseForReasonCode("distribution_apk_version_mismatch"),
+        )
+        assertEquals(InstallPhase.CHECK, installPhaseForReasonCode("download_not_zip"))
+        assertEquals(InstallPhase.SEND, installPhaseForReasonCode("adb_push_transport_failed"))
+        assertEquals(InstallPhase.INSTALL, installPhaseForReasonCode("adb_pm_install_failed"))
         assertEquals(FailureCategory.ARCHIVE, failureCategoryForReasonCode("download_not_zip"))
     }
 
@@ -3198,6 +3205,16 @@ class InstallationSessionTest {
                 artifactCatalogStage = ArtifactCatalogStage.PREPARED,
                 installationBatch = plan,
                 evidence = SessionEvidence(artifactsVerified = setOf(desktop.componentId)),
+                phaseProgress = mapOf(
+                    InstallPhase.FETCH to mapOf(
+                        lyrics.componentId to ComponentProgress(
+                            componentId = lyrics.componentId,
+                            phase = InstallPhase.FETCH,
+                            status = ComponentProgressStatus.FAILED,
+                            indeterminate = false,
+                        ),
+                    ),
+                ),
             ),
         )
         val desktopPlan = checkNotNull(authorizationPlanFor(listOf(desktop)))
@@ -3247,6 +3264,10 @@ class InstallationSessionTest {
         assertEquals(
             ComponentResultStatus.NOT_INSTALLED,
             snapshot.componentResults.single { it.componentId == lyrics.componentId }.status,
+        )
+        assertEquals(
+            InstallPhase.FETCH,
+            snapshot.componentResults.single { it.componentId == lyrics.componentId }.failurePhase,
         )
         assertTrue(snapshot.evidence.installed.contains(desktop.componentId))
         assertEquals(
@@ -3587,6 +3608,104 @@ class InstallationSessionTest {
         assertEquals(InstallationSessionState.SUCCEEDED, afterLateEvent.state)
         assertEquals(committed.installationBatchReceipt, afterLateEvent.installationBatchReceipt)
         assertTrue(afterLateEvent.failedComponentIds.isEmpty())
+    }
+
+    @Test
+    fun `six phase progress is monotonic and keeps the batch active through verification`() {
+        val cast = evidenceManifest("cast", "com.ninepointnine.desktopcast", required = false)
+        val fixture = maintenanceReceiptFixture(cast)
+        val session = fixture.session
+        val dispatcher = InstallationSessionEventDispatcher(
+            session = session,
+            sessionId = session.currentSnapshot().sessionId,
+        )
+
+        session.dispatchEvent(
+            InstallationSessionEvent.ComponentProgressUpdated(
+                componentId = cast.componentId,
+                phase = InstallPhase.SEND,
+                status = ComponentProgressStatus.RUNNING,
+                fraction = 0.70f,
+                indeterminate = false,
+            ),
+        )
+        session.dispatchEvent(
+            InstallationSessionEvent.ComponentProgressUpdated(
+                componentId = cast.componentId,
+                phase = InstallPhase.SEND,
+                status = ComponentProgressStatus.RUNNING,
+                fraction = 0.20f,
+                indeterminate = false,
+            ),
+        )
+        assertEquals(
+            0.70f,
+            session.currentSnapshot().phaseProgress.getValue(InstallPhase.SEND)
+                .getValue(cast.componentId).fraction,
+        )
+        session.dispatchEvent(
+            InstallationSessionEvent.ComponentProgressUpdated(
+                componentId = cast.componentId,
+                phase = InstallPhase.SEND,
+                status = ComponentProgressStatus.COMPLETED,
+                fraction = 1f,
+                indeterminate = false,
+            ),
+        )
+        session.dispatchEvent(
+            InstallationSessionEvent.ComponentProgressUpdated(
+                componentId = cast.componentId,
+                phase = InstallPhase.SEND,
+                status = ComponentProgressStatus.RUNNING,
+                fraction = 0.80f,
+                indeterminate = false,
+            ),
+        )
+        assertEquals(
+            ComponentProgressStatus.COMPLETED,
+            session.currentSnapshot().phaseProgress.getValue(InstallPhase.SEND)
+                .getValue(cast.componentId).status,
+        )
+
+        session.dispatchEvent(
+            InstallationSessionEvent.ComponentProgressUpdated(
+                componentId = cast.componentId,
+                phase = InstallPhase.INSTALL,
+                status = ComponentProgressStatus.RUNNING,
+            ),
+        )
+        assertEquals(InstallationSessionState.INSTALLING, session.currentSnapshot().state)
+        assertTrue(dispatcher.isBatchActive(fixture.plan.batchId))
+
+        session.dispatchEvent(
+            InstallationSessionEvent.ComponentProgressUpdated(
+                componentId = cast.componentId,
+                phase = InstallPhase.CONFIGURE,
+                status = ComponentProgressStatus.RUNNING,
+            ),
+        )
+        assertEquals(InstallationSessionState.AUTHORIZING, session.currentSnapshot().state)
+        assertTrue(dispatcher.isBatchActive(fixture.plan.batchId))
+
+        session.dispatchEvent(
+            InstallationSessionEvent.ComponentProgressUpdated(
+                componentId = cast.componentId,
+                phase = InstallPhase.VERIFY,
+                status = ComponentProgressStatus.RUNNING,
+            ),
+        )
+        assertEquals(InstallationSessionState.VERIFYING_DEVICE, session.currentSnapshot().state)
+        assertTrue(dispatcher.isBatchActive(fixture.plan.batchId))
+
+        session.dispatchEvent(
+            InstallationSessionEvent.InstallationBatchCompleted(successfulMaintenanceReceipt(fixture)),
+        )
+        assertEquals(InstallationSessionState.SUCCEEDED, session.currentSnapshot().state)
+        assertFalse(dispatcher.isBatchActive(fixture.plan.batchId))
+        assertEquals(
+            InstallPhase.entries.toSet(),
+            session.currentSnapshot().phaseProgress.keys,
+        )
     }
 
     @Test
