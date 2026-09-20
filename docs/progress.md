@@ -3,8 +3,8 @@
 1. 按用户要求将唯一 Release 版本从 `1.0.18 (19)` 递增为 `1.0.19 (20)`；正式包身份保持 `com.ninepointnine.helper`，staging / Debug 由同一版本文件派生测试身份。
 2. 使用仓库外 production signing properties 完成 `:app:testReleaseUnitTest`、`:app:lintRelease` 和 `:app:assembleRelease`；Release 单测 `404/404`（0 failures / 0 errors / 0 skipped）。APK 包名、Launcher、单一 production signer、RSA 4096 证书及 APK Signature Scheme v2 均核对通过，证书 SHA-256 为 `31ca80dd21a5208eaabd5f3e1440a3db2f7dc79122e03eaa6ba01730fb31f18b`。
 3. 正式目录已导出 `03车机助手-v1.0.19.apk`（`14,443,736` 字节，SHA-256 `c995c70096d085811f653d0639ea98b97cb21825801afbb6da917c02d110d435`）和 `03车机助手-v1.0.19.zip`（`13,628,329` 字节，SHA-256 `470615fd21b580402b2d3be052a2c0ff7d9fe05b8611ecee20d825ce3bc38dc7`）。ZIP 只有一个同名 APK 条目，解压摘要与外部 APK 完全一致。
-4. 同目录 `android-app-releases.json` 已保留原有 `folderUrl`、`expiresAt` 和其它六个应用，只更新 `03helper` 的文件名、版本、大小、包名、证书和 SHA-256；JSON SHA-256 为 `21c3cafb8233471be024df1fe4ab78f2f8934695756bb54f24783d26a8f88c81`。Cloud production / release V5 本地预检通过，状态仍为 `local-only`，未上传、未导入后台或切换线上配置。
-5. 本轮源码、版本与文档将随本提交推送；不提交签名材料、APK、ZIP 或桌面 JSON 到 Git。
+4. 同目录 `android-app-releases.json` 已保留原有 `folderUrl`、`expiresAt` 和其它现有应用，只更新 `03helper` 的文件名、版本、大小、包名、证书和 SHA-256；当前磁盘文件 JSON SHA-256 为 `38bb396f9d9be44856e713f1c3a8948501038eed29a39b8d9c23d1eb88a59ddc`。Cloud production / release V5 本地预检通过，状态仍为 `local-only`，未上传、未导入后台或切换线上配置。
+5. 源码、版本与进度记录已随提交 `3d2d23d` 推送；不提交签名材料、APK、ZIP 或桌面 JSON 到 Git。
 
 # 2026-09-20 六阶段安装进度主链与 Debug 主测交付（完成，待用户车机主测）
 
