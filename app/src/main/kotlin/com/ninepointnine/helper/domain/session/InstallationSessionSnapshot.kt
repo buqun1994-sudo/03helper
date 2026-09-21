@@ -1,5 +1,7 @@
 package com.ninepointnine.helper.domain.session
 
+import com.ninepointnine.helper.domain.device.ApplicationAutostartState
+
 import com.ninepointnine.helper.domain.artifact.ArchiveDownloadEvidence
 import com.ninepointnine.helper.domain.artifact.ArchiveVerificationEvidence
 import com.ninepointnine.helper.domain.artifact.ApkExtractionEvidence
@@ -549,6 +551,8 @@ data class ManagedApplicationStatus(
     val iconBase64: String? = null,
     val launchComponent: String? = null,
     val authorizationState: MaintenanceAuthorizationState? = null,
+    val autostartState: ApplicationAutostartState = ApplicationAutostartState.UNAVAILABLE,
+    val autostartReasonCode: String? = null,
 )
 
 /** Atomically replaces verified identities without disturbing other installed baselines. */

@@ -6,20 +6,21 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.material3.IconButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -31,6 +32,12 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.ui.window.DialogWindowProvider
+import android.graphics.Color as AndroidColor
+import android.graphics.drawable.ColorDrawable
 import com.ninepointnine.helper.R
 import com.ninepointnine.helper.ui.theme.InstallerColors
 import com.ninepointnine.helper.ui.theme.InstallerDimensions
@@ -182,6 +189,7 @@ fun IconTextActionButton(
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
     enabled: Boolean = true,
+    iconTint: Color = InstallerColors.White,
 ) {
     val contentAlpha by androidx.compose.animation.core.animateFloatAsState(
         targetValue = if (enabled) 1f else 0.45f,
@@ -200,11 +208,56 @@ fun IconTextActionButton(
     ) {
         Row(
             modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.CenterHorizontally),
+            horizontalArrangement = Arrangement.Center,
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            StatusIcon(name = iconName, contentDescription = text, tint = InstallerColors.White, size = 20.dp)
-            Text(text, color = InstallerColors.White, style = androidx.compose.material3.MaterialTheme.typography.labelLarge)
+            StatusIcon(name = iconName, contentDescription = text, tint = iconTint, size = 20.dp)
+            Text(
+                text,
+                color = InstallerColors.White,
+                style = androidx.compose.material3.MaterialTheme.typography.labelLarge,
+                modifier = Modifier.padding(start = 8.dp),
+            )
+        }
+    }
+}
+
+/**
+ * The single host for transient bottom notices. A transparent, non-focusable
+ * and non-touchable dialog window keeps the notice above business dialogs and
+ * their scrims without stealing the user's action target.
+ */
+@Composable
+fun TopLevelFloatingNotice(
+    content: @Composable () -> Unit,
+) {
+    Dialog(
+        onDismissRequest = {},
+        properties = DialogProperties(
+            dismissOnBackPress = false,
+            dismissOnClickOutside = false,
+            usePlatformDefaultWidth = false,
+        ),
+    ) {
+        val window = (LocalView.current.parent as? DialogWindowProvider)?.window
+        SideEffect {
+            window?.apply {
+                setDimAmount(0f)
+                clearFlags(android.view.WindowManager.LayoutParams.FLAG_DIM_BEHIND)
+                addFlags(
+                    android.view.WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        android.view.WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
+                )
+                setBackgroundDrawable(ColorDrawable(AndroidColor.TRANSPARENT))
+            }
+        }
+        androidx.compose.foundation.layout.Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(bottom = 56.dp),
+            contentAlignment = Alignment.BottomCenter,
+        ) {
+            content()
         }
     }
 }

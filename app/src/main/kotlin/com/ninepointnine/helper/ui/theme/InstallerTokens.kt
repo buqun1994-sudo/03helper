@@ -11,6 +11,10 @@ object InstallerColors {
     val WhiteSurface = Color(0x24FFFFFF)
     val WhiteBorder = Color(0x4DFFFFFF)
     val AuxiliaryWhite = Color(0xFFF7FCFF)
+    /** Saturated traffic-light colors reserved for compact status indicators. */
+    val StatusGreen = Color(0xFF34C759)
+    val StatusRed = Color(0xFFE53935)
+    val StatusGray = Color(0xFF9E9E9E)
     val Success = Color(0xFFB8F0D4)
     val Warning = Color(0xFFFFE1A6)
     val Error = Color(0xFFFFD1D1)

@@ -9,6 +9,7 @@ import com.ninepointnine.helper.domain.artifact.ArtifactVerification
 import com.ninepointnine.helper.domain.artifact.SourceSelectionEvidence
 import com.ninepointnine.helper.domain.device.ManagedApplicationAuthorizationStatus
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationResultValue
+import com.ninepointnine.helper.domain.device.ApplicationAutostartState
 
 /** Commands accepted by the single installation-session owner. */
 sealed interface InstallationSessionCommand {
@@ -200,6 +201,8 @@ sealed interface InstallationSessionEvent {
         /** Set when the action succeeded but the follow-up inventory read did not. */
         val inventoryRefreshFailureReason: String? = null,
         val inventoryRefreshRetryable: Boolean = true,
+        val autostartState: ApplicationAutostartState? = null,
+        val autostartReasonCode: String? = null,
     ) : InstallationSessionEvent
 
     data class MaintenanceApplicationActionFailed(

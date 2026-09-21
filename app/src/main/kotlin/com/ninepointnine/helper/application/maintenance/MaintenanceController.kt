@@ -17,6 +17,7 @@ import com.ninepointnine.helper.domain.device.ManagedApplicationDetailsProbeResu
 import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationResult
 import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationState
 import com.ninepointnine.helper.domain.device.MaintenanceDeviceResult
+import com.ninepointnine.helper.domain.device.ApplicationAutostartResult
 import com.ninepointnine.helper.domain.device.ManagedComponent
 import com.ninepointnine.helper.domain.artifact.ArtifactVersion
 import com.ninepointnine.helper.domain.artifact.InstallerSelfIdentity
@@ -39,6 +40,7 @@ import kotlinx.coroutines.yield
 class MaintenanceController(
     private val artifactCache: ArtifactCache,
     private val diagnosticStore: MaintenanceDiagnosticStore,
+    private val managedApplicationIconCache: ManagedApplicationIconCache? = null,
     private val applicationDiagnosticExporter: ApplicationDiagnosticExporter? = null,
     private val loadDistributionConfig: (suspend () -> DistributionConfigLoadResult)? = null,
     private val selfVersion: ArtifactVersion = ArtifactVersion("0.1.0", 1L),
@@ -290,6 +292,30 @@ class MaintenanceController(
                 }
                 return
             }
+            if (actionId == MaintenanceApplicationActionId.AUTOSTART) {
+                val currentlyEnabled = inventoryApplication.autostartState ==
+                    com.ninepointnine.helper.domain.device.ApplicationAutostartState.ENABLED
+                when (val result = gateway.setApplicationAutostart(packageName, !currentlyEnabled)) {
+                    is ApplicationAutostartResult.Failed -> eventPort.emit(
+                        InstallationSessionEvent.MaintenanceApplicationActionFailed(
+                            packageName = packageName,
+                            actionId = actionId,
+                            reasonCode = result.failure.reasonCode,
+                            retryable = result.failure.retryable,
+                        ),
+                    )
+                    is ApplicationAutostartResult.Completed -> eventPort.emit(
+                        InstallationSessionEvent.MaintenanceApplicationActionCompleted(
+                            packageName = packageName,
+                            actionId = actionId,
+                            resultCode = "autostart_status_updated",
+                            autostartState = result.status.state,
+                            autostartReasonCode = result.status.reasonCode,
+                        ),
+                    )
+                }
+                return
+            }
             when (val result = gateway.performApplicationAction(component, actionId)) {
                 is MaintenanceDeviceResult.Completed -> {
                     // The device action result is authoritative for the
@@ -305,6 +331,13 @@ class MaintenanceController(
                                     refreshedApplications = refreshed.applications
                                         .filter { it.installed }
                                         .map { it.toSnapshotStatus() }
+                                        .map { application ->
+                                            application.copy(
+                                                iconBase64 = managedApplicationIconCache?.read(application)
+                                                    ?: application.iconBase64,
+                                            )
+                                        }
+                                    managedApplicationIconCache?.pruneTo(refreshedApplications.orEmpty())
                                 }
 
                                 is ManagedApplicationsResult.Failed -> {
@@ -358,22 +391,29 @@ class MaintenanceController(
      * reads without invalidating the verified application list.
      */
     suspend fun hydrateApplicationIcons(
-        packageNames: List<String>,
+        applications: List<ManagedApplicationStatus>,
         connection: com.ninepointnine.helper.domain.device.DeviceConnectionLease?,
         eventPort: InstallationSessionEventPort,
     ) {
         val gateway = maintenanceGateway(connection) ?: return
-        packageNames.distinct().forEach { packageName ->
+        applications.distinctBy { it.packageName }.forEach { application ->
+            val packageName = application.packageName
+            if (managedApplicationIconCache?.read(application) != null) return@forEach
             // Keep a cancellation point between single-package bridge reads so
             // a foreground operation never waits behind the remaining queue.
             yield()
-            when (val icon = gateway.inspectInstalledApplicationIcon(packageName)) {
-                is InstalledApplicationIconResult.Completed -> eventPort.emit(
+            val icon = gateway.inspectInstalledApplicationIcon(packageName)
+            when (icon) {
+                is InstalledApplicationIconResult.Completed -> {
+                    managedApplicationIconCache?.takeIf { icon.iconBase64 != null }
+                        ?.write(application, icon.iconBase64)
+                    eventPort.emit(
                     InstallationSessionEvent.MaintenanceApplicationIconResolved(
                         packageName = icon.packageName,
                         iconBase64 = icon.iconBase64,
                     ),
-                )
+                    )
+                }
                 is InstalledApplicationIconResult.Failed -> Unit
             }
         }
@@ -601,9 +641,21 @@ class MaintenanceController(
             }
             is ManagedApplicationsResult.Completed -> {
                 val installedApplications = result.applications.filter { it.installed }
+                val snapshotApplications = installedApplications.map { application ->
+                    application.toSnapshotStatus().let { status ->
+                        if (actionId == MaintenanceActionId.MANAGE_APPS) {
+                            status.copy(iconBase64 = managedApplicationIconCache?.read(status) ?: status.iconBase64)
+                        } else {
+                            status
+                        }
+                    }
+                }
+                if (actionId == MaintenanceActionId.MANAGE_APPS) {
+                    managedApplicationIconCache?.pruneTo(snapshotApplications)
+                }
                 eventPort.emit(
                     InstallationSessionEvent.MaintenanceApplicationsResolved(
-                        applications = installedApplications.map { it.toSnapshotStatus() },
+                        applications = snapshotApplications,
                     ),
                 )
                 if (completeAction) complete(actionId, "applications_checked", eventPort)
@@ -725,6 +777,8 @@ class MaintenanceController(
         uid = uid,
         iconBase64 = iconBase64,
         launchComponent = launchComponent,
+        autostartState = autostartState,
+        autostartReasonCode = autostartReasonCode,
     )
 
     private fun managedComponents(snapshot: InstallationSessionSnapshot): List<ManagedComponent> {

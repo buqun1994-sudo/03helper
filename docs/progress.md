@@ -1,6 +1,27 @@
+# 2026-09-21 自启动代理名单、紧凑弹窗与最高层浮窗收口（可交用户主测）
+
+1. 管理库存仍采用一次应用清单加一次批量自启动状态桥接；助手按钮文案改为“开机启动”，按钮完全复用普通 icon + 文案布局，不再增加右侧状态点或额外占位；状态只通过 Lucide `power` 图标颜色表达，鲜明绿 `#34C759`、红 `#E53935`、灰 `#9E9E9E`。图标缓存仍按包名、版本代码和更新时间复用，库存刷新只清理已不存在包。
+2. 代理启动集合已收紧为“由 03 桌面代理负责的第三方应用”：03 桌面和 03 歌词由各自产品负责开机恢复，不再进入代理列表；助手对两类包不显示开机启动动作，设备适配器也拒绝代理写入。03desktop 升级时会清理旧版本遗留的默认项。
+3. 开机自启动弹窗标题保持“开机自启动”，正文改为“开机后由03桌面代理启动此应用”，中间为左文案 / 右 Switch 的紧凑自适应布局；切换后立即沿现有会话保存，保存期间只显示底部统一浮窗且“完成”按钮置灰，协议缺失仍只显示一次版本过低提示。
+4. 指定 JDK17 下助手 JVM 单测 `421/421`、Lint、Debug 主包和 AndroidTest 构建通过；真实测试手机 `InstallAppActivitySmokeTest` 全量 `8/8` 通过；项目文档、Skills、本机环境与 `git diff --check` 均通过。共享 03 APP 登记检查按规则因登记版本 `1.0.18 (19)`、登记 HEAD / clean 状态与当前 `1.0.21 (22)` dirty 工作树不一致而 fail closed，未修改 Cloud 台账。
+5. 最终助手 Debug APK 已核对为 `com.ninepointnine.helper.test` / `1.0.21-test (22)`，SHA-256 `9405306308432d102b9c98f01189ef900cb6b088f297aba4a52494526ba55021`，单一 Debug 证书摘要 `2990047fddf6d6ec1eb7f83731fcc1398616e5fb83aec97542a4f132c35a1a27`，APK v2 通过。已对登记测试手机 `adb-RFCX412AN1X-gWfMRD._adb-tls-connect._tcp` 执行保留数据覆盖安装，设备端 APK 摘要与本地一致；`MainActivity` 启动返回 `Status: ok`。
+6. 含代理名单修正的 03desktop Debug APK `com.ninepointnine.desktop.test` / `1.0.6-icar03-test (7)`，SHA-256 `c57021827db5648edbc05bdf0e789b80f7b375210b31ef0630b0653c3e2c8616`，已使用显式车机 `192.168.0.203:5555` 保留数据覆盖安装并启动；进程和 `OverlayService` 正常。车机 Provider 批量只读回读确认正式测试包与 03歌词测试包均为 `unsupported / application_manages_own_autostart`。
+7. 本轮未清数据、未卸载、未降级、未重启、未提交、未推送或发布；车机上的真实 `BOOT_COMPLETED` 联动、第三方应用开机启动切换和三态图标颜色仍由用户在车机上主测，手机端紧凑弹窗、保存期间置灰、最高层浮窗和普通按钮布局已完成设备 smoke。
+
+# 2026-09-21 应用自启动代理与管理页双列布局（实现与测试手机验证完成，待车机主测）
+
+1. 管理已安装应用展开态新增第八项“应用自启动”，与启动、强行停止、清除数据、一键授权、卸载、详情、导出日志共同按两列排列；“导出日志”不再独占整行。
+2. 应用自启动通过 03桌面受控代理查询和切换，管理页显示已设置 / 未设置 / 不可设置；代理不可用时保留明确依赖提示并置灰。车机未在线，未执行车机桥接、自启动切换或重启验证。
+3. `MaintenanceLayoutTest`、Android smoke 断言和维护页文档已按八项双列口径更新；`testDebugUnitTest`、项目文档检查、Skills 检查、`git diff --check`、`assembleDebug` 和 `assembleDebugAndroidTest` 均通过。
+4. 显式测试手机已保留数据覆盖安装主包与 AndroidTest 包；`InstallAppActivitySmokeTest` 通过 `OK (7 tests)`，覆盖八项动作存在性、导出按钮与普通按钮等宽、选择保存位置前不进入采集运行态。smoke 后再次覆盖安装主包并核对 `com.ninepointnine.helper.test`、`1.0.19-test (20)`、`MainActivity`，启动返回 `Status: ok / LaunchState: COLD`。
+5. 本轮未清数据、未卸载、未降级、未重启测试手机，未对车机执行安装、桥接调用、自启动切换或重启；车机发现脚本扫描 253 个地址后仍未发现 `S56_HQX / SDK 28`。明日车机上线后的最小主测为：缺少 03桌面时显示依赖提示；有 Launcher 应用验证已设置 / 未设置切换；无 Launcher 应用按钮置灰；重启后仅已设置应用自动启动。
+6. 追加收口修正：03desktop 自启动 Provider 仅接受 shell UID，Launcher 解析不再要求 `CATEGORY_DEFAULT`；03helper 新增自启动响应状态 / 非法回包解析回归，两个仓库的 Debug 单测、Lint 和 Debug 构建均通过。缺少 03desktop 的卡片与失败反馈统一显示“此功能依赖03桌面：请先在车机上安装03桌面”。
+7. 追加联调收口：Android `content call` 在 authority 不存在时可能以退出码 `0` 将 `Could not find provider` 写入诊断输出；03helper 现将该情况归一为代理不可用并继续尝试正式 / `.test` 双 authority，未知或篡改回包仍 fail closed。测试手机已覆盖安装当前 03desktop / 03helper Debug，真实 shell Provider 验证了正式 authority 缺失、测试 authority 可用、普通 Launcher 应用“未设置 → 已设置 → 未设置”回读，以及无 Launcher 应用 `unsupported / no_launcher_activity`；测试状态已恢复为未设置。
+8. 测试机无法由 shell 伪造受保护的 `BOOT_COMPLETED` 广播（系统返回 `Permission Denial`）；`MY_PACKAGE_REPLACED` 已通过真实 `adb install -r` 覆盖安装 03desktop Debug 验证，已设置自启动的助手被系统成功拉起并进入 `MainActivity`。`BOOT_COMPLETED` 仍待车机上线后主测；收尾时已将自启动状态恢复为未设置，未清数据、未卸载、未降级或重启设备。
+
 # 2026-09-20 指定应用诊断日志导出（实现与测试手机 smoke 完成，待用户车机主测）
 
-1. 管理已安装应用卡片新增第七项“导出日志”，最后一项在双列操作区独占整行，避免七项操作留下视觉空位。点击后先打开 Android 系统 ZIP 保存位置选择器；只有用户返回有效 `content://` 目标后，现有维护会话才进入采集运行态，取消选择不会连接车机或读取日志。
+1. 管理已安装应用卡片包含“导出日志”诊断动作。点击后先打开 Android 系统 ZIP 保存位置选择器；只有用户返回有效 `content://` 目标后，现有维护会话才进入采集运行态，取消选择不会连接车机或读取日志。
 2. 日志导出沿现有 `InstallationSession -> InstallerRuntime -> MaintenanceController -> MaintenanceCommandGateway` 主链执行，只对当前受控库存中的精确包名采集。ZIP 包含目标包及已观察 PID 的应用 Logcat、明确引用目标包名的系统 Logcat，以及 package、process、Activity、Service 和 memory 状态；不使用 `run-as`、不读取 `/data/user/0`、不清空 Logcat，也不上传 Cloud。应用写入私有文件但未输出到 Logcat 的内部日志受 Android 沙箱限制，不在能力范围内。
 3. 采集固定为 Logcat 最近 `4,000` 行，每节最多 `512 KiB`、正文节总计最多 `4 MiB`；Authorization、Cookie、token、JWT、设备标识、邮箱、手机号和 MAC 等在写入前统一脱敏。相似包名按边界匹配，`com.example.player.other` 不会混入 `com.example.player`；ZIP 元数据固定，便于测试与重复核验。
 4. 指定 JDK 17 下 `:app:testDebugUnitTest`、`:app:lintDebug`、`:app:assembleDebug` 和 `:app:assembleDebugAndroidTest` 全部通过；Debug JVM `409/409`（0 failures / 0 errors / 0 skipped）。测试手机 `RMX1901`（Android 11、无线 ADB）上的完整 `InstallAppActivitySmokeTest` 为 `OK (7 tests)`，覆盖七项按钮、导出按钮整行宽度、点击只打开保存选择器，以及选择位置前会话不进入采集运行态。实机截图核对前三行双列、末行整行，文字、图标和边框无截断、重叠或异常留白。

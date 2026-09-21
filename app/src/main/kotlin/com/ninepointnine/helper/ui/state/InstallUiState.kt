@@ -1,5 +1,7 @@
 package com.ninepointnine.helper.ui.state
 
+import com.ninepointnine.helper.domain.device.ApplicationAutostartState
+
 import com.ninepointnine.helper.domain.session.DeviceConnectionStatus
 import com.ninepointnine.helper.domain.session.ComponentCompatibility
 import com.ninepointnine.helper.domain.session.InstallPhase
@@ -203,6 +205,8 @@ data class MaintenanceApplicationRow(
     val iconKey: String = componentId,
     val iconBase64: String? = null,
     val launchComponent: String? = null,
+    val autostartState: ApplicationAutostartState = ApplicationAutostartState.UNAVAILABLE,
+    val autostartReasonCode: String? = null,
 )
 
 data class MaintenanceUpdateRow(

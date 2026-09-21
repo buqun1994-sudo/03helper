@@ -9,6 +9,7 @@ import com.ninepointnine.helper.domain.artifact.ArtifactManifestValidator
 import com.ninepointnine.helper.domain.artifact.ArtifactSourceKind
 import com.ninepointnine.helper.domain.artifact.ArtifactVerification
 import com.ninepointnine.helper.domain.artifact.InstallerSelfIdentity
+import com.ninepointnine.helper.domain.artifact.KnownApplicationPackages
 import com.ninepointnine.helper.domain.artifact.ManifestValidation
 import com.ninepointnine.helper.domain.artifact.ReleaseSourcePolicy
 import com.ninepointnine.helper.domain.artifact.SourceFailureRecord
@@ -1758,6 +1759,25 @@ class InstallationSession(
                             actionId = actionId,
                             status = MaintenanceActionStatus.FAILED,
                             reasonCode = "maintenance_component_unavailable",
+                            retryable = false,
+                        ),
+                        applicationDetails = null,
+                    ),
+                ),
+            )
+            return
+        }
+        if (actionId == MaintenanceApplicationActionId.AUTOSTART &&
+            KnownApplicationPackages.isApplicationOwnedAutostart(packageName)
+        ) {
+            startNewGeneration(
+                current.copy(
+                    maintenance = current.maintenance.copy(
+                        applicationAction = MaintenanceApplicationActionRecord(
+                            packageName = packageName,
+                            actionId = actionId,
+                            status = MaintenanceActionStatus.FAILED,
+                            reasonCode = "maintenance_autostart_application_owned",
                             retryable = false,
                         ),
                         applicationDetails = null,
@@ -3567,12 +3587,21 @@ class InstallationSession(
                         reasonCode = null,
                         retryable = false,
                     ),
-                    managedApplications = event.refreshedApplications?.filter { it.installed }
+                    managedApplications = (event.refreshedApplications?.filter { it.installed }
                         ?: if (event.actionId == MaintenanceApplicationActionId.UNINSTALL) {
                             current.maintenance.managedApplications.filterNot { it.packageName == event.packageName }
                         } else {
                             current.maintenance.managedApplications
-                        },
+                        }).map { application ->
+                        if (application.packageName == event.packageName && event.autostartState != null) {
+                            application.copy(
+                                autostartState = event.autostartState,
+                                autostartReasonCode = event.autostartReasonCode,
+                            )
+                        } else {
+                            application
+                        }
+                    },
                     installedManifests = if (event.actionId == MaintenanceApplicationActionId.UNINSTALL) {
                         current.maintenance.installedManifests.filterNot { it.packageName == event.packageName }
                     } else {

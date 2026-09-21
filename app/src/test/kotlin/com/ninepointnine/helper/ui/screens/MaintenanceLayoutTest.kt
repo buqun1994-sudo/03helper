@@ -1,7 +1,9 @@
 package com.ninepointnine.helper.ui.screens
 
+import com.composables.icons.lucide.R as LucideR
 import com.ninepointnine.helper.R
 import com.ninepointnine.helper.ui.buildIconRequests
+import com.ninepointnine.helper.ui.components.lucideDrawable
 import com.ninepointnine.helper.ui.maintenanceResultBackIntent
 import com.ninepointnine.helper.ui.state.InstallUiIntent
 import com.ninepointnine.helper.ui.state.InstallUiState
@@ -17,6 +19,9 @@ import com.ninepointnine.helper.ui.state.MaintenanceApplicationDetailsRow
 import com.ninepointnine.helper.ui.state.MaintenanceApplicationFeedback
 import com.ninepointnine.helper.ui.state.MaintenanceApplicationRow
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationRequirement
+import com.ninepointnine.helper.domain.device.ApplicationAutostartState
+import com.ninepointnine.helper.domain.artifact.KnownApplicationPackages
+import com.ninepointnine.helper.ui.theme.InstallerColors
 import com.ninepointnine.helper.domain.session.ResultKind
 import com.ninepointnine.helper.domain.session.InstallationFlow
 import org.junit.Assert.assertEquals
@@ -120,7 +125,7 @@ class MaintenanceLayoutTest {
     }
 
     @Test
-    fun `managed application card exposes seven actions in the required order`() {
+    fun `managed application card exposes eight actions in the required order`() {
         assertEquals(
             listOf(
                 MaintenanceApplicationActionId.START,
@@ -129,10 +134,40 @@ class MaintenanceLayoutTest {
                 MaintenanceApplicationActionId.AUTHORIZE,
                 MaintenanceApplicationActionId.UNINSTALL,
                 MaintenanceApplicationActionId.DETAILS,
+                MaintenanceApplicationActionId.AUTOSTART,
                 MaintenanceApplicationActionId.EXPORT_DIAGNOSTICS,
             ),
             MANAGED_APPLICATION_ACTIONS,
         )
+    }
+
+    @Test
+    fun `autostart action resolves to the bundled power icon`() {
+        assertEquals("power", applicationActionIcon(MaintenanceApplicationActionId.AUTOSTART))
+        assertEquals(LucideR.drawable.lucide_ic_power, lucideDrawable("power"))
+    }
+
+    @Test
+    fun `self managed desktop and lyrics do not expose proxy autostart action`() {
+        assertFalse(
+            managedApplicationActions(KnownApplicationPackages.CURRENT_DESKTOP_TEST_PACKAGE_NAME)
+                .contains(MaintenanceApplicationActionId.AUTOSTART),
+        )
+        assertFalse(
+            managedApplicationActions(KnownApplicationPackages.CURRENT_LYRICS_TEST_PACKAGE_NAME)
+                .contains(MaintenanceApplicationActionId.AUTOSTART),
+        )
+        assertTrue(
+            managedApplicationActions("com.example.player")
+                .contains(MaintenanceApplicationActionId.AUTOSTART),
+        )
+    }
+
+    @Test
+    fun `autostart icon uses saturated traffic light colors`() {
+        assertEquals(InstallerColors.StatusGreen, autostartIconColor(ApplicationAutostartState.ENABLED))
+        assertEquals(InstallerColors.StatusRed, autostartIconColor(ApplicationAutostartState.DISABLED))
+        assertEquals(InstallerColors.StatusGray, autostartIconColor(ApplicationAutostartState.UNAVAILABLE))
     }
 
     @Test

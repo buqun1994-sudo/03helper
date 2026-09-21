@@ -1276,6 +1276,8 @@ class InstallUiStateMapperTest {
             "availability_evidence_invalid",
             "maintenance_action_failed",
             "maintenance_install_failed",
+            "maintenance_autostart_unavailable",
+            "maintenance_autostart_desktop_outdated",
             "self_update_readback_failed",
             "self_update_installer_unavailable",
             "reason_not_in_catalog",
@@ -1304,6 +1306,18 @@ class InstallUiStateMapperTest {
         assertEquals(
             "安装结果缺少车机回执：重新连接车机",
             failureReasonToUserMessage("maintenance_install_failed"),
+        )
+        assertEquals(
+            "03桌面版本过低，请升级到最新版本。",
+            failureReasonToUserMessage("maintenance_autostart_unavailable"),
+        )
+        assertEquals(
+            "03桌面版本过低，请升级到最新版本。",
+            failureReasonToUserMessage("maintenance_autostart_desktop_outdated"),
+        )
+        assertEquals(
+            "此功能依赖03桌面：请先在车机上安装03桌面",
+            failureReasonToUserMessage("maintenance_app_catalog_bridge_unavailable"),
         )
     }
 

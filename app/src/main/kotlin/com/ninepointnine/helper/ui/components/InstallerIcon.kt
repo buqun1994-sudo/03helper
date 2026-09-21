@@ -114,7 +114,7 @@ private fun componentFallbackIcon(iconKey: String): String = when (iconKey) {
     else -> "package_x"
 }
 
-private fun lucideDrawable(name: String): Int = when (name) {
+internal fun lucideDrawable(name: String): Int = when (name) {
     "arrow_left" -> LucideR.drawable.lucide_ic_arrow_left
     "car_front" -> LucideR.drawable.lucide_ic_car_front
     "chevron_right" -> LucideR.drawable.lucide_ic_chevron_right
@@ -135,6 +135,7 @@ private fun lucideDrawable(name: String): Int = when (name) {
     "package_x" -> LucideR.drawable.lucide_ic_package_x
     "panels_top_left" -> LucideR.drawable.lucide_ic_panels_top_left
     "play" -> LucideR.drawable.lucide_ic_play
+    "power" -> LucideR.drawable.lucide_ic_power
     "refresh_cw" -> LucideR.drawable.lucide_ic_refresh_cw
     "search" -> LucideR.drawable.lucide_ic_search
     "settings_2" -> LucideR.drawable.lucide_ic_settings_2

@@ -96,6 +96,18 @@ interface MaintenanceCommandGateway {
             DeviceActionFailure("maintenance_app_icon_unavailable", retryable = false),
         )
 
+    suspend fun inspectApplicationAutostart(packageName: String): ApplicationAutostartResult =
+        ApplicationAutostartResult.Failed(
+            DeviceActionFailure("maintenance_autostart_unavailable", packageName, retryable = true),
+        )
+
+    suspend fun setApplicationAutostart(
+        packageName: String,
+        enabled: Boolean,
+    ): ApplicationAutostartResult = ApplicationAutostartResult.Failed(
+        DeviceActionFailure("maintenance_autostart_unavailable", packageName, retryable = true),
+    )
+
     /** Scans one installed APK declaration set, applies fixed grants, and reads it back. */
     suspend fun inspectApplicationAuthorization(
         component: ManagedComponent,
@@ -211,6 +223,8 @@ data class ManagedApplicationProbe(
     val iconBase64: String? = null,
     /** Explicit MAIN/LAUNCHER component resolved by PackageManager. */
     val launchComponent: String? = null,
+    val autostartState: ApplicationAutostartState = ApplicationAutostartState.UNAVAILABLE,
+    val autostartReasonCode: String? = null,
 )
 
 data class ManagedApplicationDetailsProbe(
@@ -275,6 +289,24 @@ sealed interface InstalledApplicationIconResult {
     ) : InstalledApplicationIconResult
 
     data class Failed(val failure: DeviceActionFailure) : InstalledApplicationIconResult
+}
+
+enum class ApplicationAutostartState {
+    ENABLED,
+    DISABLED,
+    UNSUPPORTED,
+    UNAVAILABLE,
+}
+
+data class ApplicationAutostartStatus(
+    val packageName: String,
+    val state: ApplicationAutostartState,
+    val reasonCode: String? = null,
+)
+
+sealed interface ApplicationAutostartResult {
+    data class Completed(val status: ApplicationAutostartStatus) : ApplicationAutostartResult
+    data class Failed(val failure: DeviceActionFailure) : ApplicationAutostartResult
 }
 
 data class ApplicationAuthorizationRequirement(

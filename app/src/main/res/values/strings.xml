@@ -138,6 +138,14 @@
     <string name="maintenance_authorization_check_complete">检查完成，所有应用授权正常</string>
     <string name="maintenance_authorization_complete">授权完成，所有应用授权正常</string>
     <string name="maintenance_start">启动应用</string>
+    <string name="maintenance_autostart">开机启动</string>
+    <string name="maintenance_autostart_dialog_title">开机自启动</string>
+    <string name="maintenance_autostart_dialog_explanation">开机后由03桌面代理启动此应用</string>
+    <string name="maintenance_autostart_saving">正在保存设置</string>
+    <string name="maintenance_autostart_enabled">已设置自启动</string>
+    <string name="maintenance_autostart_disabled">未设置自启动</string>
+    <string name="maintenance_autostart_unsupported">不可设置自启动</string>
+    <string name="maintenance_autostart_desktop_outdated">03桌面版本过低，请升级到最新版本。</string>
     <string name="maintenance_force_stop">强行停止</string>
     <string name="maintenance_clear_data">清除数据</string>
     <string name="maintenance_authorize">一键授权</string>
@@ -146,6 +154,7 @@
     <string name="maintenance_export_logs">导出日志</string>
     <string name="maintenance_details_title">%1$s详情</string>
     <string name="maintenance_start_success">启动成功</string>
+    <string name="maintenance_autostart_success">自启动设置已更新</string>
     <string name="maintenance_force_stop_success">强行停止成功</string>
     <string name="maintenance_clear_data_title">清除应用数据</string>
     <string name="maintenance_clear_data_confirm">将清除“%1$s”的登录状态、设置、数据库和缓存，应用本身仍会保留。是否继续？</string>

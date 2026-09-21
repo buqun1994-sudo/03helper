@@ -46,6 +46,9 @@ import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationResult
 import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationState
 import com.ninepointnine.helper.domain.device.MaintenanceCommandGateway
 import com.ninepointnine.helper.domain.device.MaintenanceDeviceResult
+import com.ninepointnine.helper.domain.device.ApplicationAutostartResult
+import com.ninepointnine.helper.domain.device.ApplicationAutostartState
+import com.ninepointnine.helper.domain.device.ApplicationAutostartStatus
 import com.ninepointnine.helper.domain.artifact.KnownApplicationPackages
 import com.ninepointnine.helper.domain.session.MaintenanceApplicationActionId
 import com.ninepointnine.helper.domain.session.InstallationStrategy
@@ -831,8 +834,24 @@ internal class DadbCommandGateway(
                 DeviceActionFailure("maintenance_app_catalog_bridge_unavailable", retryable = true),
             )
         }
+        val autostartCandidates = inventory.entries
+            .map { it.packageName }
+            .filterNot(KnownApplicationPackages::isApplicationOwnedAutostart)
+        val autostartStatuses = readAutostartStatuses(autostartCandidates)
         ManagedApplicationsResult.Completed(
             inventory.entries.map { entry ->
+                val autostart = if (KnownApplicationPackages.isApplicationOwnedAutostart(entry.packageName)) {
+                    ApplicationAutostartStatus(
+                        packageName = entry.packageName,
+                        state = ApplicationAutostartState.UNSUPPORTED,
+                        reasonCode = "maintenance_autostart_application_owned",
+                    )
+                } else autostartStatuses[entry.packageName]
+                    ?: ApplicationAutostartStatus(
+                        packageName = entry.packageName,
+                        state = ApplicationAutostartState.UNAVAILABLE,
+                        reasonCode = "maintenance_autostart_desktop_outdated",
+                    )
                 ManagedApplicationProbe(
                     componentId = componentIdForPackage(entry.packageName),
                     packageName = entry.packageName,
@@ -845,6 +864,8 @@ internal class DadbCommandGateway(
                     uid = entry.uid,
                     iconBase64 = entry.iconBase64,
                     launchComponent = entry.launcherComponent,
+                    autostartState = autostart.state,
+                    autostartReasonCode = autostart.reasonCode,
                 )
             },
         )
@@ -876,6 +897,96 @@ internal class DadbCommandGateway(
         }
         InstalledApplicationIconResult.Failed(
             DeviceActionFailure("maintenance_app_icon_unavailable", retryable = true),
+        )
+    }
+
+    override suspend fun inspectApplicationAutostart(packageName: String): ApplicationAutostartResult = withLease(
+        whenClosed = ApplicationAutostartResult.Failed(
+            DeviceActionFailure("adb_connection_closed", packageName, retryable = true),
+        ),
+    ) {
+        if (KnownApplicationPackages.isApplicationOwnedAutostart(packageName)) {
+            return@withLease ApplicationAutostartResult.Completed(
+                ApplicationAutostartStatus(
+                    packageName = packageName,
+                    state = ApplicationAutostartState.UNSUPPORTED,
+                    reasonCode = "maintenance_autostart_application_owned",
+                ),
+            )
+        }
+        readAutostartStatus(packageName)
+    }
+
+    override suspend fun setApplicationAutostart(
+        packageName: String,
+        enabled: Boolean,
+    ): ApplicationAutostartResult = withLease(
+        whenClosed = ApplicationAutostartResult.Failed(
+            DeviceActionFailure("adb_connection_closed", packageName, retryable = true),
+        ),
+    ) {
+        if (KnownApplicationPackages.isApplicationOwnedAutostart(packageName)) {
+            return@withLease ApplicationAutostartResult.Failed(
+                DeviceActionFailure(
+                    "maintenance_autostart_application_owned",
+                    packageName,
+                    retryable = false,
+                ),
+            )
+        }
+        val parsed = callAutostartBridge(
+            method = "set_status",
+            arg = "$packageName:$enabled",
+            packageName = packageName,
+        )
+        parsed
+    }
+
+    private fun readAutostartStatuses(packageNames: List<String>): Map<String, ApplicationAutostartStatus> {
+        val expected = packageNames.distinct()
+        if (expected.isEmpty()) return emptyMap()
+        if (expected.any { !PACKAGE_NAME_PATTERN.matches(it) }) return emptyMap()
+        AUTOSTART_BRIDGE_AUTHORITIES.forEach { authority ->
+            val response = shell(
+                "content call --uri content://$authority --method get_status_batch --arg " +
+                    shellArgument(expected.joinToString(",")),
+            ) ?: return@forEach
+            if (response.exitCode != 0) return@forEach
+            when (val parsed = parseAutostartBatchResponse(response, expected.toSet())) {
+                is AutostartBatchParseResult.Valid -> return parsed.statuses
+                AutostartBatchParseResult.Unavailable -> Unit
+                AutostartBatchParseResult.Invalid -> Unit
+            }
+        }
+        return emptyMap()
+    }
+
+    private fun readAutostartStatus(packageName: String): ApplicationAutostartResult {
+        if (!PACKAGE_NAME_PATTERN.matches(packageName)) {
+            return ApplicationAutostartResult.Failed(
+                DeviceActionFailure("maintenance_component_identity_invalid", packageName, retryable = false),
+            )
+        }
+        return callAutostartBridge("get_status", packageName, packageName)
+    }
+
+    private fun callAutostartBridge(
+        method: String,
+        arg: String,
+        packageName: String,
+    ): ApplicationAutostartResult {
+        AUTOSTART_BRIDGE_AUTHORITIES.forEach { authority ->
+            val response = shell(
+                "content call --uri content://$authority --method $method --arg ${shellArgument(arg)}",
+            ) ?: return@forEach
+            if (response.exitCode != 0) return@forEach
+            when (val parsed = parseAutostartResponse(response, packageName)) {
+                is ApplicationAutostartResult.Completed -> return parsed
+                is ApplicationAutostartResult.Failed -> if (parsed.failure.reasonCode != "maintenance_autostart_unavailable") return parsed
+            }
+        }
+        return ApplicationAutostartResult.Failed(
+            DeviceActionFailure("maintenance_autostart_desktop_outdated", packageName, retryable = true),
         )
     }
 
@@ -1685,6 +1796,10 @@ internal class DadbCommandGateway(
                 DeviceActionFailure("maintenance_authorization_requires_scan", component.componentId, retryable = false),
             )
 
+            MaintenanceApplicationActionId.AUTOSTART -> MaintenanceDeviceResult.Failed(
+                DeviceActionFailure("maintenance_autostart_requires_bridge", component.componentId, retryable = false),
+            )
+
             MaintenanceApplicationActionId.UNINSTALL -> {
                 val response = shell("pm uninstall ${shellArgument(component.packageName)}")
                 if (!isUninstallAccepted(response)) {
@@ -2425,6 +2540,10 @@ internal class DadbCommandGateway(
         val DESKTOP_BRIDGE_AUTHORITIES = listOf(
             "com.ninepointnine.desktop.appcatalog",
             "com.ninepointnine.desktop.test.appcatalog",
+        )
+        val AUTOSTART_BRIDGE_AUTHORITIES = listOf(
+            "com.ninepointnine.desktop.autostart",
+            "com.ninepointnine.desktop.test.autostart",
         )
     }
 
@@ -3306,6 +3425,132 @@ internal object DesktopAppCatalogBridgeParser {
         val index: Int,
         val fields: Map<String, String>,
     )
+}
+
+internal fun parseAutostartResponse(
+    response: AdbShellResponse?,
+    expectedPackageName: String,
+): ApplicationAutostartResult {
+    if (response == null || response.exitCode != 0) {
+        return ApplicationAutostartResult.Failed(
+            DeviceActionFailure("maintenance_autostart_unavailable", expectedPackageName, retryable = true),
+        )
+    }
+    // Android's `content call` reports a missing authority in stderr while
+    // still returning exit code 0. Treat that transport diagnostic as a
+    // missing bridge so callers can try the other known application variant.
+    val transportOutput = response.allOutput
+    if (transportOutput.contains("Could not find provider", ignoreCase = true) ||
+        transportOutput.contains("Error while accessing provider", ignoreCase = true) ||
+        transportOutput.contains("Failed to find provider", ignoreCase = true)
+    ) {
+        return ApplicationAutostartResult.Failed(
+            DeviceActionFailure("maintenance_autostart_unavailable", expectedPackageName, retryable = true),
+        )
+    }
+    val output = response.output.takeIf { it.length <= 4096 } ?: return ApplicationAutostartResult.Failed(
+        DeviceActionFailure("maintenance_autostart_response_invalid", expectedPackageName, retryable = false),
+    )
+    fun value(key: String): String? = Regex("(?:^|[, {])${Regex.escape(key)}=([^,}\\]]*)")
+        .find(output)?.groupValues?.getOrNull(1)?.trim()?.takeIf(String::isNotEmpty)
+    val packageName = value("packageName")
+    val state = value("state")
+    val reason = value("reason")
+    if (packageName != null && packageName != expectedPackageName) {
+        return ApplicationAutostartResult.Failed(
+            DeviceActionFailure("maintenance_autostart_response_invalid", expectedPackageName, retryable = false),
+        )
+    }
+    return when (state) {
+        "enabled" -> ApplicationAutostartResult.Completed(
+            ApplicationAutostartStatus(expectedPackageName, ApplicationAutostartState.ENABLED, reason),
+        )
+        "disabled" -> ApplicationAutostartResult.Completed(
+            ApplicationAutostartStatus(expectedPackageName, ApplicationAutostartState.DISABLED, reason),
+        )
+        "unsupported" -> ApplicationAutostartResult.Completed(
+            ApplicationAutostartStatus(expectedPackageName, ApplicationAutostartState.UNSUPPORTED, reason),
+        )
+        else -> ApplicationAutostartResult.Failed(
+            DeviceActionFailure(
+                if (state == "unavailable") reason ?: "maintenance_autostart_unavailable"
+                else "maintenance_autostart_response_invalid",
+                expectedPackageName,
+                retryable = state == "unavailable",
+            ),
+        )
+    }
+}
+
+internal sealed interface AutostartBatchParseResult {
+    data class Valid(val statuses: Map<String, ApplicationAutostartStatus>) : AutostartBatchParseResult
+    data object Unavailable : AutostartBatchParseResult
+    data object Invalid : AutostartBatchParseResult
+}
+
+private const val MAX_AUTOSTART_BATCH_OUTPUT_LENGTH = 512 * 1024
+private const val MAX_AUTOSTART_BATCH_DECODED_LENGTH = 384 * 1024
+
+/** Parses the single encoded batch returned by the autostart bridge. */
+internal fun parseAutostartBatchResponse(
+    response: AdbShellResponse?,
+    expectedPackages: Set<String>,
+): AutostartBatchParseResult {
+    if (response == null || response.exitCode != 0) return AutostartBatchParseResult.Unavailable
+    val transportOutput = response.allOutput
+    if (transportOutput.contains("Could not find provider", ignoreCase = true) ||
+        transportOutput.contains("Error while accessing provider", ignoreCase = true) ||
+        transportOutput.contains("Failed to find provider", ignoreCase = true)
+    ) {
+        return AutostartBatchParseResult.Unavailable
+    }
+    if (expectedPackages.isEmpty()) return AutostartBatchParseResult.Valid(emptyMap())
+    val output = response.output.takeIf { it.length <= MAX_AUTOSTART_BATCH_OUTPUT_LENGTH }
+        ?: return AutostartBatchParseResult.Invalid
+    val supported = Regex("(?:^|[, {])supported=(true|false)")
+        .find(output)?.groupValues?.getOrNull(1)
+        ?.equals("true", ignoreCase = true)
+        ?: return AutostartBatchParseResult.Invalid
+    if (!supported) return AutostartBatchParseResult.Invalid
+    val encoded = Regex("(?:^|[, {])batch=([A-Za-z0-9_-]+)")
+        .find(output)?.groupValues?.getOrNull(1)
+        ?: return AutostartBatchParseResult.Invalid
+    val decoded = runCatching {
+        Base64.getUrlDecoder().decode(encoded)
+    }.getOrNull()?.takeIf { it.size <= MAX_AUTOSTART_BATCH_DECODED_LENGTH }
+        ?: return AutostartBatchParseResult.Invalid
+    val statuses = linkedMapOf<String, ApplicationAutostartStatus>()
+    val packagePattern = Regex("^[A-Za-z][A-Za-z0-9_]*(\\.[A-Za-z][A-Za-z0-9_]*)+$")
+    val stateValues = setOf("enabled", "disabled", "unsupported", "unavailable")
+    val rows = runCatching { String(decoded, Charsets.UTF_8).lineSequence().toList() }.getOrNull()
+        ?: return AutostartBatchParseResult.Invalid
+    if (rows.size != expectedPackages.size || rows.any(String::isBlank)) return AutostartBatchParseResult.Invalid
+    rows.forEach { row ->
+        val fields = row.split('|')
+        if (fields.size != 3) return AutostartBatchParseResult.Invalid
+        val packageName = fields[0]
+        val state = fields[1]
+        if (!packagePattern.matches(packageName) || packageName !in expectedPackages || statuses.containsKey(packageName)) {
+            return AutostartBatchParseResult.Invalid
+        }
+        if (state !in stateValues) return AutostartBatchParseResult.Invalid
+        val reason = runCatching {
+            String(Base64.getUrlDecoder().decode(fields[2]), Charsets.UTF_8)
+        }.getOrNull()?.takeIf { it.length <= 256 }
+            ?: return AutostartBatchParseResult.Invalid
+        statuses[packageName] = ApplicationAutostartStatus(
+            packageName = packageName,
+            state = when (state) {
+                "enabled" -> ApplicationAutostartState.ENABLED
+                "disabled" -> ApplicationAutostartState.DISABLED
+                "unsupported" -> ApplicationAutostartState.UNSUPPORTED
+                else -> ApplicationAutostartState.UNAVAILABLE
+            },
+            reasonCode = reason.ifBlank { null },
+        )
+    }
+    if (statuses.keys != expectedPackages) return AutostartBatchParseResult.Invalid
+    return AutostartBatchParseResult.Valid(statuses)
 }
 
 /** Parses stable package-manager lines without depending on shell locale text. */

@@ -31,6 +31,7 @@ import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationState
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationRequirement
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationRequirementKind
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationResultValue
+import com.ninepointnine.helper.domain.device.ApplicationAutostartState
 import com.ninepointnine.helper.domain.artifact.KnownApplicationPackages
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -2419,6 +2420,48 @@ class InstallationSessionTest {
         )
 
         assertTrue(session.currentSnapshot().maintenance.managedApplications.isEmpty())
+    }
+
+    @Test
+    fun `autostart completion applies the authoritative readback to its application row`() {
+        val packageName = "com.example.player"
+        val base = maintenanceSession().currentSnapshot()
+        val session = InstallationSession(
+            initialSnapshot = base.copy(
+                maintenance = base.maintenance.copy(
+                    routeAction = MaintenanceActionId.MANAGE_APPS,
+                    managedApplications = listOf(
+                        ManagedApplicationStatus(
+                            componentId = "app-player",
+                            packageName = packageName,
+                            installed = true,
+                            autostartState = ApplicationAutostartState.DISABLED,
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        session.dispatch(
+            InstallationSessionCommand.MaintenanceApplicationAction(
+                packageName = packageName,
+                actionId = MaintenanceApplicationActionId.AUTOSTART,
+            ),
+        )
+        session.dispatchEvent(
+            InstallationSessionEvent.MaintenanceApplicationActionCompleted(
+                packageName = packageName,
+                actionId = MaintenanceApplicationActionId.AUTOSTART,
+                resultCode = "autostart_status_updated",
+                autostartState = ApplicationAutostartState.ENABLED,
+                autostartReasonCode = "enabled",
+            ),
+        )
+
+        val updated = session.currentSnapshot().maintenance.managedApplications.single()
+        assertEquals(ApplicationAutostartState.ENABLED, updated.autostartState)
+        assertEquals("enabled", updated.autostartReasonCode)
+        assertEquals(MaintenanceActionStatus.SUCCEEDED, session.currentSnapshot().maintenance.applicationAction?.status)
     }
 
     @Test

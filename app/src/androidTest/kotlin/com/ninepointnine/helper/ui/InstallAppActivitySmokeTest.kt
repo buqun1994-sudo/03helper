@@ -8,6 +8,11 @@ import androidx.activity.compose.setContent
 import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsNotEnabled
+import androidx.compose.ui.test.assertIsOff
+import androidx.compose.ui.test.assertIsOn
+import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.captureToImage
 import androidx.compose.ui.test.hasAnyAncestor
 import androidx.compose.ui.test.hasText
@@ -248,7 +253,7 @@ class InstallAppActivitySmokeTest {
     }
 
     @Test
-    fun managedApplicationShowsSevenActionsAndDefersExportUntilDestinationSelection() {
+    fun managedApplicationShowsEightActionsAndDefersExportUntilDestinationSelection() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext
         val component = ComponentDescriptor(
             id = "player",
@@ -302,17 +307,25 @@ class InstallAppActivitySmokeTest {
                 R.string.maintenance_authorize,
                 R.string.maintenance_uninstall,
                 R.string.maintenance_details,
+                R.string.maintenance_autostart,
                 R.string.maintenance_export_logs,
             ).forEach { label ->
                 compose.onNodeWithText(context.getString(label)).assertExists()
             }
             val export = compose.onNodeWithTag("maintenance_application_action_export_diagnostics")
             export.performScrollTo()
+            val autostart = compose.onNodeWithTag("maintenance_application_action_autostart")
+            autostart.performScrollTo()
+            autostart.performClick()
+            compose.onAllNodesWithText(context.getString(R.string.maintenance_autostart_desktop_outdated))
+                .assertCountEquals(1)
+            dialogText(context.getString(R.string.maintenance_autostart_dialog_explanation)).assertDoesNotExist()
+            dialogText(context.getString(R.string.maintenance_finish)).performClick()
             val startWidth = compose.onNodeWithTag("maintenance_application_action_start")
                 .fetchSemanticsNode().boundsInRoot.width
             val exportWidth = export.fetchSemanticsNode().boundsInRoot.width
-            assertTrue("exportWidth=$exportWidth startWidth=$startWidth", exportWidth > startWidth * 1.8f)
-            captureScreen("maintenance-seven-application-actions")
+            assertTrue("exportWidth=$exportWidth startWidth=$startWidth", kotlin.math.abs(exportWidth - startWidth) < startWidth * 0.1f)
+            captureScreen("maintenance-eight-application-actions")
 
             export.performClick()
             assertEquals(
@@ -320,6 +333,98 @@ class InstallAppActivitySmokeTest {
                 observedIntent.get(),
             )
             assertEquals(null, session.currentSnapshot().maintenance.applicationAction)
+        } finally {
+            scenario.close()
+            session.close()
+        }
+    }
+
+    @Test
+    fun autostartDialogUsesCompactSwitchAndBottomSavingNotice() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val component = ComponentDescriptor(
+            id = "player",
+            displayName = "测试播放器",
+            required = false,
+        )
+        val application = ManagedApplicationStatus(
+            componentId = component.id,
+            packageName = "com.example.player",
+            installed = true,
+            versionLabel = "1.0",
+            versionCode = 1L,
+            autostartState = com.ninepointnine.helper.domain.device.ApplicationAutostartState.DISABLED,
+        )
+        val session = InstallationSession(
+            initialSnapshot = InstallationSessionSnapshot(
+                state = InstallationSessionState.MAINTENANCE,
+                device = DeviceSummary(
+                    id = "smoke-vehicle",
+                    displayName = "Smoke Vehicle",
+                    connectionStatus = DeviceConnectionStatus.CONFIRMED,
+                ),
+                components = listOf(component),
+                maintenance = MaintenanceSnapshot(
+                    routeAction = MaintenanceActionId.MANAGE_APPS,
+                    managedApplicationsState = MaintenanceInventoryState.READY,
+                    managedApplications = listOf(application),
+                ),
+            ),
+        )
+        val observedIntent = AtomicReference<InstallUiIntent?>()
+        val scenario = ActivityScenario.launch<DebugScenarioActivity>(
+            Intent(context, DebugScenarioActivity::class.java)
+                .putExtra(DebugScenarioActivity.EXTRA_SCENARIO, "maintenance"),
+        )
+        try {
+            scenario.onActivity { activity ->
+                activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                activity.setContent {
+                    InstallApp(
+                        snapshot = session.snapshots.collectAsState().value,
+                        onIntent = { intent ->
+                            observedIntent.set(intent)
+                            intent.toInstallationSessionCommand()?.let(session::dispatch)
+                        },
+                    )
+                }
+            }
+
+            waitForText(component.displayName, 5_000L)
+            clickText(component.displayName)
+            clickText(context.getString(R.string.maintenance_autostart))
+            dialogText("开机后由03桌面代理启动此应用").assertIsDisplayed()
+            val switch = compose.onNodeWithTag("maintenance_autostart_switch", useUnmergedTree = true)
+            switch.assertIsDisplayed()
+            // The initial state is disabled, so the switch is visible and off.
+            switch.assertIsOff()
+            switch.performClick()
+            compose.waitForIdle()
+            switch.assertIsOn()
+
+            assertTrue(observedIntent.get() is InstallUiIntent.MaintenanceApplicationAction)
+            dialogText(context.getString(R.string.maintenance_autostart_saving)).assertIsDisplayed()
+            compose.onAllNodesWithText(
+                context.getString(R.string.maintenance_autostart_saving),
+                useUnmergedTree = true,
+            ).assertCountEquals(1)
+            compose.onNodeWithTag("maintenance_autostart_finish", useUnmergedTree = true)
+                .assertIsNotEnabled()
+
+            session.dispatchEvent(
+                InstallationSessionEvent.MaintenanceApplicationActionCompleted(
+                    packageName = application.packageName,
+                    actionId = MaintenanceApplicationActionId.AUTOSTART,
+                    resultCode = "autostart_status_updated",
+                    autostartState = com.ninepointnine.helper.domain.device.ApplicationAutostartState.ENABLED,
+                    autostartReasonCode = "enabled",
+                ),
+            )
+            compose.waitForIdle()
+            compose.onNodeWithTag("maintenance_autostart_finish", useUnmergedTree = true)
+                .assertIsEnabled()
+            compose.onNodeWithTag("application_action_notice", useUnmergedTree = true).assertIsDisplayed()
+            dialogText(context.getString(R.string.maintenance_finish)).performClick()
         } finally {
             scenario.close()
             session.close()

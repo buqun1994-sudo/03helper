@@ -1,8 +1,5 @@
 package com.ninepointnine.helper.ui.screens
 
-import android.graphics.drawable.ColorDrawable
-import android.view.WindowManager
-
 import androidx.activity.compose.BackHandler
 import androidx.annotation.StringRes
 import androidx.compose.animation.AnimatedContent
@@ -43,11 +40,12 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Checkbox
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
+import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -56,15 +54,12 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
-import androidx.compose.ui.window.DialogProperties
-import androidx.compose.ui.window.DialogWindowProvider
+import androidx.compose.foundation.layout.widthIn
 import kotlinx.coroutines.delay
 import com.ninepointnine.helper.R
 import com.ninepointnine.helper.domain.session.MaintenanceActionId
@@ -79,6 +74,7 @@ import com.ninepointnine.helper.domain.session.MaintenanceInventoryState
 import com.ninepointnine.helper.domain.session.ResultKind
 import com.ninepointnine.helper.domain.session.requiresConnectedDevice
 import com.ninepointnine.helper.domain.session.isApplicationInstallation
+import com.ninepointnine.helper.domain.artifact.KnownApplicationPackages
 import com.ninepointnine.helper.ui.state.ResultFailureStage
 import com.ninepointnine.helper.ui.components.AnimatedEntry
 import com.ninepointnine.helper.ui.components.ComponentLogo
@@ -90,12 +86,14 @@ import com.ninepointnine.helper.ui.components.PressableSurface
 import com.ninepointnine.helper.ui.components.PrimaryActionButton
 import com.ninepointnine.helper.ui.components.StatusIcon
 import com.ninepointnine.helper.ui.components.TaskTopBar
+import com.ninepointnine.helper.ui.components.TopLevelFloatingNotice
 import com.ninepointnine.helper.ui.state.InstallUiIntent
 import com.ninepointnine.helper.ui.state.InstallUiState
 import com.ninepointnine.helper.ui.state.MaintenanceFeedback
 import com.ninepointnine.helper.ui.state.MaintenanceApplicationDetailsRow
 import com.ninepointnine.helper.ui.state.MaintenanceApplicationFeedback
 import com.ninepointnine.helper.ui.state.MaintenanceApplicationRow
+import com.ninepointnine.helper.domain.device.ApplicationAutostartState
 import com.ninepointnine.helper.ui.state.MaintenanceAuthorizationRow
 import com.ninepointnine.helper.ui.state.MaintenanceInstallationOptionRow
 import com.ninepointnine.helper.ui.state.MaintenanceInstallationSelectionUi
@@ -628,6 +626,8 @@ private fun MaintenanceManageAppsPage(
     var expandedId by remember { mutableStateOf<String?>(null) }
     var pendingDestructive by remember { mutableStateOf<Pair<MaintenanceApplicationRow, MaintenanceApplicationActionId>?>(null) }
     var pendingAction by remember { mutableStateOf<Pair<MaintenanceApplicationRow, MaintenanceApplicationActionId>?>(null) }
+    var pendingAutostart by remember { mutableStateOf<MaintenanceApplicationRow?>(null) }
+    var pendingAutostartEnabled by remember { mutableStateOf(false) }
     val applicationActionsEnabled = applicationActionsEnabled(state.applicationAction)
     BackHandler(enabled = true, onBack = onBack)
     Box(modifier = Modifier.fillMaxSize()) {
@@ -671,6 +671,10 @@ private fun MaintenanceManageAppsPage(
                                 when (action) {
                                     MaintenanceApplicationActionId.CLEAR_DATA,
                                     MaintenanceApplicationActionId.UNINSTALL -> pendingDestructive = app to action
+                                    MaintenanceApplicationActionId.AUTOSTART -> {
+                                        pendingAutostart = app
+                                        pendingAutostartEnabled = app.autostartState == ApplicationAutostartState.ENABLED
+                                    }
                                     MaintenanceApplicationActionId.AUTHORIZE -> {
                                         pendingAction = app to action
                                         onIntent(
@@ -723,6 +727,90 @@ private fun MaintenanceManageAppsPage(
             dismissButton = {
                 TextButton(onClick = { pendingDestructive = null }) {
                     Text(stringResource(R.string.maintenance_cancel), color = InstallerColors.White)
+                }
+            },
+        )
+    }
+    pendingAutostart?.let { requestedApp ->
+        val app = state.applications.singleOrNull { it.packageName == requestedApp.packageName } ?: requestedApp
+        val supported = app.autostartState == ApplicationAutostartState.ENABLED ||
+            app.autostartState == ApplicationAutostartState.DISABLED
+        val actionFeedback = state.applicationAction?.takeIf {
+            it.packageName == app.packageName && it.actionId == MaintenanceApplicationActionId.AUTOSTART
+        }
+        val actionRunning = actionFeedback?.status == MaintenanceActionStatus.RUNNING
+        LaunchedEffect(app.autostartState, actionFeedback?.status) {
+            if (!actionRunning) {
+                pendingAutostartEnabled = app.autostartState == ApplicationAutostartState.ENABLED
+            }
+        }
+        AlertDialog(
+            onDismissRequest = { if (!actionRunning) pendingAutostart = null },
+            modifier = Modifier.widthIn(max = 320.dp),
+            containerColor = InstallerColors.PageBlue,
+            titleContentColor = InstallerColors.White,
+            textContentColor = InstallerColors.AuxiliaryWhite,
+            title = { Text(stringResource(R.string.maintenance_autostart_dialog_title)) },
+            text = {
+                if (supported) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                    ) {
+                        Text(
+                            text = stringResource(R.string.maintenance_autostart_dialog_explanation),
+                            color = InstallerColors.White,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Switch(
+                            modifier = Modifier.testTag("maintenance_autostart_switch"),
+                            checked = pendingAutostartEnabled,
+                            enabled = !actionRunning,
+                            onCheckedChange = { checked ->
+                                pendingAutostartEnabled = checked
+                                onIntent(
+                                    InstallUiIntent.MaintenanceApplicationAction(
+                                        app.packageName,
+                                        MaintenanceApplicationActionId.AUTOSTART,
+                                    ),
+                                )
+                            },
+                            colors = SwitchDefaults.colors(
+                                checkedThumbColor = InstallerColors.White,
+                                checkedTrackColor = InstallerColors.StatusGreen,
+                                checkedBorderColor = InstallerColors.StatusGreen,
+                                uncheckedThumbColor = InstallerColors.White,
+                                uncheckedTrackColor = InstallerColors.StatusGray,
+                                uncheckedBorderColor = InstallerColors.WhiteBorder,
+                                disabledCheckedThumbColor = InstallerColors.White.copy(alpha = 0.65f),
+                                disabledCheckedTrackColor = InstallerColors.StatusGreen.copy(alpha = 0.45f),
+                                disabledUncheckedThumbColor = InstallerColors.White.copy(alpha = 0.65f),
+                                disabledUncheckedTrackColor = InstallerColors.StatusGray.copy(alpha = 0.45f),
+                            ),
+                        )
+                    }
+                } else {
+                    Text(
+                        text = if (app.autostartState == ApplicationAutostartState.UNSUPPORTED) {
+                            stringResource(R.string.maintenance_autostart_unsupported)
+                        } else {
+                            stringResource(R.string.maintenance_autostart_desktop_outdated)
+                        },
+                        color = InstallerColors.White,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    modifier = Modifier.testTag("maintenance_autostart_finish"),
+                    enabled = !actionRunning,
+                    onClick = { pendingAutostart = null },
+                ) {
+                    Text(
+                        stringResource(R.string.maintenance_finish),
+                        color = if (actionRunning) InstallerColors.White.copy(alpha = 0.38f) else InstallerColors.White,
+                    )
                 }
             },
         )
@@ -923,6 +1011,7 @@ private fun MaintenanceManageAppsPage(
                 MaintenanceApplicationActionId.FORCE_STOP,
                 MaintenanceApplicationActionId.CLEAR_DATA,
                 MaintenanceApplicationActionId.AUTHORIZE,
+                MaintenanceApplicationActionId.AUTOSTART,
                 MaintenanceApplicationActionId.UNINSTALL,
                 MaintenanceApplicationActionId.EXPORT_DIAGNOSTICS,
             )
@@ -967,8 +1056,8 @@ private fun ManagedApplicationCard(
                 enter = expandVertically(InstallerMotion.stateChange()) + fadeIn(InstallerMotion.stateChange()),
                 exit = shrinkVertically(InstallerMotion.stateChange()) + fadeOut(InstallerMotion.stateChange()),
             ) {
-                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    MANAGED_APPLICATION_ACTIONS.chunked(2).forEach { actions ->
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    managedApplicationActions(app.packageName).chunked(2).forEach { actions ->
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp), modifier = Modifier.fillMaxWidth()) {
                             actions.forEach { actionId ->
                                 IconTextActionButton(
@@ -985,6 +1074,11 @@ private fun ManagedApplicationCard(
                                             .testTag("maintenance_application_action_${actionId.name.lowercase()}")
                                     },
                                     enabled = enabled,
+                                    iconTint = if (actionId == MaintenanceApplicationActionId.AUTOSTART) {
+                                        autostartIconColor(app.autostartState)
+                                    } else {
+                                        InstallerColors.White
+                                    },
                                 )
                             }
                         }
@@ -1002,8 +1096,16 @@ internal val MANAGED_APPLICATION_ACTIONS = listOf(
     MaintenanceApplicationActionId.AUTHORIZE,
     MaintenanceApplicationActionId.UNINSTALL,
     MaintenanceApplicationActionId.DETAILS,
+    MaintenanceApplicationActionId.AUTOSTART,
     MaintenanceApplicationActionId.EXPORT_DIAGNOSTICS,
 )
+
+internal fun managedApplicationActions(packageName: String): List<MaintenanceApplicationActionId> =
+    if (KnownApplicationPackages.isApplicationOwnedAutostart(packageName)) {
+        MANAGED_APPLICATION_ACTIONS.filterNot { it == MaintenanceApplicationActionId.AUTOSTART }
+    } else {
+        MANAGED_APPLICATION_ACTIONS
+    }
 
 internal fun nextExpandedApplicationId(currentId: String?, selectedId: String): String? =
     selectedId.takeUnless { it == currentId }
@@ -1046,6 +1148,7 @@ internal fun authorizationDialogPrimaryAction(
 private fun applicationActionLabel(actionId: MaintenanceApplicationActionId): String = stringResource(
     when (actionId) {
         MaintenanceApplicationActionId.START -> R.string.maintenance_start
+        MaintenanceApplicationActionId.AUTOSTART -> R.string.maintenance_autostart
         MaintenanceApplicationActionId.FORCE_STOP -> R.string.maintenance_force_stop
         MaintenanceApplicationActionId.CLEAR_DATA -> R.string.maintenance_clear_data
         MaintenanceApplicationActionId.AUTHORIZE -> R.string.maintenance_authorize
@@ -1056,8 +1159,9 @@ private fun applicationActionLabel(actionId: MaintenanceApplicationActionId): St
     },
 )
 
-private fun applicationActionIcon(actionId: MaintenanceApplicationActionId): String = when (actionId) {
+internal fun applicationActionIcon(actionId: MaintenanceApplicationActionId): String = when (actionId) {
     MaintenanceApplicationActionId.START -> "play"
+    MaintenanceApplicationActionId.AUTOSTART -> "power"
     MaintenanceApplicationActionId.FORCE_STOP -> "square"
     MaintenanceApplicationActionId.CLEAR_DATA -> "eraser"
     MaintenanceApplicationActionId.AUTHORIZE,
@@ -1065,6 +1169,13 @@ private fun applicationActionIcon(actionId: MaintenanceApplicationActionId): Str
     MaintenanceApplicationActionId.UNINSTALL -> "trash_2"
     MaintenanceApplicationActionId.DETAILS -> "info"
     MaintenanceApplicationActionId.EXPORT_DIAGNOSTICS -> "file_down"
+}
+
+internal fun autostartIconColor(state: ApplicationAutostartState): Color = when (state) {
+    ApplicationAutostartState.ENABLED -> InstallerColors.StatusGreen
+    ApplicationAutostartState.DISABLED -> InstallerColors.StatusRed
+    ApplicationAutostartState.UNSUPPORTED,
+    ApplicationAutostartState.UNAVAILABLE -> InstallerColors.StatusGray
 }
 
 @Composable
@@ -1176,6 +1287,9 @@ private fun ApplicationActionToast(
     val appName = applications.firstOrNull { it.packageName == feedback.packageName }?.displayName ?: feedback.packageName
     val successMessage = successfulApplicationActionMessage(feedback)
     val text = when {
+        feedback.status == MaintenanceActionStatus.RUNNING &&
+            feedback.actionId == MaintenanceApplicationActionId.AUTOSTART ->
+            stringResource(R.string.maintenance_autostart_saving)
         feedback.status == MaintenanceActionStatus.RUNNING -> stringResource(R.string.maintenance_action_running, appName)
         feedback.actionId == MaintenanceApplicationActionId.AUTHORIZE &&
             feedback.status == MaintenanceActionStatus.SUCCEEDED &&
@@ -1194,58 +1308,32 @@ private fun ApplicationActionToast(
                 ?: stringResource(R.string.maintenance_application_action_failed)
         else -> stringResource(R.string.maintenance_application_action_failed)
     }
-    Dialog(
-        onDismissRequest = {},
-        properties = DialogProperties(
-            dismissOnBackPress = false,
-            dismissOnClickOutside = false,
-            usePlatformDefaultWidth = false,
-        ),
-    ) {
-        val window = (LocalView.current.parent as? DialogWindowProvider)?.window
-        SideEffect {
-            window?.apply {
-                setDimAmount(0f)
-                clearFlags(WindowManager.LayoutParams.FLAG_DIM_BEHIND)
-                addFlags(
-                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                        WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
-                )
-                setBackgroundDrawable(ColorDrawable(android.graphics.Color.TRANSPARENT))
-            }
-        }
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(bottom = 56.dp),
-            contentAlignment = Alignment.BottomCenter,
+    TopLevelFloatingNotice {
+        AnimatedVisibility(
+            visible = visible,
+            enter = fadeIn(InstallerMotion.stateChange()) +
+                slideInVertically(
+                    animationSpec = InstallerMotion.stateChange(),
+                    initialOffsetY = { height -> height / 2 },
+                ),
+            exit = fadeOut(InstallerMotion.stateChange()) +
+                slideOutVertically(
+                    animationSpec = InstallerMotion.stateChange(),
+                    targetOffsetY = { height -> height / 2 },
+                ),
         ) {
-            AnimatedVisibility(
-                visible = visible,
-                enter = fadeIn(InstallerMotion.stateChange()) +
-                    slideInVertically(
-                        animationSpec = InstallerMotion.stateChange(),
-                        initialOffsetY = { height -> height / 2 },
-                    ),
-                exit = fadeOut(InstallerMotion.stateChange()) +
-                    slideOutVertically(
-                        animationSpec = InstallerMotion.stateChange(),
-                        targetOffsetY = { height -> height / 2 },
-                    ),
-            ) {
-                Text(
-                    text = text,
-                    color = InstallerColors.White,
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier
-                        .testTag("application_action_notice")
-                        .background(
-                            color = Color(0xE61D232B),
-                            shape = RoundedCornerShape(20.dp),
-                        )
-                        .padding(horizontal = 18.dp, vertical = 10.dp),
-                )
-            }
+            Text(
+                text = text,
+                color = InstallerColors.White,
+                style = MaterialTheme.typography.bodyMedium,
+                modifier = Modifier
+                    .testTag("application_action_notice")
+                    .background(
+                        color = Color(0xE61D232B),
+                        shape = RoundedCornerShape(20.dp),
+                    )
+                    .padding(horizontal = 18.dp, vertical = 10.dp),
+            )
         }
     }
 }
@@ -1255,6 +1343,7 @@ internal fun successfulApplicationActionMessage(feedback: MaintenanceApplication
     if (feedback.status != MaintenanceActionStatus.SUCCEEDED) return null
     return when (feedback.actionId) {
         MaintenanceApplicationActionId.START -> R.string.maintenance_start_success
+        MaintenanceApplicationActionId.AUTOSTART -> R.string.maintenance_autostart_success
         MaintenanceApplicationActionId.FORCE_STOP -> R.string.maintenance_force_stop_success
         MaintenanceApplicationActionId.CLEAR_DATA -> R.string.maintenance_clear_data_success
         MaintenanceApplicationActionId.AUTHORIZE -> if (feedback.resultCode == "authorization_partially_succeeded") {

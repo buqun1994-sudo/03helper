@@ -26,6 +26,9 @@ import com.ninepointnine.helper.domain.device.ApkServiceDeclaration
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationRequirement
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationResult
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationResultValue
+import com.ninepointnine.helper.domain.device.ApplicationAutostartResult
+import com.ninepointnine.helper.domain.device.ApplicationAutostartState
+import com.ninepointnine.helper.domain.device.ApplicationAutostartStatus
 import com.ninepointnine.helper.domain.device.ApplicationDiagnosticReport
 import com.ninepointnine.helper.domain.device.ApplicationDiagnosticsResult
 import com.ninepointnine.helper.domain.device.InstalledArtifactEvidence
@@ -57,6 +60,87 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class MaintenanceControllerTest {
+    @Test
+    fun `autostart action requests enabling from a disabled inventory row and emits readback`() = runBlocking {
+        val packageName = "com.example.player"
+        val gateway = FakeGateway().apply {
+            applicationAutostartResult = ApplicationAutostartResult.Completed(
+                ApplicationAutostartStatus(packageName, ApplicationAutostartState.ENABLED, "enabled"),
+            )
+        }
+        val base = maintenanceSnapshot(emptyList())
+        val snapshot = base.copy(
+            maintenance = base.maintenance.copy(
+                managedApplications = listOf(
+                    ManagedApplicationStatus(
+                        componentId = "app-player",
+                        packageName = packageName,
+                        installed = true,
+                        autostartState = ApplicationAutostartState.DISABLED,
+                    ),
+                ),
+            ),
+        )
+        val events = mutableListOf<InstallationSessionEvent>()
+
+        MaintenanceController(tempCache(), tempDiagnostics()).executeApplicationAction(
+            packageName = packageName,
+            actionId = MaintenanceApplicationActionId.AUTOSTART,
+            snapshot = snapshot,
+            connection = lease(gateway),
+            eventPort = InstallationSessionEventPort(events::add),
+        )
+
+        assertEquals(packageName, gateway.autostartPackage)
+        assertEquals(true, gateway.autostartEnabled)
+        assertEquals(
+            InstallationSessionEvent.MaintenanceApplicationActionCompleted(
+                packageName = packageName,
+                actionId = MaintenanceApplicationActionId.AUTOSTART,
+                resultCode = "autostart_status_updated",
+                autostartState = ApplicationAutostartState.ENABLED,
+                autostartReasonCode = "enabled",
+            ),
+            events.single(),
+        )
+    }
+
+    @Test
+    fun `autostart action requests disabling from an enabled inventory row`() = runBlocking {
+        val packageName = "com.example.player"
+        val gateway = FakeGateway().apply {
+            applicationAutostartResult = ApplicationAutostartResult.Completed(
+                ApplicationAutostartStatus(packageName, ApplicationAutostartState.DISABLED, "disabled"),
+            )
+        }
+        val base = maintenanceSnapshot(emptyList())
+        val snapshot = base.copy(
+            maintenance = base.maintenance.copy(
+                managedApplications = listOf(
+                    ManagedApplicationStatus(
+                        componentId = "app-player",
+                        packageName = packageName,
+                        installed = true,
+                        autostartState = ApplicationAutostartState.ENABLED,
+                    ),
+                ),
+            ),
+        )
+        val events = mutableListOf<InstallationSessionEvent>()
+
+        MaintenanceController(tempCache(), tempDiagnostics()).executeApplicationAction(
+            packageName = packageName,
+            actionId = MaintenanceApplicationActionId.AUTOSTART,
+            snapshot = snapshot,
+            connection = lease(gateway),
+            eventPort = InstallationSessionEventPort(events::add),
+        )
+
+        assertEquals(packageName, gateway.autostartPackage)
+        assertEquals(false, gateway.autostartEnabled)
+        assertEquals(ApplicationAutostartState.DISABLED, (events.single() as InstallationSessionEvent.MaintenanceApplicationActionCompleted).autostartState)
+    }
+
     @Test
     fun `application diagnostics are collected for the live package and written only to the selected uri`() = runBlocking {
         val packageName = "com.example.player"
@@ -873,6 +957,11 @@ class MaintenanceControllerTest {
         )
         var performedApplication: com.ninepointnine.helper.domain.device.ManagedComponent? = null
         var diagnosticApplication: com.ninepointnine.helper.domain.device.ManagedComponent? = null
+        var autostartPackage: String? = null
+        var autostartEnabled: Boolean? = null
+        var applicationAutostartResult: ApplicationAutostartResult = ApplicationAutostartResult.Failed(
+            com.ninepointnine.helper.domain.device.DeviceActionFailure("unused", retryable = false),
+        )
         var applicationDiagnosticsResult: ApplicationDiagnosticsResult = ApplicationDiagnosticsResult.Failed(
             com.ninepointnine.helper.domain.device.DeviceActionFailure("unused", retryable = false),
         )
@@ -948,6 +1037,15 @@ class MaintenanceControllerTest {
             component: com.ninepointnine.helper.domain.device.ManagedComponent,
         ): MaintenanceDeviceResult =
             MaintenanceDeviceResult.Completed("component_launched")
+
+        override suspend fun setApplicationAutostart(
+            packageName: String,
+            enabled: Boolean,
+        ): ApplicationAutostartResult {
+            autostartPackage = packageName
+            autostartEnabled = enabled
+            return applicationAutostartResult
+        }
 
         override suspend fun performApplicationAction(
             component: com.ninepointnine.helper.domain.device.ManagedComponent,

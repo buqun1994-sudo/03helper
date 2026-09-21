@@ -1411,7 +1411,7 @@ class InstallerRuntime(
                     if (completedInventory) {
                         launchMaintenanceIconHydration(
                             controller = controller,
-                            packageNames = current.maintenance.managedApplications.map { it.packageName },
+                            applications = current.maintenance.managedApplications,
                             connection = connection,
                             port = port,
                         )
@@ -1615,15 +1615,15 @@ class InstallerRuntime(
 
     private fun launchMaintenanceIconHydration(
         controller: MaintenanceController,
-        packageNames: List<String>,
+        applications: List<com.ninepointnine.helper.domain.session.ManagedApplicationStatus>,
         connection: DeviceConnectionLease?,
         port: InstallationSessionEventPort,
     ) {
         cancelMaintenanceIconHydration()
-        if (packageNames.isEmpty()) return
+        if (applications.isEmpty()) return
         maintenanceIconJob = scope.launch {
             try {
-                controller.hydrateApplicationIcons(packageNames, connection, port)
+                controller.hydrateApplicationIcons(applications, connection, port)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (exception: Exception) {

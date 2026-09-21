@@ -16,6 +16,8 @@ import com.ninepointnine.helper.domain.device.AdbCommandGateway
 import com.ninepointnine.helper.domain.device.ApkDeclarationMetadata
 import com.ninepointnine.helper.domain.device.ApkServiceDeclaration
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationResult
+import com.ninepointnine.helper.domain.device.ApplicationAutostartResult
+import com.ninepointnine.helper.domain.device.ApplicationAutostartState
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationRequirementKind
 import com.ninepointnine.helper.domain.device.ApplicationDiagnosticSectionId
 import com.ninepointnine.helper.domain.device.ApplicationDiagnosticsResult
@@ -28,6 +30,7 @@ import com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
 import com.ninepointnine.helper.domain.device.AuthorizationValueState
 import com.ninepointnine.helper.domain.device.ConnectedDevice
 import com.ninepointnine.helper.domain.device.ManagedComponent
+import com.ninepointnine.helper.domain.device.ManagedApplicationsResult
 import com.ninepointnine.helper.domain.device.DeviceActionConnectionLease
 import com.ninepointnine.helper.domain.device.DeviceAuthorizationConfirmation
 import com.ninepointnine.helper.domain.device.DeviceCapability
@@ -476,6 +479,128 @@ class DeviceActionsTest {
     }
 
     @Test
+    fun `autostart response parser maps supported states`() {
+        val packageName = "com.example.player"
+
+        val enabled = parseAutostartResponse(
+            AdbShellResponse(
+                "Bundle[{packageName=$packageName, state=enabled, enabled=true, supported=true, reason=$packageName/.MainActivity}]",
+                "",
+                0,
+            ),
+            packageName,
+        )
+        val disabled = parseAutostartResponse(
+            AdbShellResponse(
+                "Bundle[{packageName=$packageName, state=disabled, enabled=false, supported=true, reason=$packageName/.MainActivity}]",
+                "",
+                0,
+            ),
+            packageName,
+        )
+        val unsupported = parseAutostartResponse(
+            AdbShellResponse(
+                "Bundle[{packageName=$packageName, state=unsupported, enabled=false, supported=false, reason=no_launcher_activity}]",
+                "",
+                0,
+            ),
+            packageName,
+        )
+
+        assertEquals(
+            com.ninepointnine.helper.domain.device.ApplicationAutostartState.ENABLED,
+            (enabled as ApplicationAutostartResult.Completed).status.state,
+        )
+        assertEquals(
+            com.ninepointnine.helper.domain.device.ApplicationAutostartState.DISABLED,
+            (disabled as ApplicationAutostartResult.Completed).status.state,
+        )
+        assertEquals(
+            com.ninepointnine.helper.domain.device.ApplicationAutostartState.UNSUPPORTED,
+            (unsupported as ApplicationAutostartResult.Completed).status.state,
+        )
+        assertEquals("no_launcher_activity", (unsupported as ApplicationAutostartResult.Completed).status.reasonCode)
+    }
+
+    @Test
+    fun `autostart response parser rejects unavailable, oversized, and mismatched responses`() {
+        val packageName = "com.example.player"
+        val unavailable = parseAutostartResponse(
+            AdbShellResponse("", "provider unavailable", 1),
+            packageName,
+        )
+        val missingProvider = parseAutostartResponse(
+            AdbShellResponse(
+                "",
+                "Error while accessing provider:com.ninepointnine.desktop.autostart\n" +
+                    "java.lang.IllegalStateException: Could not find provider: com.ninepointnine.desktop.autostart",
+                0,
+            ),
+            packageName,
+        )
+        val mismatch = parseAutostartResponse(
+            AdbShellResponse(
+                "Bundle[{packageName=com.example.other, state=enabled, enabled=true, supported=true}]",
+                "",
+                0,
+            ),
+            packageName,
+        )
+        val malformed = parseAutostartResponse(
+            AdbShellResponse("Bundle[{packageName=$packageName, state=unknown}]", "", 0),
+            packageName,
+        )
+        val oversized = parseAutostartResponse(
+            AdbShellResponse("x".repeat(4097), "", 0),
+            packageName,
+        )
+
+        assertEquals(
+            "maintenance_autostart_unavailable",
+            (unavailable as ApplicationAutostartResult.Failed).failure.reasonCode,
+        )
+        assertEquals(
+            "maintenance_autostart_unavailable",
+            (missingProvider as ApplicationAutostartResult.Failed).failure.reasonCode,
+        )
+        assertEquals(
+            "maintenance_autostart_response_invalid",
+            (mismatch as ApplicationAutostartResult.Failed).failure.reasonCode,
+        )
+        assertEquals(
+            "maintenance_autostart_response_invalid",
+            (malformed as ApplicationAutostartResult.Failed).failure.reasonCode,
+        )
+        assertEquals(
+            "maintenance_autostart_response_invalid",
+            (oversized as ApplicationAutostartResult.Failed).failure.reasonCode,
+        )
+    }
+
+    @Test
+    fun `autostart batch response maps every exact package once`() {
+        val reason = Base64.getUrlEncoder().withoutPadding()
+            .encodeToString("com.example.player/.MainActivity".toByteArray())
+        val payload = listOf(
+            "com.example.player|enabled|$reason",
+            "com.example.other|unsupported|bm9fbGF1bmNoZXI",
+        ).joinToString("\n")
+        val encoded = Base64.getUrlEncoder().withoutPadding()
+            .encodeToString(payload.toByteArray())
+
+        val parsed = parseAutostartBatchResponse(
+            AdbShellResponse("Bundle[{supported=true, batch=$encoded}]", "", 0),
+            setOf("com.example.player", "com.example.other"),
+        )
+
+        assertTrue(parsed is AutostartBatchParseResult.Valid)
+        val statuses = (parsed as AutostartBatchParseResult.Valid).statuses
+        assertEquals(ApplicationAutostartState.ENABLED, statuses["com.example.player"]?.state)
+        assertEquals(ApplicationAutostartState.UNSUPPORTED, statuses["com.example.other"]?.state)
+        assertEquals("no_launcher", statuses["com.example.other"]?.reasonCode)
+    }
+
+    @Test
     fun `staging package identities use the same bounded authorization contract`() {
         val result = AuthorizationPlanFactory.createForComponents(
             listOf(
@@ -766,6 +891,73 @@ class DeviceActionsTest {
             BridgeIconParseResult.Invalid,
             DesktopAppCatalogBridgeParser.parseIcon(icon, "com.example.other"),
         )
+    }
+
+    @Test
+    fun `catalog bridge without autostart bridge is an outdated desktop capability`() {
+        val packageName = "com.example.player"
+        fun encoded(value: String): String = Base64.getUrlEncoder().withoutPadding()
+            .encodeToString(value.toByteArray(Charsets.UTF_8))
+        val catalog = bridgeCatalogOutput(
+            listOf(
+                listOf(
+                    packageName,
+                    encoded("测试播放器"),
+                    encoded("1.0"),
+                    "1",
+                    "100",
+                    "200",
+                    "10001",
+                    "$packageName/$packageName.MainActivity",
+                ),
+            ),
+        )
+        val commands = mutableListOf<String>()
+        val fakeDadb = Proxy.newProxyInstance(
+            Dadb::class.java.classLoader,
+            arrayOf(Dadb::class.java),
+        ) { _, method, args ->
+            when (method.name) {
+                "shell" -> {
+                    val command = args?.firstOrNull()?.toString().orEmpty()
+                    commands += command
+                    when {
+                        command == "content query --uri content://com.ninepointnine.desktop.appcatalog/applications" ->
+                            AdbShellResponse(catalog, "", 0)
+                        command.contains(".autostart") -> AdbShellResponse(
+                            "",
+                            "Error while accessing provider: Could not find provider",
+                            0,
+                        )
+                        else -> throw AssertionError("unexpected shell command: $command")
+                    }
+                }
+                "supportsFeature" -> false
+                "close" -> null
+                else -> null
+            }
+        } as Dadb
+        val gateway = DadbCommandGateway(
+            adb = fakeDadb,
+            closed = AtomicBoolean(false),
+            ioMutex = Mutex(),
+            installedApkCacheDirectory = null,
+            installedApkMetadataReader = null,
+        )
+
+        val inventory = runBlocking { gateway.inspectAllInstalledApplications() }
+        val setResult = runBlocking { gateway.setApplicationAutostart(packageName, enabled = true) }
+
+        assertTrue(inventory is ManagedApplicationsResult.Completed)
+        val application = (inventory as ManagedApplicationsResult.Completed).applications.single()
+        assertEquals(ApplicationAutostartState.UNAVAILABLE, application.autostartState)
+        assertEquals("maintenance_autostart_desktop_outdated", application.autostartReasonCode)
+        assertTrue(setResult is ApplicationAutostartResult.Failed)
+        assertEquals(
+            "maintenance_autostart_desktop_outdated",
+            (setResult as ApplicationAutostartResult.Failed).failure.reasonCode,
+        )
+        assertEquals(4, commands.count { it.contains(".autostart") })
     }
 
     @Test

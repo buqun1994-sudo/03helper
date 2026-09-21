@@ -73,6 +73,8 @@ object KnownApplicationPackages {
     const val CURRENT_CAST_PACKAGE_NAME = "com.ninepointnine.desktopcast"
     const val CURRENT_DESKTOP_TEST_PACKAGE_NAME = "com.ninepointnine.desktop.test"
     const val CURRENT_LYRICS_TEST_PACKAGE_NAME = "com.ninepointnine.desktoplyrics.test"
+    const val LEGACY_DESKTOP_TEST_PACKAGE_NAME = "com.tcrrry.desktop.test"
+    const val LEGACY_LYRICS_TEST_PACKAGE_NAME = "com.tcrrry.desktoplyrics.test"
     const val CURRENT_CAST_TEST_PACKAGE_NAME = "com.ninepointnine.desktopcast.test"
     const val FILE_MANAGER_PACKAGE_NAME = "org.fossify.filemanager.debug"
 
@@ -80,8 +82,18 @@ object KnownApplicationPackages {
 
     /** Package aliases used to identify existing device capabilities across application variants. */
     fun aliasesFor(componentId: String): Set<String> = when (componentId) {
-        DESKTOP_COMPONENT_ID -> setOf(DESKTOP_PACKAGE_NAME, CURRENT_DESKTOP_PACKAGE_NAME, CURRENT_DESKTOP_TEST_PACKAGE_NAME)
-        LYRICS_COMPONENT_ID -> setOf(LYRICS_PACKAGE_NAME, CURRENT_LYRICS_PACKAGE_NAME, CURRENT_LYRICS_TEST_PACKAGE_NAME)
+        DESKTOP_COMPONENT_ID -> setOf(
+            DESKTOP_PACKAGE_NAME,
+            LEGACY_DESKTOP_TEST_PACKAGE_NAME,
+            CURRENT_DESKTOP_PACKAGE_NAME,
+            CURRENT_DESKTOP_TEST_PACKAGE_NAME,
+        )
+        LYRICS_COMPONENT_ID -> setOf(
+            LYRICS_PACKAGE_NAME,
+            LEGACY_LYRICS_TEST_PACKAGE_NAME,
+            CURRENT_LYRICS_PACKAGE_NAME,
+            CURRENT_LYRICS_TEST_PACKAGE_NAME,
+        )
         CAST_COMPONENT_ID -> setOf(CAST_PACKAGE_NAME, "com.tcrrry.desktopcast", CURRENT_CAST_TEST_PACKAGE_NAME)
         FILE_MANAGER_COMPONENT_ID -> setOf(FILE_MANAGER_PACKAGE_NAME)
         else -> emptySet()
@@ -89,5 +101,9 @@ object KnownApplicationPackages {
 
     fun matchesComponent(componentId: String, packageName: String): Boolean =
         packageName in aliasesFor(componentId)
+
+    /** 03桌面 and 03歌词 own their boot lifecycle; the desktop proxy must not relaunch them. */
+    fun isApplicationOwnedAutostart(packageName: String): Boolean =
+        packageName in aliasesFor(DESKTOP_COMPONENT_ID) + aliasesFor(LYRICS_COMPONENT_ID)
 
 }

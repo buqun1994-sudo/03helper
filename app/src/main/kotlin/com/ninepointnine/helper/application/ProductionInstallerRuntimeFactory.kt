@@ -13,6 +13,7 @@ import com.ninepointnine.helper.application.device.DeviceInstallationCoordinator
 import com.ninepointnine.helper.application.session.InstallationSessionBoundary
 import com.ninepointnine.helper.application.maintenance.MaintenanceController
 import com.ninepointnine.helper.application.maintenance.MaintenanceDiagnosticStore
+import com.ninepointnine.helper.application.maintenance.ManagedApplicationIconCache
 import com.ninepointnine.helper.application.maintenance.MaintenanceSessionStore
 import com.ninepointnine.helper.data.artifact.AndroidApkMetadataReader
 import com.ninepointnine.helper.data.artifact.AndroidApplicationDiagnosticExporter
@@ -109,6 +110,9 @@ object ProductionInstallerRuntimeFactory {
             artifactCache = artifactCache,
             diagnosticStore = MaintenanceDiagnosticStore(
                 File(applicationContext.cacheDir, DIAGNOSTIC_CACHE_DIRECTORY),
+            ),
+            managedApplicationIconCache = ManagedApplicationIconCache(
+                File(applicationContext.filesDir, MANAGED_APPLICATION_ICON_CACHE_DIRECTORY),
             ),
             applicationDiagnosticExporter = AndroidApplicationDiagnosticExporter(
                 applicationContext.contentResolver,
@@ -243,6 +247,7 @@ object ProductionInstallerRuntimeFactory {
     private const val ARTIFACT_CACHE_DIRECTORY = "install-artifacts"
     private const val INSTALLED_APK_VERIFICATION_DIRECTORY = "install-artifacts/installed-verification"
     private const val DIAGNOSTIC_CACHE_DIRECTORY = "maintenance-diagnostics"
+    private const val MANAGED_APPLICATION_ICON_CACHE_DIRECTORY = "managed-application-icons"
     private const val MAINTENANCE_SESSION_FILE = "maintenance-session.json"
     private const val CATALOG_REVISION_FILE = "android-catalog-revisions.properties"
     private const val LOCAL_APK_WORKSPACE_DIRECTORY = "install-artifacts/user-selected-apk"

@@ -107,6 +107,8 @@ object InstallUiStateMapper {
                     iconKey = application.componentId,
                     iconBase64 = application.iconBase64,
                     launchComponent = application.launchComponent,
+                    autostartState = application.autostartState,
+                    autostartReasonCode = application.autostartReasonCode,
                 )
             },
             applicationsState = snapshot.maintenance.managedApplicationsState,
@@ -531,6 +533,15 @@ private fun String.toUserMessage(componentName: String? = null): String {
             reason == "discovery_finished_out_of_order" ->
             "车机搜索结果无效：重新查找车机"
 
+        reason == "maintenance_app_catalog_bridge_unavailable" ->
+            "此功能依赖03桌面：请先在车机上安装03桌面"
+        reason == "maintenance_autostart_unavailable" ||
+            reason == "maintenance_autostart_desktop_outdated" ||
+            reason == "maintenance_autostart_response_invalid" ->
+            "03桌面版本过低，请升级到最新版本。"
+        reason == "maintenance_autostart_application_owned" ->
+            "此应用由自身负责开机启动，无需由03桌面代理启动。"
+
         reason.startsWith("initial_inventory") -> when (reason) {
             "initial_inventory_connection_unavailable" -> "车机连接已断开：重新连接车机"
             "initial_inventory_result_invalid" -> "车机应用列表格式错误：重新连接车机"
@@ -836,8 +847,6 @@ private fun String.toUserMessage(componentName: String? = null): String {
             "车机应用详情读取失败：重新连接车机"
         reason == "maintenance_package_check_failed" ->
             "车机应用状态读取失败：重新连接车机"
-        reason == "maintenance_app_catalog_bridge_unavailable" ->
-            "03桌面版本过旧，更新后即可读取完整应用列表"
         reason == "maintenance_inventory_refresh_failed" || reason == "maintenance_package_inventory_failed" ||
             reason == "maintenance_applications_invalid" ->
             "车机应用列表读取失败：重新连接车机"
