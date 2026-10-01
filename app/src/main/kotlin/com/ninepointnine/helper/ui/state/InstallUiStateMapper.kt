@@ -812,6 +812,13 @@ private fun String.toUserMessage(componentName: String? = null): String {
             "上次连接的车机已不可达：重新查找车机"
         reason == "device_connection_failed" || reason == "adb_connect_failed" ->
             "车机连接失败：确认车机已开启 ADB 后重试"
+        reason == "wireless_adb_enable_failed" || reason == "wireless_adb_control_unavailable" ->
+            "车机无线 ADB 未开启：请保持 USB 连接并确认车机允许 ADB 后重试"
+        reason == "wireless_adb_not_found_after_usb_enable" || reason == "wireless_adb_search_timeout" ->
+            "未找到车机无线 ADB：确认手机与车机在同一网络后重试"
+        reason == "usb_permission_required" || reason == "usb_permission_denied" ||
+            reason == "usb_permission_timeout" ->
+            "需要允许 USB 调试连接：在系统弹窗中确认后重试"
         reason == "adb_identity_serial_missing" || reason == "adb_identity_model_missing" ||
             reason == "adb_identity_sdk_invalid" || reason == "adb_identity_invalid" ||
             reason == "adb_identity_read_failed" ->

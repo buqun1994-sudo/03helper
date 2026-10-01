@@ -187,6 +187,10 @@ class InstallerRuntime(
     private val selfUpdateInstaller: SelfUpdateInstaller? = null,
     /** Optional one-operation source for an APK selected through Android's document picker. */
     private val userSelectedApkPreparer: UserSelectedApkPreparer? = null,
+    /** Production enables hands-free connection when discovery yields one candidate. */
+    private val autoConnectSingleDevice: Boolean = false,
+    /** Releases process-scoped Android resources created by the composition root. */
+    private val closeResources: () -> Unit = {},
 ) : AutoCloseable {
     private val runtimeJob = SupervisorJob(coroutineContext[Job])
     private val scope = CoroutineScope(coroutineContext + runtimeJob)
@@ -586,6 +590,7 @@ class InstallerRuntime(
         if (closed) return
         closed = true
         cancelAllWork(closeConnection = true)
+        runCatching { closeResources() }
         scope.cancel()
         session.close()
     }
@@ -884,6 +889,7 @@ class InstallerRuntime(
             try {
                 adapter.discover()
                 autoSelectReconnectTarget(snapshot.sessionId)
+                if (autoConnectSingleDevice) autoSelectSingleDiscoveredTarget(snapshot.sessionId)
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (_: Exception) {
@@ -959,6 +965,23 @@ class InstallerRuntime(
             }
         ) {
             dispatch(InstallationSessionCommand.SelectDevice(targetId))
+        }
+    }
+
+    @Synchronized
+    private fun autoSelectSingleDiscoveredTarget(expectedSessionId: Long) {
+        val current = session.currentSnapshot()
+        if (
+            current.sessionId != expectedSessionId ||
+            current.state != InstallationSessionState.DISCOVERING ||
+            current.installationReconnectPending ||
+            current.maintenanceReconnectPending
+        ) return
+        val candidates = current.discoveredDevices.filter {
+            it.connectionStatus == DeviceConnectionStatus.CONFIRMED
+        }
+        if (candidates.size == 1) {
+            dispatch(InstallationSessionCommand.SelectDevice(candidates.single().id))
         }
     }
 

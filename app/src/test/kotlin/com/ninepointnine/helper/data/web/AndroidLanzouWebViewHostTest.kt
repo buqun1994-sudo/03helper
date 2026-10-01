@@ -27,4 +27,10 @@ class AndroidLanzouWebViewHostTest {
             ),
         )
     }
+
+    @Test
+    fun `download probe includes current mobile share first hop`() {
+        assertTrue(LANZOU_DOWNLOAD_PAGE_CANDIDATE_SELECTOR.contains("#ddown"))
+        assertTrue(LANZOU_DOWNLOAD_PAGE_CANDIDATE_SELECTOR.contains("#submit"))
+    }
 }

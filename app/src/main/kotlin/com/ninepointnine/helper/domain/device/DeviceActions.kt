@@ -21,6 +21,12 @@ interface DeviceActionConnectionLease : DeviceConnectionLease {
 }
 
 interface AdbCommandGateway {
+    /** Enables the target's temporary wireless ADB listener from an authorized USB lease. */
+    suspend fun enableWirelessAdb(port: Int = DeviceEndpoint.DEFAULT_ADB_PORT): WirelessAdbEnableResult =
+        WirelessAdbEnableResult.Failed(
+            DeviceActionFailure("wireless_adb_control_unavailable", retryable = false),
+        )
+
     /** Installs exactly one verified business batch with its frozen intent. */
     suspend fun installBatch(
         artifacts: List<InstallableArtifact>,
@@ -67,6 +73,15 @@ interface AdbCommandGateway {
         authorizationPlan: AuthorizationPlan,
         onProgress: (DeviceShortcutProgress) -> Unit,
     ): DeviceShortcutResult = runShortcut(shortcut, selectedComponentIds, authorizationPlan)
+}
+
+sealed interface WirelessAdbEnableResult {
+    data class Enabled(val port: Int) : WirelessAdbEnableResult
+
+    /** The fixed restart command was sent, but adbd closed the transport before a reply. */
+    data class RestartRequested(val port: Int) : WirelessAdbEnableResult
+
+    data class Failed(val failure: DeviceActionFailure) : WirelessAdbEnableResult
 }
 
 /** Fixed, non-shell maintenance operations available after a confirmed lease. */

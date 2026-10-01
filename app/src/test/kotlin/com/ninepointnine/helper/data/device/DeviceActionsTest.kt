@@ -45,6 +45,7 @@ import com.ninepointnine.helper.domain.device.DeviceShortcutFailureStage
 import com.ninepointnine.helper.domain.device.DeviceShortcutResult
 import com.ninepointnine.helper.domain.device.DeclaredApplicationAuthorizationPlanFactory
 import com.ninepointnine.helper.domain.device.InstalledArtifactEvidence
+import com.ninepointnine.helper.domain.device.WirelessAdbEnableResult
 import com.ninepointnine.helper.domain.session.InstallationSessionEvent
 import com.ninepointnine.helper.domain.session.InstallationBatchPlan
 import com.ninepointnine.helper.domain.session.AuthorizationStageReceiptStatus
@@ -70,6 +71,74 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class DeviceActionsTest {
+    @Test
+    fun `wireless adb control sends only the fixed listener restart command`() {
+        val commands = mutableListOf<String>()
+        val fakeDadb = Proxy.newProxyInstance(
+            Dadb::class.java.classLoader,
+            arrayOf(Dadb::class.java),
+        ) { _, method, args ->
+            when (method.name) {
+                "shell" -> {
+                    commands += args?.firstOrNull()?.toString().orEmpty()
+                    AdbShellResponse("", "", 0)
+                }
+                "supportsFeature" -> false
+                "close" -> null
+                else -> null
+            }
+        } as Dadb
+        val gateway = DadbCommandGateway(
+            adb = fakeDadb,
+            closed = AtomicBoolean(false),
+            ioMutex = Mutex(),
+            installedApkCacheDirectory = null,
+            installedApkMetadataReader = null,
+            allowWirelessAdb = true,
+        )
+
+        val result = runBlocking { gateway.enableWirelessAdb() }
+
+        assertEquals(
+            WirelessAdbEnableResult.Enabled(DeviceEndpoint.DEFAULT_ADB_PORT),
+            result,
+        )
+        assertEquals(
+            listOf("setprop service.adb.tcp.port 5555; stop adbd; start adbd"),
+            commands,
+        )
+    }
+
+    @Test
+    fun `wireless adb control treats a transport drop during adbd restart as requested`() {
+        val fakeDadb = Proxy.newProxyInstance(
+            Dadb::class.java.classLoader,
+            arrayOf(Dadb::class.java),
+        ) { _, method, _ ->
+            when (method.name) {
+                "shell" -> throw java.io.IOException("adbd_restarted")
+                "supportsFeature" -> false
+                "close" -> null
+                else -> null
+            }
+        } as Dadb
+        val gateway = DadbCommandGateway(
+            adb = fakeDadb,
+            closed = AtomicBoolean(false),
+            ioMutex = Mutex(),
+            installedApkCacheDirectory = null,
+            installedApkMetadataReader = null,
+            allowWirelessAdb = true,
+        )
+
+        val result = runBlocking { gateway.enableWirelessAdb() }
+
+        assertEquals(
+            WirelessAdbEnableResult.RestartRequested(DeviceEndpoint.DEFAULT_ADB_PORT),
+            result,
+        )
+    }
+
     @Test
     fun `application diagnostics use only the fixed read only command set`() {
         val packageName = "com.example.player"

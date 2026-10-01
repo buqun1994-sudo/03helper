@@ -1,3 +1,26 @@
+# 2026-10-01 03helper 1.0.21 正式 Release 打包
+
+1. `release-version.properties` 已递增为 `1.0.21` / `versionCode 22`；正式 APK 身份为 `com.ninepointnine.helper`，大小 `14,497,692` 字节，SHA-256 为 `23f75f707c40f705d4b62bf77d646ab95e3bf08dfd257dcfa941fe1f79a92821`，production 证书摘要为 `31ca80dd21a5208eaabd5f3e1440a3db2f7dc79122e03eaa6ba01730fb31f18b`，APK Signature Scheme v2 通过。
+2. 正式单 APK ZIP 已生成，entry 为 `03车机助手-v1.0.21.apk`，ZIP 大小 `13,682,343` 字节，SHA-256 为 `6fb9f6858db4dda41d427b3e8077924b5422985fee73bc4932ab7aa3a75ee79d`；外部正式发布目录的 `android-app-releases.json` 已仅更新 `03helper` 条目，保留 production V5 根目录和其它 APP 条目。
+3. Cloud 03helper 身份索引按本次用户范围未写入、未提交、未推送；Cloud 登记仍保留旧的 `1.0.18` 当前候选记录，正式包与 V5 JSON 仅完成外部发布目录更新，Cloud 登记同步需另行授权。
+4. 蓝奏当前分享页首跳修复、回归测试和本机验证继续沿用下方记录；真实 Android WebView / 车机主测不在本机发布前置内，设备状态另行记录。
+
+# 2026-10-01 蓝奏云公网链路复测与首跳修复（代码完成，待 Android WebView 主测）
+
+1. staging 与 production V5 配置接口均返回 HTTP 200，原始 envelope 使用客户端固定的 `SHA256withECDSA` 信任根验签通过；当前 staging revision 为 `14`、根目录为 `https://wwatl.lanzouw.com/b0fqm09oh`，production revision 为 `34`、根目录为 `https://wwatl.lanzouw.com/b0fqmrhzi`。两套配置的启用 ZIP 名称均能从蓝奏目录异步枚举到，分别为 7 / 5 个；对应 ZIP 分享页均返回 HTTP 200。
+2. 使用 Android 9 WebView User-Agent 的隔离 Chrome 154 协议探针执行蓝奏页面自身 JavaScript：production 与 staging 均完成分享页 `#ddown` → `/tp/<id>?webtp=...` → 中间页 `#submit` → `zip2.webgetstore.com` 的最终下载事件。production ZIP `1,819,177` 字节、staging ZIP `20,351,173` 字节均通过 `unzip -t`；该证据证明当前公网源可下载，不等同于 Android 助手真实 WebView 已通过。
+3. `AndroidLanzouWebViewHost` 已在唯一下载入口选择器 owner 中加入当前移动分享页的 `#ddown`，保留后续 `#submit`、验证页和最终 CDN 解析路径；新增 `AndroidLanzouWebViewHostTest` 首跳回归断言，防止当前页面结构再次遗漏。
+4. 首跳修复后的完整 `:app:testDebugUnitTest`、蓝奏定向单测、`check-project-docs.mjs`、`check-skills.mjs` 和 `git diff --check` 均通过。最新 Debug APK 核对为 `com.ninepointnine.helper.test` / `1.0.20-test (21)`，文件 `app/build/outputs/apk/debug/app-debug.apk`，大小 `21,483,606` 字节，SHA-256 为 `f690c44208e2482d76b307f20693d19499adda8fe18daa3ca6129b7894d767c6`，单一 Debug 证书摘要为 `2990047fddf6d6ec1eb7f83731fcc1398616e5fb83aec97542a4f132c35a1a27`，APK Signature Scheme v2 通过。显式测试手机当前不在线，未执行覆盖安装和真实 Android System WebView 主测；03 APP 登记检查仍因登记版本 / HEAD / dirty 状态与当前工作树不一致而 fail closed。
+
+# 2026-09-21 无线优先与 USB ADB fallback 自动连接收口（本地验证完成，待车机主测）
+
+1. 自动连接继续以 `InstallationSession` 为唯一状态 owner：先执行有界局域网无线 ADB 发现；只有无线没有确认候选时，才进入具备 ADB interface 的 USB ADB fallback。USB 发现通过系统级 USB 授权弹窗取得权限并完成有限身份握手，不把电脑端 ADB 助手的连接列表当作手机端连接证据。
+2. USB 握手成功后只允许发送固定 `setprop service.adb.tcp.port 5555; stop adbd; start adbd` 动作，并在最多 `10_000ms` 内异步搜索无线端点。无线端点必须与 USB 端点拥有相同 `stableId` 且完成真实 ADB 握手；成功前保持 USB 租约，成功后才切换为无线连接，失败则重新打开 USB 或发布结构化失败。泛 OTG 未扩展进正式主链。
+3. 指定 JDK 17 强制重跑 `:app:testDebugUnitTest --rerun-tasks` 及 Debug Kotlin / AndroidTest Kotlin 编译、Lint、主包和 AndroidTest 构建全部通过；JVM 单测 `428/428`（0 failures / 0 errors / 0 skipped）。`check-project-docs.mjs`、`check-skills.mjs` 和 `git diff --check` 均通过。
+4. 最新 Debug 主包核对为 `com.ninepointnine.helper.test`、`1.0.20-test (21)`、Launcher `com.ninepointnine.helper.MainActivity`，主包 SHA-256 为 `361f05ce3d8442e315372593f8599ec3e77a40b173cad6b2ee4d37b42be48942`；AndroidTest 包 SHA-256 为 `477424dafb2a29203f8b3ef3e54df5582a27968ed92b93ff568d562415644cdf`。两个 APK 均为单一 signer，APK Signature Scheme v2 验证通过。
+5. 设备验证客观阻断：按唯一车机入口 `node scripts/find-vehicle-adb.mjs --serial-only` 扫描 `253` 个地址未发现 `S56_HQX / SDK 28`；显式测试手机 `adb-RFCX412AN1X-gWfMRD._adb-tls-connect._tcp` 与车机 `192.168.0.203:5555` 均不在线。本轮未覆盖安装、未运行 instrumentation smoke、未断开 / 重连 / 写入车机，也未把 JVM fixture 结果写成真实 USB / 无线切换通过。
+6. 车机上线后的最小人工范围：先验证无线候选优先且不弹 USB 授权；再用 6155 车机走有线 ADB fallback，点击系统 USB 授权“确定”，确认固定 `5555` 开启动作、同 `stableId` 无线真实握手、无线成功前 USB 不关闭以及失败回退边界。工作树保留用户已有 `.codex/config.toml` 改动；本轮不提交、不推送、不发布。
+
 # 2026-09-21 自启动代理名单、紧凑弹窗与最高层浮窗收口（可交用户主测）
 
 1. 管理库存仍采用一次应用清单加一次批量自启动状态桥接；助手按钮文案改为“开机启动”，按钮完全复用普通 icon + 文案布局，不再增加右侧状态点或额外占位；状态只通过 Lucide `power` 图标颜色表达，鲜明绿 `#34C759`、红 `#E53935`、灰 `#9E9E9E`。图标缓存仍按包名、版本代码和更新时间复用，库存刷新只清理已不存在包。

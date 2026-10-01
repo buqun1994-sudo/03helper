@@ -15,6 +15,7 @@ import com.ninepointnine.helper.domain.device.AuthorizationCapacityPolicy
 import com.ninepointnine.helper.domain.device.ManagedSecureComponentList
 import com.ninepointnine.helper.domain.device.AuthorizationValueState
 import com.ninepointnine.helper.domain.device.DeviceActionFailure
+import com.ninepointnine.helper.domain.device.DeviceEndpoint
 import com.ninepointnine.helper.domain.device.DeviceAuthorizationConfirmation
 import com.ninepointnine.helper.domain.device.DeviceShortcut
 import com.ninepointnine.helper.domain.device.DeviceShortcutFailureStage
@@ -46,6 +47,7 @@ import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationResult
 import com.ninepointnine.helper.domain.device.MaintenanceAuthorizationState
 import com.ninepointnine.helper.domain.device.MaintenanceCommandGateway
 import com.ninepointnine.helper.domain.device.MaintenanceDeviceResult
+import com.ninepointnine.helper.domain.device.WirelessAdbEnableResult
 import com.ninepointnine.helper.domain.device.ApplicationAutostartResult
 import com.ninepointnine.helper.domain.device.ApplicationAutostartState
 import com.ninepointnine.helper.domain.device.ApplicationAutostartStatus
@@ -85,6 +87,7 @@ internal class DadbCommandGateway(
     private val ioMutex: Mutex,
     private val installedApkCacheDirectory: File?,
     private val installedApkMetadataReader: ApkMetadataReader?,
+    private val allowWirelessAdb: Boolean = false,
 ) : AdbCommandGateway, MaintenanceCommandGateway {
     /** Cached per lease so older Android package-manager builds are probed once. */
     private var versionedPackageInventorySupported: Boolean? = null
@@ -93,6 +96,34 @@ internal class DadbCommandGateway(
     private var targetDangerousPermissionsResolved: Boolean = false
     /** Raw Manifest declarations keyed by the exact installed base.apk path. */
     private val installedManifestDeclarations = linkedMapOf<String, CachedInstalledManifestDeclarations>()
+
+    override suspend fun enableWirelessAdb(port: Int): WirelessAdbEnableResult = withLease(
+        whenClosed = WirelessAdbEnableResult.Failed(
+            DeviceActionFailure("adb_connection_closed", retryable = true),
+        ),
+    ) {
+        if (!allowWirelessAdb) {
+            return@withLease WirelessAdbEnableResult.Failed(
+                DeviceActionFailure("wireless_adb_control_unavailable", retryable = false),
+            )
+        }
+        if (port != DeviceEndpoint.DEFAULT_ADB_PORT) {
+            return@withLease WirelessAdbEnableResult.Failed(
+                DeviceActionFailure("wireless_adb_port_not_allowed", retryable = false),
+            )
+        }
+        val response = shell(ENABLE_WIRELESS_ADB_COMMAND)
+        when {
+            isSuccessful(response) -> WirelessAdbEnableResult.Enabled(port)
+            // Restarting adbd can close the shell before DADB receives its
+            // exit packet. The command is fixed and already dispatched; treat
+            // the missing reply as an unknown result and continue discovery.
+            response == null -> WirelessAdbEnableResult.RestartRequested(port)
+            else -> WirelessAdbEnableResult.Failed(
+                DeviceActionFailure("wireless_adb_enable_failed", retryable = true),
+            )
+        }
+    }
 
     override suspend fun installBatch(
         artifacts: List<InstallableArtifact>,
@@ -2517,6 +2548,8 @@ internal class DadbCommandGateway(
 
     private companion object {
         const val TAG = "03helper-device"
+        const val ENABLE_WIRELESS_ADB_COMMAND =
+            "setprop service.adb.tcp.port 5555; stop adbd; start adbd"
         const val REMOTE_FILE_MODE = 420
         const val PROGRESS_REPORT_INTERVAL_BYTES = 256L * 1024L
         const val MAX_DIAGNOSTIC_SECTION_BYTES = 512 * 1024

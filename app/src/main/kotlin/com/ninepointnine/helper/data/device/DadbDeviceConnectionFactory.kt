@@ -11,6 +11,7 @@ import com.ninepointnine.helper.domain.device.DeviceConnectionLease
 import com.ninepointnine.helper.domain.device.DeviceActionConnectionLease
 import com.ninepointnine.helper.domain.device.DeviceEndpoint
 import com.ninepointnine.helper.domain.device.DeviceIdentity
+import com.ninepointnine.helper.domain.device.DeviceTransportKind
 import java.io.IOException
 import java.io.File
 import java.util.concurrent.atomic.AtomicBoolean
@@ -20,7 +21,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
-/** Opens and owns one real TCP ADB transport after the user selects a device. */
+/** Opens and owns one real ADB transport after a device endpoint is selected. */
 class DadbDeviceConnectionFactory(
     private val connectTimeoutMillis: Int = DEFAULT_CONNECT_TIMEOUT_MILLIS,
     private val readTimeoutMillis: Int = DEFAULT_READ_TIMEOUT_MILLIS,
@@ -30,6 +31,7 @@ class DadbDeviceConnectionFactory(
     override suspend fun open(endpoint: DeviceEndpoint): DeviceConnectionAttempt = withContext(Dispatchers.IO) {
         var adb: Dadb? = null
         try {
+            require(endpoint.transport == DeviceTransportKind.TCP) { "tcp_factory_received_non_tcp_endpoint" }
             adb = Dadb.create(
                 endpoint.host,
                 endpoint.port,
@@ -37,23 +39,51 @@ class DadbDeviceConnectionFactory(
                 connectTimeoutMillis,
                 readTimeoutMillis,
             )
+            val attempt = openDadb(endpoint, adb, allowWirelessAdb = false)
+            if (attempt is DeviceConnectionAttempt.Connected) adb = null
+            attempt
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: IOException) {
+            DeviceConnectionAttempt.Failed("adb_connect_failed")
+        } catch (_: Exception) {
+            DeviceConnectionAttempt.Failed("adb_identity_read_failed")
+        } finally {
+            adb?.close()
+        }
+    }
+
+    /** Reuses the same identity handshake and lease owner for non-TCP transports. */
+    internal suspend fun openDadb(
+        endpoint: DeviceEndpoint,
+        adb: Dadb,
+        allowWirelessAdb: Boolean,
+    ): DeviceConnectionAttempt = withContext(Dispatchers.IO) {
+        try {
             when (val identity = readIdentity(adb)) {
                 is IdentityReadResult.Success -> {
-                    val lease = DadbDeviceConnection(
-                        adb = adb,
-                        device = ConnectedDevice(
-                            endpoint = endpoint,
-                            identity = identity.value,
-                            capabilities = setOf(
-                                DeviceCapability.ADB_TCP,
-                                DeviceCapability.IDENTITY_READ,
+                    val capabilities = buildSet {
+                        add(DeviceCapability.IDENTITY_READ)
+                        if (endpoint.transport == DeviceTransportKind.USB) {
+                            add(DeviceCapability.ADB_USB)
+                        } else {
+                            add(DeviceCapability.ADB_TCP)
+                        }
+                        if (allowWirelessAdb) add(DeviceCapability.WIRELESS_ADB_CONTROL)
+                    }
+                    DeviceConnectionAttempt.Connected(
+                        DadbDeviceConnection(
+                            adb = adb,
+                            device = ConnectedDevice(
+                                endpoint = endpoint,
+                                identity = identity.value,
+                                capabilities = capabilities,
                             ),
+                            installedApkCacheDirectory = installedApkCacheDirectory,
+                            installedApkMetadataReader = installedApkMetadataReader,
+                            allowWirelessAdb = allowWirelessAdb,
                         ),
-                        installedApkCacheDirectory = installedApkCacheDirectory,
-                        installedApkMetadataReader = installedApkMetadataReader,
                     )
-                    adb = null
-                    DeviceConnectionAttempt.Connected(lease)
                 }
 
                 is IdentityReadResult.Failure -> DeviceConnectionAttempt.Failed(
@@ -67,8 +97,6 @@ class DadbDeviceConnectionFactory(
             DeviceConnectionAttempt.Failed("adb_connect_failed")
         } catch (_: Exception) {
             DeviceConnectionAttempt.Failed("adb_identity_read_failed")
-        } finally {
-            adb?.close()
         }
     }
 
@@ -77,6 +105,7 @@ class DadbDeviceConnectionFactory(
         override val device: ConnectedDevice,
         installedApkCacheDirectory: File?,
         installedApkMetadataReader: ApkMetadataReader?,
+        allowWirelessAdb: Boolean,
     ) : DeviceActionConnectionLease {
         private val closed = AtomicBoolean(false)
         private val ioMutex = Mutex()
@@ -86,6 +115,7 @@ class DadbDeviceConnectionFactory(
             ioMutex = ioMutex,
             installedApkCacheDirectory = installedApkCacheDirectory,
             installedApkMetadataReader = installedApkMetadataReader,
+            allowWirelessAdb = allowWirelessAdb,
         )
 
         override suspend fun check(): DeviceConnectionCheck = withContext(Dispatchers.IO) {

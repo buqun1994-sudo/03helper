@@ -49,6 +49,10 @@ class LanzouWebViewMountRegistry {
         ?.takeIf { it.isAttachedToWindow }
 }
 
+/** Current Lanzou mobile pages expose the first download hop as #ddown. */
+internal const val LANZOU_DOWNLOAD_PAGE_CANDIDATE_SELECTOR =
+    "#tourl a[href],#go a[href],#sub a[href],#sub2 a[href],#ok a[href],a.tc2,#ddown,#downurl,#submit"
+
 /** Activity-attached, non-interactive WebView with no JavaScript bridge. */
 @Suppress("ClickableViewAccessibility")
 class AndroidLanzouWebViewHost(
@@ -337,7 +341,7 @@ class AndroidLanzouWebViewHost(
                 // Lanzou currently renders the final link in a same-origin
                 // iframe. Read it directly instead of relying on target=_blank
                 // navigation or a bubbling click from a hidden view.
-                var candidates=[].slice.call(doc.querySelectorAll('#tourl a[href],#go a[href],#sub a[href],#sub2 a[href],#ok a[href],a.tc2,#downurl,#submit'));
+                var candidates=[].slice.call(doc.querySelectorAll('$LANZOU_DOWNLOAD_PAGE_CANDIDATE_SELECTOR'));
                 for(var i=0;i<candidates.length;i++){
                   if(!isVisible(win,candidates[i])) continue;
                   var href=resolvedHref(doc,candidates[i]);

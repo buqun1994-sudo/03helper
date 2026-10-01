@@ -1,6 +1,7 @@
 package com.ninepointnine.helper.application
 
 import android.content.Context
+import android.hardware.usb.UsbManager
 import android.os.Environment
 import com.ninepointnine.helper.BuildConfig
 import com.ninepointnine.helper.application.artifact.ArtifactCatalogSessionAdapter
@@ -28,6 +29,13 @@ import com.ninepointnine.helper.data.device.DadbDeviceTransport
 import com.ninepointnine.helper.data.device.DadbDeviceConnectionFactory
 import com.ninepointnine.helper.data.device.JdkLocalIpv4SubnetProvider
 import com.ninepointnine.helper.data.device.LanAdbDeviceDiscovery
+import com.ninepointnine.helper.data.device.PreferredAdbConnectionFactory
+import com.ninepointnine.helper.data.device.PreferredAdbDeviceDiscovery
+import com.ninepointnine.helper.data.device.UsbAdbDeviceConnectionFactory
+import com.ninepointnine.helper.data.device.UsbAdbDeviceDiscovery
+import com.ninepointnine.helper.data.device.UsbAdbDeviceRegistry
+import com.ninepointnine.helper.data.device.UsbAdbDeviceTransport
+import com.ninepointnine.helper.data.device.UsbAdbPermissionBroker
 import com.ninepointnine.helper.data.download.ArtifactCache
 import com.ninepointnine.helper.data.download.ArtifactDownloader
 import com.ninepointnine.helper.data.download.UrlConnectionArtifactTransport
@@ -81,6 +89,21 @@ object ProductionInstallerRuntimeFactory {
             readTimeoutMillis = INSTALLATION_READ_TIMEOUT_MILLIS,
             installedApkCacheDirectory = File(applicationContext.cacheDir, INSTALLED_APK_VERIFICATION_DIRECTORY),
             installedApkMetadataReader = apkMetadataReader,
+        )
+        val usbManager = checkNotNull(
+            applicationContext.getSystemService(Context.USB_SERVICE) as? UsbManager,
+        ) { "usb_manager_unavailable" }
+        val usbDeviceRegistry = UsbAdbDeviceRegistry(usbManager)
+        val usbPermissionBroker = UsbAdbPermissionBroker(applicationContext)
+        val usbDiscoveryConnectionFactory = UsbAdbDeviceConnectionFactory(
+            registry = usbDeviceRegistry,
+            tcpLeaseFactory = DadbDeviceConnectionFactory(
+                readTimeoutMillis = DISCOVERY_READ_TIMEOUT_MILLIS,
+            ),
+        )
+        val usbInstallationConnectionFactory = UsbAdbDeviceConnectionFactory(
+            registry = usbDeviceRegistry,
+            tcpLeaseFactory = installationDeviceConnectionFactory,
         )
         val distributionConfigAdapter = catalogRuntime.createDistributionConfigAdapter(applicationContext).withRevisionStore(
             FileCatalogRevisionStore(File(applicationContext.filesDir, CATALOG_REVISION_FILE)),
@@ -136,15 +159,32 @@ object ProductionInstallerRuntimeFactory {
             ),
             createDiscoveryAdapter = { eventPort ->
                 DeviceDiscoverySessionAdapter(
-                    discovery = LanAdbDeviceDiscovery(
-                        subnetProvider = JdkLocalIpv4SubnetProvider(),
-                        transport = DadbDeviceTransport(connectionFactory = discoveryDeviceConnectionFactory),
+                    discovery = PreferredAdbDeviceDiscovery(
+                        wireless = LanAdbDeviceDiscovery(
+                            subnetProvider = JdkLocalIpv4SubnetProvider(),
+                            transport = DadbDeviceTransport(connectionFactory = discoveryDeviceConnectionFactory),
+                        ),
+                        wired = UsbAdbDeviceDiscovery(
+                            registry = usbDeviceRegistry,
+                            permissionBroker = usbPermissionBroker,
+                            transport = UsbAdbDeviceTransport(usbDiscoveryConnectionFactory),
+                        ),
                     ),
                     eventPort = eventPort,
                 )
             },
             createConnectionAdapter = { eventPort ->
-                DeviceConnectionSessionAdapter(installationDeviceConnectionFactory, eventPort)
+                DeviceConnectionSessionAdapter(
+                    connectionFactory = PreferredAdbConnectionFactory(
+                        tcpFactory = installationDeviceConnectionFactory,
+                        usbFactory = usbInstallationConnectionFactory,
+                    ),
+                    eventPort = eventPort,
+                    wirelessDiscovery = LanAdbDeviceDiscovery(
+                        subnetProvider = JdkLocalIpv4SubnetProvider(),
+                        transport = DadbDeviceTransport(connectionFactory = discoveryDeviceConnectionFactory),
+                    ),
+                )
             },
             loadCatalog = { eventPort ->
                 ArtifactCatalogSessionAdapter(
@@ -241,6 +281,8 @@ object ProductionInstallerRuntimeFactory {
                 metadataReader = apkMetadataReader,
                 workspace = File(applicationContext.cacheDir, LOCAL_APK_WORKSPACE_DIRECTORY),
             ),
+            autoConnectSingleDevice = true,
+            closeResources = { usbPermissionBroker.close() },
         )
     }
 
