@@ -2,7 +2,7 @@
 
 1. `release-version.properties` 已递增为 `1.0.21` / `versionCode 22`；正式 APK 身份为 `com.ninepointnine.helper`，大小 `14,497,692` 字节，SHA-256 为 `23f75f707c40f705d4b62bf77d646ab95e3bf08dfd257dcfa941fe1f79a92821`，production 证书摘要为 `31ca80dd21a5208eaabd5f3e1440a3db2f7dc79122e03eaa6ba01730fb31f18b`，APK Signature Scheme v2 通过。
 2. 正式单 APK ZIP 已生成，entry 为 `03车机助手-v1.0.21.apk`，ZIP 大小 `13,682,343` 字节，SHA-256 为 `6fb9f6858db4dda41d427b3e8077924b5422985fee73bc4932ab7aa3a75ee79d`；外部正式发布目录的 `android-app-releases.json` 已仅更新 `03helper` 条目，保留 production V5 根目录和其它 APP 条目。
-3. Cloud 03helper 身份索引按本次用户范围未写入、未提交、未推送；Cloud 登记仍保留旧的 `1.0.18` 当前候选记录，正式包与 V5 JSON 仅完成外部发布目录更新，Cloud 登记同步需另行授权。
+3. Cloud 03helper 身份索引已在本机工作树同步到 `1.0.21` / `22`，历史 `1.0.18` 产物已标为历史并追加本次正式 APK / ZIP 记录；按用户要求 Cloud 仓库未提交、未推送，本次只提交推送 03helper。
 4. 蓝奏当前分享页首跳修复、回归测试和本机验证继续沿用下方记录；真实 Android WebView / 车机主测不在本机发布前置内，设备状态另行记录。
 
 # 2026-10-01 蓝奏云公网链路复测与首跳修复（代码完成，待 Android WebView 主测）
