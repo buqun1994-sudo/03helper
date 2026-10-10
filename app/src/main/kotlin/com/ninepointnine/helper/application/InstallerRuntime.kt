@@ -1,6 +1,10 @@
 package com.ninepointnine.helper.application
 
 import android.util.Log
+import com.ninepointnine.helper.domain.device.DeviceActionConnectionLease
+import com.ninepointnine.helper.domain.device.RemoteInputSubscription
+import com.ninepointnine.helper.domain.device.VehicleInputRequest
+import com.ninepointnine.helper.domain.input.RemoteInputStatus
 import com.ninepointnine.helper.application.device.DeviceDiscoverySessionAdapter
 import com.ninepointnine.helper.application.device.DeviceConnectionSessionAdapter
 import com.ninepointnine.helper.application.session.InstallationSessionEventDispatcher
@@ -200,6 +204,13 @@ class InstallerRuntime(
     private var connectionAdapter: DeviceConnectionSessionAdapter? = null
     private var connectionJob: Job? = null
     private var activeConnection: DeviceConnectionLease? = null
+    @Volatile private var remoteInputSubscription: RemoteInputSubscription? = null
+    private var remoteInputJob: Job? = null
+    private var remoteInputRetryJob: Job? = null
+    private var remoteInputRetryCount = 0
+    private var remoteInputGeneration = 0L
+    /** Resource lifecycle hook; domain snapshots remain the only connection state. */
+    var onlineSessionObserver: (Boolean) -> Unit = {}
     private var lastConfirmedDevice: ConnectedDevice? = null
     private var connectionHealthJob: Job? = null
     private var catalogJob: Job? = null
@@ -215,6 +226,9 @@ class InstallerRuntime(
     /** Session generation currently attempting the last confirmed endpoint. */
     private var knownReconnectAttemptSessionId: Long? = null
     private var foregroundGeneration = 0L
+    private var foregroundActive = false
+    /** A restored snapshot alone must never start discovery before its endpoint is seeded. */
+    private var onlineRecoveryRequested = false
     private var maintenanceReconnectGeneration: Long? = null
     private var manualMaintenanceDisconnect = false
     private var lastMaintenancePersistenceOperation: MaintenancePersistenceOperation? = null
@@ -287,6 +301,7 @@ class InstallerRuntime(
             maintenanceJob?.cancel()
         }
         val before = session.currentSnapshot()
+        val connectionBeforeCommand = activeConnection
         val effectiveCommand = if (
             command == InstallationSessionCommand.Reconnect &&
             canFastReconnect(before)
@@ -298,6 +313,17 @@ class InstallerRuntime(
         val after = session.dispatch(effectiveCommand)
 
         when (effectiveCommand) {
+            is InstallationSessionCommand.SendRemoteInputText -> {
+                if (after.remoteInput.pendingSend?.requestId == effectiveCommand.requestId &&
+                    before.remoteInput.pendingSend == null) launchRemoteInputSend(after)
+            }
+            is InstallationSessionCommand.UpdateRemoteInputDraft,
+            is InstallationSessionCommand.RemoteInputConnectionChanged,
+            is InstallationSessionCommand.RemoteInputStateReceived,
+            is InstallationSessionCommand.RemoteInputSendFinished,
+            InstallationSessionCommand.DismissRemoteInputNotice,
+            -> Unit
+
             InstallationSessionCommand.StartDiscovery,
             InstallationSessionCommand.Reconnect,
             -> {
@@ -437,11 +463,8 @@ class InstallerRuntime(
             }
 
             InstallationSessionCommand.LeaveMaintenanceAction -> {
-                // Leaving a secondary route is a hard task boundary. Cancel
-                // every page-owned adapter job, not only the visible action;
-                // an older inventory/catalog job may still hold the shared
-                // ADB lease and otherwise leave the next page in LOADING.
-                cancelTransferWork()
+                // Pure route changes retain their domain generation and shared work.
+                if (after.sessionId != before.sessionId) cancelTransferWork()
             }
 
             is InstallationSessionCommand.ToggleOptionalComponent,
@@ -538,7 +561,13 @@ class InstallerRuntime(
             is InstallationSessionCommand.ToggleMaintenanceInstallationComponent -> Unit
 
             is InstallationSessionCommand.AdapterEvent -> {
-                if (effectiveCommand.event is InstallationSessionEvent.DeviceDisconnected) {
+                val event = effectiveCommand.event
+                if (event is InstallationSessionEvent.DeviceDisconnected &&
+                    effectiveCommand.sessionId == before.sessionId &&
+                    effectiveCommand.sequence > before.lastEventSequence &&
+                    (event.deviceId == null || event.deviceId == before.device?.id) &&
+                    activeConnection === connectionBeforeCommand
+                ) {
                     cancelMaintenanceIconHydration()
                     maintenanceJob?.cancel()
                     maintenanceJob = null
@@ -552,7 +581,12 @@ class InstallerRuntime(
     /** Starts a bounded discovery pass when the app returns to the foreground on the connection page. */
     @Synchronized
     fun onForeground(): InstallationSessionSnapshot {
+        if (closed) return session.currentSnapshot()
+        foregroundActive = true
+        onlineRecoveryRequested = true
         foregroundGeneration += 1L
+        if (activeConnection != null) runCatching { onlineSessionObserver(true) }
+        activeConnection?.let(::resumeRemoteInputSubscription)
         resumeSelfUpdateAfterPermission()?.let { return it }
         pollSelfUpdate()
         val current = session.currentSnapshot()
@@ -586,10 +620,16 @@ class InstallerRuntime(
     }
 
     @Synchronized
+    fun onBackground() {
+        foregroundActive = false
+    }
+
+    @Synchronized
     override fun close() {
         if (closed) return
         closed = true
         cancelAllWork(closeConnection = true)
+        runCatching { onlineSessionObserver(false) }
         runCatching { closeResources() }
         scope.cancel()
         session.close()
@@ -865,6 +905,11 @@ class InstallerRuntime(
 
     private fun beginAutomaticInstallReconnect(snapshot: InstallationSessionSnapshot) {
         if (snapshot.checkpoint == null) return
+        requestAutomaticReconnect(snapshot)
+    }
+
+    private fun requestAutomaticReconnect(snapshot: InstallationSessionSnapshot) {
+        if (!foregroundActive && !canFastReconnect(snapshot)) return
         dispatch(InstallationSessionCommand.Reconnect)
     }
 
@@ -905,43 +950,48 @@ class InstallerRuntime(
      */
     @Synchronized
     private fun reconcileDisconnectedInstallation(snapshot: InstallationSessionSnapshot) {
+        if (closed || foregroundGeneration == 0L && !onlineRecoveryRequested) return
         if (
-            !closed &&
-            snapshot.state == InstallationSessionState.MAINTENANCE &&
+            (snapshot.state == InstallationSessionState.MAINTENANCE ||
+                snapshot.state == InstallationSessionState.PAUSED) &&
             snapshot.device?.connectionStatus == DeviceConnectionStatus.DISCONNECTED &&
             snapshot.failure?.category == FailureCategory.CONNECTION &&
             knownReconnectAttemptSessionId != null &&
             knownReconnectAttemptSessionId != snapshot.sessionId
         ) {
-            // The remembered endpoint failed. Fall back once to the bounded LAN
-            // discovery path; the generation guard below prevents a retry loop.
+            // A failed known endpoint remains disconnected in the background.
+            // Only a foreground maintenance session may fall back once to bounded discovery.
             knownReconnectAttemptSessionId = null
-            dispatch(InstallationSessionCommand.StartDiscovery)
+            if (snapshot.state == InstallationSessionState.PAUSED) {
+                automaticReconnectSessionId = snapshot.sessionId
+            } else {
+                maintenanceReconnectGeneration = foregroundGeneration
+                if (foregroundActive) dispatch(InstallationSessionCommand.StartDiscovery)
+            }
             return
         }
         if (
-            !closed &&
             snapshot.state == InstallationSessionState.MAINTENANCE &&
             snapshot.device?.connectionStatus == DeviceConnectionStatus.DISCONNECTED &&
             !manualMaintenanceDisconnect &&
             maintenanceReconnectGeneration != foregroundGeneration
         ) {
             maintenanceReconnectGeneration = foregroundGeneration
-            dispatch(InstallationSessionCommand.Reconnect)
+            requestAutomaticReconnect(snapshot)
             return
         }
         if (
-            closed ||
             snapshot.state != InstallationSessionState.PAUSED ||
             snapshot.checkpoint == null ||
             snapshot.failure?.category != FailureCategory.CONNECTION ||
             snapshot.failure?.reasonCode !in AUTO_RECONNECT_FAILURES ||
-            automaticReconnectSessionId == snapshot.sessionId
+            automaticReconnectSessionId == snapshot.sessionId ||
+            !foregroundActive && !canFastReconnect(snapshot)
         ) {
             return
         }
         automaticReconnectSessionId = snapshot.sessionId
-        dispatch(InstallationSessionCommand.Reconnect)
+        requestAutomaticReconnect(snapshot)
     }
 
     /**
@@ -1006,6 +1056,7 @@ class InstallerRuntime(
                 val connection = adapter.connect(device) ?: return@launch
                 val confirmedSnapshot = session.currentSnapshot()
                 if (
+                    closed ||
                     confirmedSnapshot.sessionId != snapshot.sessionId ||
                     (
                     confirmedSnapshot.state !in CONNECTION_HELD_STATES
@@ -1020,8 +1071,12 @@ class InstallerRuntime(
                 activeConnection?.close()
                 activeConnection = connection
                 lastConfirmedDevice = connection.device
+                onlineRecoveryRequested = true
                 knownReconnectAttemptSessionId = null
                 manualMaintenanceDisconnect = false
+                runCatching { onlineSessionObserver(true) }
+                remoteInputRetryCount = 0
+                startRemoteInputSubscription(connection)
                 maintenanceReconnectGeneration = null
                 if (confirmedSnapshot.state == InstallationSessionState.CONNECTED) {
                     launchCatalog(confirmedSnapshot)
@@ -1693,7 +1748,7 @@ class InstallerRuntime(
         cancelMaintenanceIconHydration()
         maintenanceJob?.cancel()
         localApkJob?.cancel()
-        deviceWorkOwner.cancel()
+        if (session.currentSnapshot().remoteInput.pendingSend == null) deviceWorkOwner.cancel()
         catalogJob = null
         connectionHealthJob = null
         artifactJob = null
@@ -1708,12 +1763,169 @@ class InstallerRuntime(
         if (closeConnection) closeDeviceConnection()
     }
 
+    /** Recovery checkpoint can seed the target, but cannot confirm a connection. */
+    @Synchronized
+    fun seedOnlineTarget(device: ConnectedDevice?) {
+        val snapshot = session.currentSnapshot()
+        if (device != null && activeConnection == null && snapshot.device?.id == device.identity.stableId &&
+            snapshot.state == InstallationSessionState.MAINTENANCE) lastConfirmedDevice = device
+    }
+
+    @Synchronized
+    fun onlineTarget(): ConnectedDevice? = lastConfirmedDevice.takeUnless { manualMaintenanceDisconnect || closed }
+
+    /** Network callbacks may arrive on worker threads; all effects run on the runtime dispatcher. */
+    fun onNetworkAvailable() {
+        scope.launch { reconcileAvailableNetwork() }
+    }
+
+    @Synchronized
+    private fun reconcileAvailableNetwork() {
+        if (closed || manualMaintenanceDisconnect) return
+        val known = lastConfirmedDevice ?: return
+        val current = session.currentSnapshot()
+        val device = current.device ?: return
+        if (device.id != known.identity.stableId) return
+        onlineRecoveryRequested = true
+        val connection = activeConnection
+        if (connection != null) {
+            scheduleConnectionHealthCheck(current)
+            resumeRemoteInputSubscription(connection)
+        } else if (device.connectionStatus == DeviceConnectionStatus.DISCONNECTED &&
+            (current.state == InstallationSessionState.MAINTENANCE ||
+                current.state == InstallationSessionState.PAUSED && current.checkpoint != null)
+        ) {
+            dispatch(InstallationSessionCommand.ReconnectKnownDevice)
+        }
+    }
+
+    fun onNetworkLost() {
+        scope.launch { reconcileLostNetwork() }
+    }
+
+    @Synchronized
+    private fun reconcileLostNetwork() {
+        if (!closed && activeConnection != null) scheduleConnectionHealthCheck(session.currentSnapshot())
+    }
+
+    private fun resumeRemoteInputSubscription(connection: DeviceConnectionLease) {
+        if (session.currentSnapshot().remoteInput.pendingSend == null &&
+            remoteInputJob?.isActive != true && remoteInputRetryJob?.isActive != true) {
+            startRemoteInputSubscription(connection)
+        }
+    }
+
+    private fun startRemoteInputSubscription(connection: DeviceConnectionLease) {
+        if (closed || activeConnection !== connection) return
+        remoteInputRetryJob?.cancel()
+        remoteInputRetryJob = null
+        remoteInputSubscription?.close()
+        remoteInputSubscription = null
+        remoteInputJob?.cancel()
+        val generation = ++remoteInputGeneration
+        session.dispatch(InstallationSessionCommand.RemoteInputConnectionChanged(generation, RemoteInputStatus.SYNCING))
+        val gateway = (connection as? DeviceActionConnectionLease)?.remoteInputGateway
+        if (gateway == null) {
+            session.dispatch(InstallationSessionCommand.RemoteInputConnectionChanged(generation, RemoteInputStatus.UNAVAILABLE, "remote_input_desktop_unavailable"))
+            return
+        }
+        remoteInputJob = scope.launch {
+            var subscription: RemoteInputSubscription? = null
+            try {
+                subscription = gateway.subscribe()
+                if (activeConnection !== connection || generation != remoteInputGeneration) return@launch
+                remoteInputSubscription = subscription
+                while (true) {
+                    val state = subscription.next()
+                    if (activeConnection !== connection || generation != remoteInputGeneration) return@launch
+                    session.dispatch(InstallationSessionCommand.RemoteInputStateReceived(
+                        generation = generation,
+                        sequence = state.sequence,
+                        keyboardOpen = state.keyboard == "open",
+                        epoch = state.epoch,
+                        targetPackage = state.targetPackage,
+                        targetWindow = state.targetWindow,
+                        available = state.available && state.keyboard != "unknown",
+                        vehicleSending = state.sending,
+                    ))
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Exception) {
+                if (activeConnection === connection && generation == remoteInputGeneration) {
+                    session.dispatch(InstallationSessionCommand.RemoteInputConnectionChanged(
+                        generation, RemoteInputStatus.UNAVAILABLE, failure.message?.takeIf { it.startsWith("remote_input_") }
+                            ?: "remote_input_channel_lost",
+                    ))
+                    scheduleConnectionHealthCheck(session.currentSnapshot())
+                    val retryable = subscription != null || failure is java.io.IOException &&
+                        failure.message !in setOf("remote_input_desktop_unavailable", "remote_input_transport_unsupported")
+                    if (retryable && remoteInputRetryCount < 3 && session.currentSnapshot().remoteInput.pendingSend == null) {
+                        val attempt = ++remoteInputRetryCount
+                        remoteInputRetryJob?.cancel()
+                        remoteInputRetryJob = scope.launch {
+                            kotlinx.coroutines.delay(attempt * 1000L)
+                            if (activeConnection === connection && remoteInputGeneration == generation && !closed) {
+                                remoteInputRetryJob = null
+                                startRemoteInputSubscription(connection)
+                            }
+                        }
+                    }
+                }
+            } finally {
+                subscription?.close()
+                if (remoteInputSubscription === subscription) remoteInputSubscription = null
+            }
+        }
+    }
+
+    private fun launchRemoteInputSend(snapshot: InstallationSessionSnapshot) {
+        val request = snapshot.remoteInput.pendingSend ?: return
+        val connection = activeConnection
+        val gateway = (connection as? DeviceActionConnectionLease)?.remoteInputGateway
+        if (gateway == null) {
+            session.dispatch(InstallationSessionCommand.RemoteInputSendFinished(
+                request.generation, request.requestId, false, true, "remote_input_not_ready",
+            ))
+            return
+        }
+        cancelMaintenanceIconHydration()
+        deviceWorkOwner.replace {
+            try {
+                val receipt = gateway.send(VehicleInputRequest(request.requestId, request.epoch, request.text))
+                session.dispatch(InstallationSessionCommand.RemoteInputSendFinished(
+                    request.generation, request.requestId, receipt.committed, receipt.restored, receipt.reason,
+                ))
+            } catch (cancelled: CancellationException) {
+                session.dispatch(InstallationSessionCommand.RemoteInputSendFinished(
+                    request.generation, request.requestId, null, false, "remote_input_result_unknown",
+                ))
+                throw cancelled
+            } catch (_: Exception) {
+                session.dispatch(InstallationSessionCommand.RemoteInputSendFinished(
+                    request.generation, request.requestId, null, false, "remote_input_result_unknown",
+                ))
+            } finally {
+                if (activeConnection === connection && !closed) resumeRemoteInputSubscription(connection)
+            }
+        }
+    }
+
     private fun closeDeviceConnection() {
+        val connection = activeConnection
+        activeConnection = null
+        connection?.close()
+        remoteInputSubscription?.close()
+        remoteInputSubscription = null
+        remoteInputJob?.cancel()
+        remoteInputJob = null
+        remoteInputRetryJob?.cancel()
+        remoteInputRetryJob = null
+        session.dispatch(InstallationSessionCommand.RemoteInputConnectionChanged(++remoteInputGeneration, RemoteInputStatus.DISCONNECTED))
+        if (manualMaintenanceDisconnect || closed) runCatching { onlineSessionObserver(false) }
         connectionHealthJob?.cancel()
         connectionHealthJob = null
         cancelConnectionAttempt()
-        activeConnection?.close()
-        activeConnection = null
     }
 
     private fun scheduleConnectionHealthCheck(snapshot: InstallationSessionSnapshot) {

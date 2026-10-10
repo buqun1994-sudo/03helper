@@ -229,6 +229,7 @@ fun IconTextActionButton(
  */
 @Composable
 fun TopLevelFloatingNotice(
+    bottomInset: Dp = 0.dp,
     content: @Composable () -> Unit,
 ) {
     Dialog(
@@ -254,7 +255,7 @@ fun TopLevelFloatingNotice(
         androidx.compose.foundation.layout.Box(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(bottom = 56.dp),
+                .padding(bottom = 56.dp + bottomInset),
             contentAlignment = Alignment.BottomCenter,
         ) {
             content()

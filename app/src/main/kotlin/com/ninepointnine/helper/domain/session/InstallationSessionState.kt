@@ -119,6 +119,10 @@ enum class MaintenanceActionId {
     REINSTALL,
     REPAIR_CONFIGURATION,
     MANAGE_APPS,
+    /** Pure source-selection route, never a device action. */
+    INSTALL_MENU,
+    /** Pure editor route; typing is available while disconnected. */
+    INPUT_TEXT,
     INSTALL_APPLICATIONS,
     INSTALL_LOCAL_APPLICATION,
     /** Legacy persisted name; new UI and flows use [INSTALL_APPLICATIONS]. */
@@ -133,12 +137,27 @@ val MaintenanceActionId.isApplicationInstallation: Boolean
     get() = this == MaintenanceActionId.INSTALL_APPLICATIONS ||
         this == MaintenanceActionId.INSTALL_FILE_MANAGER
 
+val MaintenanceActionId.isPureRoute: Boolean
+    get() = this == MaintenanceActionId.INSTALL_MENU || this == MaintenanceActionId.INPUT_TEXT
+
+/** Single owner of the maintenance back hierarchy. */
+val MaintenanceActionId.parentRoute: MaintenanceActionId?
+    get() = when (this) {
+        MaintenanceActionId.INSTALL_APPLICATIONS,
+        MaintenanceActionId.INSTALL_FILE_MANAGER,
+        MaintenanceActionId.INSTALL_LOCAL_APPLICATION,
+        -> MaintenanceActionId.INSTALL_MENU
+        else -> null
+    }
+
 /** Whether the action needs the retained, confirmed car connection. */
 val MaintenanceActionId.requiresConnectedDevice: Boolean
     get() = when (this) {
         MaintenanceActionId.CHECK_UPDATES,
         MaintenanceActionId.CLEANUP,
         MaintenanceActionId.EXPORT_DIAGNOSTICS,
+        MaintenanceActionId.INSTALL_MENU,
+        MaintenanceActionId.INPUT_TEXT,
         -> false
 
         MaintenanceActionId.REINSTALL,
@@ -155,6 +174,7 @@ val MaintenanceActionId.requiresConnectedDevice: Boolean
 enum class MaintenanceGroupId {
     COMMON,
     APPS,
+    INPUT,
     STORAGE,
 }
 

@@ -4,6 +4,13 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
+import android.content.Intent
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import kotlinx.coroutines.launch
+import com.ninepointnine.helper.application.input.RemoteInputPageVisibility
+import com.ninepointnine.helper.application.input.VehicleOnlineService
+import com.ninepointnine.helper.domain.session.MaintenanceActionId
 import android.net.Uri
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -31,6 +38,8 @@ class MainActivity : ComponentActivity() {
         get() = (application as InstallerApplication).installerRuntime
     private var storagePermissionPrompted = false
     private var pendingDiagnosticPackageName: String? = null
+    private var pendingInputPage = false
+    private val notificationPermissionLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
     private val localApkLauncher = registerForActivityResult(
         ActivityResultContracts.OpenDocument(),
     ) { uri: Uri? ->
@@ -94,6 +103,50 @@ class MainActivity : ComponentActivity() {
         }
         root.addView(composeView)
         setContentView(root)
+        pendingInputPage = intent?.action == ACTION_OPEN_INPUT
+        lifecycleScope.launch {
+            installerRuntime.session.snapshots.collect { snapshot ->
+                if (pendingInputPage && snapshot.state == com.ninepointnine.helper.domain.session.InstallationSessionState.MAINTENANCE) {
+                    pendingInputPage = false
+                    installerRuntime.dispatch(InstallationSessionCommand.MaintenanceAction(MaintenanceActionId.INPUT_TEXT))
+                }
+                updateInputPageVisibility()
+            }
+        }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        if (intent.action == ACTION_OPEN_INPUT) {
+            pendingInputPage = true
+            openPendingInputPage()
+        }
+    }
+
+    private fun openPendingInputPage() {
+        if (pendingInputPage && installerRuntime.session.currentSnapshot().state == com.ninepointnine.helper.domain.session.InstallationSessionState.MAINTENANCE) {
+            pendingInputPage = false
+            installerRuntime.dispatch(InstallationSessionCommand.MaintenanceAction(MaintenanceActionId.INPUT_TEXT))
+        }
+        updateInputPageVisibility()
+    }
+
+    private fun updateInputPageVisibility() {
+        RemoteInputPageVisibility.visible = lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
+            installerRuntime.session.currentSnapshot().maintenance.routeAction == MaintenanceActionId.INPUT_TEXT
+        if (RemoteInputPageVisibility.visible) VehicleOnlineService.hideInputNotice(this)
+    }
+
+    override fun onPostResume() {
+        super.onPostResume()
+        updateInputPageVisibility()
+    }
+
+    override fun onPause() {
+        RemoteInputPageVisibility.visible = false
+        installerRuntime.onBackground()
+        super.onPause()
     }
 
     override fun onResume() {
@@ -113,6 +166,14 @@ class MainActivity : ComponentActivity() {
             return
         }
         installerRuntime.onForeground()
+        openPendingInputPage()
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            val preferences = getSharedPreferences("notification_setup", MODE_PRIVATE)
+            if (!preferences.getBoolean("prompted", false)) {
+                preferences.edit().putBoolean("prompted", true).apply()
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            }
+        }
     }
 
     override fun onDestroy() {
@@ -132,8 +193,9 @@ class MainActivity : ComponentActivity() {
             checkSelfPermission(Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED
     }
 
-    private companion object {
-        const val STATE_DIAGNOSTIC_PACKAGE = "diagnostic_package"
+    companion object {
+        const val ACTION_OPEN_INPUT = "com.ninepointnine.helper.OPEN_INPUT"
+        private const val STATE_DIAGNOSTIC_PACKAGE = "diagnostic_package"
     }
 }
 
@@ -191,6 +253,9 @@ internal fun InstallUiIntent.toInstallationSessionCommand(): InstallationSession
     InstallUiIntent.StartMaintenanceInstallation -> InstallationSessionCommand.StartMaintenanceInstallation
     InstallUiIntent.PickLocalApk -> null
     is InstallUiIntent.LocalApkSelected -> InstallationSessionCommand.StartLocalApkInstallation(uri)
+    is InstallUiIntent.UpdateRemoteInputDraft -> InstallationSessionCommand.UpdateRemoteInputDraft(text)
+    InstallUiIntent.SendRemoteInputText -> InstallationSessionCommand.SendRemoteInputText(java.util.UUID.randomUUID().toString())
+    InstallUiIntent.DismissRemoteInputNotice -> InstallationSessionCommand.DismissRemoteInputNotice
     InstallUiIntent.LocalApkSelectionCancelled -> InstallationSessionCommand.CancelLocalApkSelection
 }
 

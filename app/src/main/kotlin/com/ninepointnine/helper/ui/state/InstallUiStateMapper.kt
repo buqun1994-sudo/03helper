@@ -68,10 +68,20 @@ object InstallUiStateMapper {
     private fun maintenanceState(
         snapshot: InstallationSessionSnapshot,
         reconnecting: Boolean = false,
-    ): InstallUiState.Maintenance = InstallUiState.Maintenance(
+    ): InstallUiState.Maintenance {
+        val connected = snapshot.device?.connectionStatus == DeviceConnectionStatus.CONFIRMED
+        val maintenanceBusy = snapshot.maintenance.activeAction != null ||
+            snapshot.maintenance.applicationAction?.status == MaintenanceActionStatus.RUNNING ||
+            snapshot.remoteInput.sending
+        return InstallUiState.Maintenance(
             deviceName = snapshot.device?.displayName,
-            connected = snapshot.device?.connectionStatus == DeviceConnectionStatus.CONFIRMED,
+            connected = connected,
             reconnecting = reconnecting,
+            busy = maintenanceBusy,
+            remoteInput = snapshot.remoteInput.copy(
+                leaseConfirmed = connected,
+                deviceBusy = maintenanceBusy,
+            ),
             // The route and its transient feedback are one domain-owned pair.
             // A payload such as installationSelection is not allowed to
             // resurrect a secondary page after returning to the home page.
@@ -199,6 +209,7 @@ object InstallUiStateMapper {
                 )
             },
         )
+    }
 
     private fun connectionState(
         variant: ConnectionVariant,

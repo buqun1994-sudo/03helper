@@ -101,6 +101,9 @@ class MaintenanceController(
                 return
             }
             when (actionId) {
+                MaintenanceActionId.INSTALL_MENU,
+                MaintenanceActionId.INPUT_TEXT,
+                -> return
                 MaintenanceActionId.CHECK_UPDATES -> checkUpdates(actionId, snapshot, connection, eventPort)
                 MaintenanceActionId.REPAIR_CONFIGURATION -> repairConfiguration(actionId, snapshot, connection, eventPort)
                 MaintenanceActionId.MANAGE_APPS -> inspectApplications(actionId, snapshot, connection, eventPort)

@@ -5,10 +5,13 @@ import android.graphics.Bitmap
 import android.os.ParcelFileDescriptor
 import android.view.WindowManager
 import androidx.activity.compose.setContent
+import androidx.core.view.WindowInsetsCompat
 import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.assertIsFocused
+import androidx.compose.ui.test.assertTextEquals
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
@@ -25,6 +28,7 @@ import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.performTextInput
 import androidx.test.core.app.ActivityScenario
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
@@ -47,6 +51,8 @@ import com.ninepointnine.helper.domain.session.MaintenanceSnapshot
 import com.ninepointnine.helper.domain.session.ManagedApplicationStatus
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationRequirement
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationResultValue
+import com.ninepointnine.helper.domain.input.RemoteInputSnapshot
+import com.ninepointnine.helper.domain.input.RemoteInputStatus
 import com.ninepointnine.helper.toInstallationSessionCommand
 import com.ninepointnine.helper.ui.state.InstallUiIntent
 import com.ninepointnine.helper.ui.state.failureReasonToUserMessage
@@ -97,8 +103,9 @@ class InstallAppActivitySmokeTest {
                     })
                 }
             }
-            compose.onNodeWithText(context.getString(R.string.maintenance_install_file_manager)).performScrollTo()
-            clickText(context.getString(R.string.maintenance_install_file_manager))
+            compose.onNodeWithText(context.getString(R.string.maintenance_install_menu)).performScrollTo()
+            clickText(context.getString(R.string.maintenance_install_menu))
+            clickText(context.getString(R.string.maintenance_install_recommended))
             compose.onNodeWithText(apps[0].displayName).assertExists()
             clickText(apps[1].displayName)
             assertEquals(setOf("bilibili"), session.currentSnapshot().maintenance.installationSelection?.selectedComponentIds)
@@ -138,6 +145,100 @@ class InstallAppActivitySmokeTest {
         }
     }
 
+    @Test
+    fun remoteInputPageKeepsMultilineDraftAndSendActionAboveIme() {
+        val context = InstrumentationRegistry.getInstrumentation().targetContext
+        val session = InstallationSession(
+            initialSnapshot = InstallationSessionSnapshot(
+                state = InstallationSessionState.MAINTENANCE,
+                device = DeviceSummary(
+                    id = "smoke-vehicle",
+                    displayName = "Smoke Vehicle",
+                    connectionStatus = DeviceConnectionStatus.CONFIRMED,
+                ),
+                remoteInput = RemoteInputSnapshot(
+                    connectionGeneration = 1L,
+                    status = RemoteInputStatus.UNAVAILABLE,
+                    keyboardOpen = false,
+                    epoch = 1L,
+                    targetPackage = "com.example.target",
+                    targetWindow = 3,
+                    sequence = 0L,
+                    available = true,
+                    hasState = true,
+                    leaseConfirmed = true,
+                ),
+                maintenance = MaintenanceSnapshot(routeAction = MaintenanceActionId.INPUT_TEXT),
+            ),
+        )
+        val scenario = ActivityScenario.launch<DebugScenarioActivity>(
+            Intent(context, DebugScenarioActivity::class.java)
+                .putExtra(DebugScenarioActivity.EXTRA_SCENARIO, "maintenance"),
+        )
+        try {
+            scenario.onActivity { activity ->
+                activity.window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                activity.setContent {
+                    InstallApp(session.snapshots.collectAsState().value, onIntent = { intent ->
+                        intent.toInstallationSessionCommand()?.let(session::dispatch)
+                    })
+                }
+            }
+            compose.waitForIdle()
+            compose.onNodeWithTag("remote_input_page").assertIsDisplayed()
+            var imeVisible = false
+            compose.waitUntil(timeoutMillis = 2_000L) {
+                scenario.onActivity { activity ->
+                    imeVisible = activity.window.decorView.rootWindowInsets?.let { insets ->
+                        WindowInsetsCompat.toWindowInsetsCompat(insets)
+                            .isVisible(WindowInsetsCompat.Type.ime())
+                    } == true
+                }
+                imeVisible
+            }
+            assertTrue("remote input page must open the system IME", imeVisible)
+            compose.onNodeWithTag("remote_input_editor").assertIsFocused()
+            compose.onNodeWithTag("remote_input_status")
+                .assertTextEquals(context.getString(R.string.remote_input_status_keyboard_closed))
+            compose.onNodeWithTag("remote_input_send").assertIsEnabled()
+            compose.onNodeWithTag("remote_input_send").performClick()
+            compose.onNodeWithTag("remote_input_notice").assertIsDisplayed()
+
+            compose.onNodeWithTag("remote_input_editor")
+                .performTextInput("第一行\n第二行")
+            compose.waitForIdle()
+            assertEquals("第一行\n第二行", session.currentSnapshot().remoteInput.draft)
+
+            val pageBounds = compose.onNodeWithTag("remote_input_page")
+                .fetchSemanticsNode().boundsInWindow
+            val sendBounds = compose.onNodeWithTag("remote_input_send")
+                .fetchSemanticsNode().boundsInWindow
+            var imeTop = 0
+            scenario.onActivity { activity ->
+                val decor = activity.window.decorView
+                val imeBottom = WindowInsetsCompat.toWindowInsetsCompat(checkNotNull(decor.rootWindowInsets))
+                    .getInsets(WindowInsetsCompat.Type.ime()).bottom
+                imeTop = decor.height - imeBottom
+            }
+            assertTrue("send action must remain inside the input page", sendBounds.bottom <= pageBounds.bottom + 1f)
+            assertTrue("send action must remain above the real IME", sendBounds.bottom <= imeTop + 1f)
+            assertTrue("send action must retain a visible height", sendBounds.height > 0f)
+            scenario.onActivity { session.dispatch(InstallationSessionCommand.DismissRemoteInputNotice) }
+            compose.waitForIdle()
+            captureScreen("remote-input-keyboard-closed")
+
+            scenario.onActivity { activity ->
+                activity.onBackPressedDispatcher.onBackPressed()
+            }
+            compose.waitForIdle()
+            compose.onNodeWithTag("maintenance_home").assertIsDisplayed()
+            compose.onNodeWithTag("remote_input_page").assertDoesNotExist()
+            assertEquals("第一行\n第二行", session.currentSnapshot().remoteInput.draft)
+        } finally {
+            scenario.close()
+            session.close()
+        }
+    }
     @Test
     fun authorizationDialogUsesTerminalActionsAndKeepsSuccessNoticeAboveIt() {
         val context = InstrumentationRegistry.getInstrumentation().targetContext

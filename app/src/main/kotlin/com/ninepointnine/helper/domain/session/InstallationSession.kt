@@ -152,7 +152,13 @@ class InstallationSession(
                 toggleMaintenanceInstallationComponent(command)
             InstallationSessionCommand.StartMaintenanceInstallation -> startSelectedMaintenanceInstallation()
             is InstallationSessionCommand.StartLocalApkInstallation -> startLocalApkInstallation()
-            InstallationSessionCommand.CancelLocalApkSelection -> Unit
+            InstallationSessionCommand.CancelLocalApkSelection -> cancelLocalApkSelection()
+            is InstallationSessionCommand.UpdateRemoteInputDraft -> updateRemoteInputDraft(command.text)
+            is InstallationSessionCommand.SendRemoteInputText -> sendRemoteInputText(command.requestId)
+            is InstallationSessionCommand.RemoteInputConnectionChanged -> remoteInputConnectionChanged(command)
+            is InstallationSessionCommand.RemoteInputStateReceived -> remoteInputStateReceived(command)
+            is InstallationSessionCommand.RemoteInputSendFinished -> remoteInputSendFinished(command)
+            InstallationSessionCommand.DismissRemoteInputNotice -> dismissRemoteInputNotice()
             is InstallationSessionCommand.AdapterEvent -> applyAdapterEvent(command)
         }
         _snapshot.value
@@ -161,6 +167,109 @@ class InstallationSession(
     fun send(command: InstallationSessionCommand): InstallationSessionSnapshot = dispatch(command)
 
     fun handle(command: InstallationSessionCommand): InstallationSessionSnapshot = dispatch(command)
+
+    private fun updateRemoteInputDraft(text: String) {
+        val current = _snapshot.value
+        val next = current.remoteInput.updateDraft(text)
+        if (next != current.remoteInput) {
+            publish(current.copy(remoteInput = next))
+        }
+    }
+
+    private fun sendRemoteInputText(requestId: String) {
+        val current = _snapshot.value
+        if (current.state != InstallationSessionState.MAINTENANCE ||
+            current.maintenance.routeAction != MaintenanceActionId.INPUT_TEXT
+        ) return
+        val input = current.remoteInput.copy(
+            leaseConfirmed = current.device?.connectionStatus == DeviceConnectionStatus.CONFIRMED,
+            deviceBusy = maintenanceActionBusy(current),
+        )
+        val next = input.beginSend(requestId)
+        if (next != current.remoteInput) {
+            publish(current.copy(remoteInput = next))
+        }
+    }
+
+    private fun remoteInputConnectionChanged(
+        command: InstallationSessionCommand.RemoteInputConnectionChanged,
+    ) {
+        val current = _snapshot.value
+        val next = current.remoteInput.connectionChanged(
+            generation = command.generation,
+            newStatus = command.status,
+            reason = command.reason,
+        )
+        if (next != current.remoteInput) {
+            publish(current.copy(remoteInput = next))
+        }
+    }
+
+    private fun remoteInputStateReceived(
+        command: InstallationSessionCommand.RemoteInputStateReceived,
+    ) {
+        val current = _snapshot.value
+        val next = current.remoteInput.stateReceived(
+            generation = command.generation,
+            sequence = command.sequence,
+            keyboardOpen = command.keyboardOpen,
+            epoch = command.epoch,
+            targetPackage = command.targetPackage,
+            targetWindow = command.targetWindow,
+            available = command.available,
+            vehicleSending = command.vehicleSending,
+        )
+        if (next != current.remoteInput) {
+            publish(current.copy(remoteInput = next))
+        }
+    }
+
+    private fun remoteInputSendFinished(
+        command: InstallationSessionCommand.RemoteInputSendFinished,
+    ) {
+        val current = _snapshot.value
+        val next = current.remoteInput.sendFinished(
+            generation = command.generation,
+            id = command.requestId,
+            committed = command.committed,
+            restored = command.restored,
+            reason = command.reason,
+        )
+        if (next != current.remoteInput) {
+            publish(current.copy(remoteInput = next))
+        }
+    }
+
+    private fun dismissRemoteInputNotice() {
+        val current = _snapshot.value
+        val next = current.remoteInput.dismissNotice()
+        if (next != current.remoteInput) {
+            publish(current.copy(remoteInput = next))
+        }
+    }
+
+    private fun cancelLocalApkSelection() {
+        val current = _snapshot.value
+        if (current.state != InstallationSessionState.MAINTENANCE ||
+            current.maintenance.routeAction != MaintenanceActionId.INSTALL_LOCAL_APPLICATION
+        ) return
+        publish(
+            current.copy(
+                maintenance = current.maintenance.copy(
+                    routeAction = MaintenanceActionId.INSTALL_MENU,
+                    activeAction = null,
+                    lastAction = null,
+                    installationSelection = null,
+                ),
+            ),
+        )
+    }
+
+    /** Whether a device-side maintenance write currently owns the session lease. */
+    private fun maintenanceActionBusy(snapshot: InstallationSessionSnapshot): Boolean =
+        snapshot.remoteInput.sending ||
+            snapshot.maintenance.activeAction != null ||
+            snapshot.maintenance.applicationAction?.status == MaintenanceActionStatus.RUNNING
 
     /** Convenience entry point for fake ports and deterministic adapter tests. */
     fun dispatchEvent(
@@ -1368,6 +1477,7 @@ class InstallationSession(
         publish(
             current.copy(
                 device = current.device?.copy(connectionStatus = DeviceConnectionStatus.DISCONNECTED),
+                remoteInput = current.remoteInput.disconnected("device_disconnected"),
                 maintenance = current.maintenance.copy(
                     activeAction = null,
                     lastAction = activeAction?.let { actionId ->
@@ -1398,9 +1508,40 @@ class InstallationSession(
     private fun leaveMaintenanceAction() {
         val current = _snapshot.value
         if (current.state != InstallationSessionState.MAINTENANCE) return
-        // Leaving a secondary page ends the operation generation as well as
-        // clearing its route payload. Any adapter callback that was already
-        // in flight must not be able to repopulate the next home-page visit.
+        val route = current.maintenance.routeAction
+        route?.parentRoute?.let { parent ->
+            // Back from the recommendation/local selection belongs to the
+            // source menu. Keep the session generation stable so the runtime
+            // can continue its shared subscription, while clearing only the
+            // selection-page payload.
+            publish(
+                current.copy(
+                    maintenance = current.maintenance.copy(
+                        routeAction = parent,
+                        activeAction = null,
+                        lastAction = null,
+                        installationSelection = null,
+                    ),
+                ),
+            )
+            return
+        }
+        if (route == MaintenanceActionId.INSTALL_MENU || route == MaintenanceActionId.INPUT_TEXT) {
+            // These are pure routes. Going home does not stop an unrelated
+            // device action that was already running in the same session.
+            publish(
+                current.copy(
+                    maintenance = current.maintenance.copy(
+                        routeAction = null,
+                        lastAction = null,
+                    ),
+                ),
+            )
+            return
+        }
+        // The page route is UI-owned, but an in-flight maintenance operation is
+        // session-owned. Leaving a non-pure action page ends both in one
+        // synchronous transition so the home page cannot remain permanently busy.
         startNewGeneration(
             current.copy(
                 evidence = current.evidence.copy(
@@ -1432,7 +1573,26 @@ class InstallationSession(
         if (current.state != InstallationSessionState.MAINTENANCE) {
             return
         }
+        if (command.actionId.isPureRoute) {
+            // Navigation is a domain transition, but it does not cancel a
+            // device action or advance its event generation. This lets input
+            // remain editable while another maintenance job is in flight.
+            publish(
+                current.copy(
+                    maintenance = current.maintenance.copy(
+                        routeAction = command.actionId,
+                        lastAction = null,
+                        applicationDetails = null,
+                        applicationAction = current.maintenance.applicationAction,
+                    ),
+                ),
+            )
+            return
+        }
         if (current.maintenance.activeAction != null) {
+            return
+        }
+        if (current.remoteInput.sending) {
             return
         }
         if (
@@ -1544,7 +1704,8 @@ class InstallationSession(
     private fun startMaintenanceComponentUpdate(rawComponentId: String) {
         val current = _snapshot.value
         if (current.state != InstallationSessionState.MAINTENANCE ||
-            current.maintenance.activeAction != null
+            current.maintenance.activeAction != null ||
+            current.remoteInput.sending
         ) return
         val status = current.maintenance.updateStatuses.firstOrNull { candidate ->
             candidate.componentId == rawComponentId ||
@@ -1706,6 +1867,7 @@ class InstallationSession(
         val current = _snapshot.value
         if (current.state != InstallationSessionState.MAINTENANCE ||
             current.maintenance.activeAction != null ||
+            current.remoteInput.sending ||
             current.maintenance.applicationAction?.status == MaintenanceActionStatus.RUNNING
         ) {
             return
@@ -2063,7 +2225,7 @@ class InstallationSession(
 
     private fun startSelectedMaintenanceInstallation() {
         val current = _snapshot.value
-        if (current.state != InstallationSessionState.MAINTENANCE) return
+        if (current.state != InstallationSessionState.MAINTENANCE || current.remoteInput.sending) return
         val selection = current.maintenance.installationSelection ?: return
         val selectedIds = selection.options.asSequence()
             .filter { !it.installed && it.componentId in selection.selectedComponentIds }
@@ -2083,7 +2245,8 @@ class InstallationSession(
                 InstallationSessionState.FAILED,
             )
         if ((current.state != InstallationSessionState.MAINTENANCE && !retryingTerminalAttempt) ||
-            current.maintenance.activeAction != null
+            current.maintenance.activeAction != null ||
+            current.remoteInput.sending
         ) {
             return
         }
@@ -3444,6 +3607,7 @@ class InstallationSession(
                 publish(
                     current.copy(
                         device = device?.copy(connectionStatus = DeviceConnectionStatus.DISCONNECTED),
+                        remoteInput = current.remoteInput.disconnected(event.reasonCode),
                         maintenance = current.maintenance.copy(
                             activeAction = null,
                             lastAction = current.maintenance.activeAction?.let { actionId ->
@@ -4818,7 +4982,13 @@ class InstallationSession(
         sequence: Long = _snapshot.value.lastEventSequence,
     ) {
         val current = _snapshot.value
-        val candidate = next.copy(
+        val normalized = next.copy(
+            remoteInput = next.remoteInput.copy(
+                leaseConfirmed = next.device?.connectionStatus == DeviceConnectionStatus.CONFIRMED,
+                deviceBusy = maintenanceActionBusy(next),
+            ),
+        )
+        val candidate = normalized.copy(
             revision = current.revision,
             lastEventSequence = sequence,
         )

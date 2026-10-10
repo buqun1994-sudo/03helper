@@ -115,12 +115,11 @@ internal object UsbAdbProtocolTransport {
         )
         return try {
             proxy.start()
-            val dadb = Dadb.create(
+            val dadb = RetainedAdbTransport.connect(
                 InetAddress.getLoopbackAddress().hostAddress ?: "127.0.0.1",
                 proxy.port,
-                null,
-                connectTimeout = 2_000,
-                socketTimeout = USB_TRANSFER_TIMEOUT_MILLIS,
+                connectTimeoutMillis = 2_000,
+                handshakeTimeoutMillis = USB_TRANSFER_TIMEOUT_MILLIS,
             )
             UsbProxyDadb(dadb, proxy)
         } catch (exception: Exception) {

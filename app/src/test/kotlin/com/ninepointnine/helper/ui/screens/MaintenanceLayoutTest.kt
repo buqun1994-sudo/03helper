@@ -47,6 +47,8 @@ class MaintenanceLayoutTest {
         assertTrue(maintenanceActionEnabled(MaintenanceActionId.CHECK_UPDATES, connected = false, busy = false))
         assertTrue(maintenanceActionEnabled(MaintenanceActionId.CLEANUP, connected = false, busy = false))
         assertTrue(maintenanceActionEnabled(MaintenanceActionId.EXPORT_DIAGNOSTICS, connected = false, busy = false))
+        assertTrue(maintenanceActionEnabled(MaintenanceActionId.INPUT_TEXT, connected = false, busy = true))
+        assertTrue(maintenanceActionEnabled(MaintenanceActionId.INSTALL_MENU, connected = false, busy = true))
         assertFalse(maintenanceActionEnabled(MaintenanceActionId.REPAIR_CONFIGURATION, connected = false, busy = false))
         assertFalse(maintenanceActionEnabled(MaintenanceActionId.LAUNCH_DESKTOP, connected = false, busy = false))
         assertFalse(maintenanceActionEnabled(MaintenanceActionId.CLEANUP, connected = true, busy = true))
@@ -98,10 +100,13 @@ class MaintenanceLayoutTest {
         assertEquals(
             listOf(
                 MaintenanceActionId.MANAGE_APPS,
-                MaintenanceActionId.INSTALL_APPLICATIONS,
-                MaintenanceActionId.INSTALL_LOCAL_APPLICATION,
+                MaintenanceActionId.INSTALL_MENU,
             ),
             maintenanceActions(com.ninepointnine.helper.domain.session.MaintenanceGroupId.APPS),
+        )
+        assertEquals(
+            listOf(MaintenanceActionId.INPUT_TEXT),
+            maintenanceActions(com.ninepointnine.helper.domain.session.MaintenanceGroupId.INPUT),
         )
         assertFalse(
             maintenanceActions(com.ninepointnine.helper.domain.session.MaintenanceGroupId.COMMON)

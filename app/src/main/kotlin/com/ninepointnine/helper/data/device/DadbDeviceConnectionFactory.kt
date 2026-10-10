@@ -32,10 +32,9 @@ class DadbDeviceConnectionFactory(
         var adb: Dadb? = null
         try {
             require(endpoint.transport == DeviceTransportKind.TCP) { "tcp_factory_received_non_tcp_endpoint" }
-            adb = Dadb.create(
+            adb = RetainedAdbTransport.connect(
                 endpoint.host,
                 endpoint.port,
-                null,
                 connectTimeoutMillis,
                 readTimeoutMillis,
             )
@@ -109,6 +108,8 @@ class DadbDeviceConnectionFactory(
     ) : DeviceActionConnectionLease {
         private val closed = AtomicBoolean(false)
         private val ioMutex = Mutex()
+        override val remoteInputGateway: com.ninepointnine.helper.domain.device.RemoteInputGateway =
+            DadbRemoteInputGateway(adb, closed, ioMutex)
         override val commandGateway = DadbCommandGateway(
             adb = adb,
             closed = closed,

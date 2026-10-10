@@ -1,3 +1,37 @@
+# 2026-10-10 高德输入目标与发送热路径（真实主测通过，Debug 已最终覆盖安装）
+
+1. 设备恢复后通过唯一车机发现入口找到 `S56_HQX / Android 9 / 1920x1080 / 192.168.0.203:5555`，并以显式手机 serial `adb-497aab37-bqF2pq._adb-tls-connect._tcp / RMX1901 / Android 11` 完成保留数据覆盖安装。测试桌面无障碍服务已追加到原有授权列表，没有覆盖其它服务；发送前和发送后原默认输入法均为 `com.kika.car.inputmethod/com.android.inputmethod.latin.LatinIME`。
+2. 用户确认真实高德文字提交通过，且端到端速度已完全进入可接受范围；没有重复发送覆盖输入框。完成后 capability 回读为 `available=true / keyboard=closed / targetPackage="" / targetWindow=-1 / sending=false`，与恢复后的终态一致。本次没有可审计的精确 `phone_send_finished_ms` 分布，文档不伪造速度百分比。
+3. 最新本地与设备 APK 完全一致：助手 `com.ninepointnine.helper.test / 1.0.22-test (23)`，`21,884,714` bytes，SHA-256 `afb84710b0b9a973bf256a6d7f5643476452abd29ca7898b8a3e57c5ba1d1d2c`；桌面 `com.ninepointnine.desktop.test / 1.0.12-icar03-test (13)`，`6,323,699` bytes，SHA-256 `04ac3df758afe1dd7270a774e28ede1f06feab618c3acbbe02fd148a9085897b`。两包单 signer / APK v2 通过，Debug 证书 SHA-256 `2990047fddf6d6ec1eb7f83731fcc1398616e5fb83aec97542a4f132c35a1a27`，Launcher 身份核对完成；最终覆盖安装已完成，未替换正式包。
+4. 代码、协议、焦点证明、排他恢复、热路径优化及自动化证据详见下方历史记录与 `docs/protocols/remote-input-contract.md`。共享 03 APP 登记检查仍按约 fail closed：登记停留在助手 `1.0.21/22`、clean，而实际为 `1.0.22/23`、dirty；未修改 Cloud 掩盖冲突。
+5. 用户已明确授权提交两端仓库，本轮提交本地改动但不推送、不发布；未卸载、清数据、降级或重启设备。
+
+以下为设备恢复前的代码验证与阻断记录，保留用于审计历史。
+
+# 2026-10-10 高德输入目标与发送热路径（代码验证完成，实测及最终安装暂缓）
+
+1. 真实高德故障有两层根因：车机可以返回 `available=true / keyboard=open / targetPackage="" / targetWindow=-1` 的合法 unknown 观察，助手此前误拒绝并断开订阅；OEM 又未把高德应用窗列入 accessibility windows，但同次 active root 与 `findFocus(FOCUS_INPUT)`、refresh 成功的 focused/editable 字段证明目标为高德窗口。两端已修复协议解析及纯证据解析器，无高德包名 / 车型特判、不复制历史目标、不读文字 / 遍历树 / 轮询。实车曾确认新桌面返回 `keyboard=open / com.autonavi.amapauto / window21`；这是目标识别证据，不等于真实提交通过。
+2. 焦点冻结还补齐两个排序边界：真实 view-focused source 不能被同包同窗快照字段替代；IME 建立新字段连接早于无障碍焦点事件时，提交前重新取得一次当前字段证明，对比冻结 token / 目标 / 输入连接，并在查询后重查 deadline。缺失 / 冲突不提交，不牺牲验证提速。
+3. 发送热路径保留逐次读取原 IME、单次 commitText、原 IME 恢复与回读。原生 `cmd input_method ime` 支持用成功退出码 + 原 IME 完整组件行证明，租约内只探测一次，不支持回退固定 `ime`；终态验证后省去冗余 cancel，复用 `restore_ok` 省去重复 settings 查询。畸形 / 错 ID / unknown_request 仍保守取消、不重放；恢复标记独立解析，结果损坏不抹掉已确认恢复。
+4. 守护从布尔资格升级排他 claim / release：取得时同步持久化 UUID-only fence、取消未完成提交、阻止新 begin；恢复 worker 结束后仅同 UUID 可 release，released 墓碑阻止迟到重入，进程重建保留 fence。16 秒仅诊断，不自动解锁；guard 被强杀、claim 回执丢失或持久故障漏 release 时需确认旧 worker 停止后主动处理，当前无自动恢复 UI。普通发送不增加 claim / release roundtrip。共同契约更新 `restoreProtocol:"exclusive"`，新助手不会误用旧布尔桥接。
+5. 最终助手 `testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest` 通过：JVM `484/484`、0 failures / errors / skipped，Lint 0 errors / 35 warnings；桌面 `testDebugUnitTest lintDebug assembleDebug` 通过：JVM `131/131`、0 failures / errors / skipped，Lint 0 errors / 36 warnings。新增真实 POSIX shell 的原生探测语义及事务语法测试；这些 fixture 不计为车机输入 / 恢复 / 性能通过。
+6. 最新本地 Debug 助手 `com.ninepointnine.helper.test / 1.0.22-test (23)` 为 `21,884,714` bytes，SHA-256 `afb84710b0b9a973bf256a6d7f5643476452abd29ca7898b8a3e57c5ba1d1d2c`；桌面 `com.ninepointnine.desktop.test / 1.0.12-icar03-test (13)` 为 `6,323,699` bytes，SHA-256 `04ac3df758afe1dd7270a774e28ede1f06feab618c3acbbe02fd148a9085897b`。两包单 signer / APK v2 通过、开发证书 SHA-256 `2990047fddf6d6ec1eb7f83731fcc1398616e5fb83aec97542a4f132c35a1a27`，Launcher 身份核对完成。两者尚未执行本轮收口后的最终安装；下节旧 digest 仅为历史实装，不可冒充本轮已交付。
+7. 用户已手测浏览器单次输入跑通但过慢；本轮 opt-in 真实 UI smoke 未进入发送，先后在车机键盘未 open / readiness 等待处超时，以及一次 instrumentation 启动进程失败，没有测试文字提交或新的临时 IME 切换。末次已读原 IME 仍为 Kika。新增入口默认跳过、拒绝非空草稿、只发送一次并记录 `phone_send_finished_ms`，带测试期亮屏与失败元数据；入口已编译，但不得写成运行通过。
+8. 性能只有单条车机命令样本：settings get 约 0.14 秒、content get_state 约 1.25 秒、native help 约 0.05 秒。它们既不是原生 enable/set 耗时，也不是总发送耗时 / 分布 / 提速百分比。设备随后手机 ADB 消失、车机 transport 为 offline，仓库有界发现入口未命中；失败不能证明车辆物理离线。用户明确选择“先完成代码验证，稍后恢复设备”，因此暂缓真实发送、总耗时验收及最新 Debug 最终覆盖安装。恢复后先安装并回读两包身份，再在高德同一真实字段发送一次，目视原文、回读原 IME，并记录点击至终态；unknown 立即停止重发。
+9. 文档 / Skills / Android 配置 / 项目结构 / diff 检查已完成；配置护栏随统一 nodeToken owner 更新，并增加新鲜证明 / 排他恢复检查。共享 03 APP 登记仍为助手 `1.0.21/22`、桌面 `1.0.11-icar03/12` 与 clean，实际新版本 / dirty，各 5 项冲突按约 fail closed，未修改 Cloud 掩盖冲突。两仓保持未提交改动，未提交、推送、staging / Release 打包、卸载、清数据、降级、重启或发布。
+
+# 2026-10-10 手机到车机输入与后台在线（代码及 Debug 交付完成，待用户车机主测）
+
+1. 维护首页应用组收口为“管理已安装应用 / 安装应用”，安装应用二级页提供推荐 / 本机两个来源并复用原授权、安装和失败恢复主链；新增输入组和“输入文字”页，不提供未实现终端占位。输入页自动聚焦并打开手机 IME、多行增长及内部滚动、Enter 换行、发送固定在键盘上方，灰色按钮只解释，不绕过领域门禁。
+2. 唯一状态 owner 继续为 `InstallationSessionSnapshot.remoteInput` / `InstallationSession`，运行时持有同一 verified ADB lease；generation / sequence / frozen UUID / target epoch / UTF-8 上限 / device busy / vehicle sending / 结果未知全部由领域裁决。状态流单独故障不提前解除发送 / 恢复占用，真正断线保留未知且不自动重放；旧事件不能关闭新 lease，后台恢复只尝试已知同 stableId 端点，不触发网段扫描，通道每租约最多 3 次延迟重试。
+3. 两端共同协议唯一真值见 `docs/protocols/remote-input-contract.md`：root/shell-only Provider 与 localabstract multiplex socket；正文只进有界 JSON 数据流，绝不进入 shell argv / 临时文件。桌面无障碍只订阅窗口 / 焦点三类事件并读身份元数据，内置 IME 冻结目标后一次 commitText；固定车机事务临时切换、回读恢复、EXIT trap 和 detached 有界 guard，恢复资格 UUID 同步持久化。正常桌面运行不新增 INTERNET、WRITE_SECURE_SETTINGS 或手机依赖。
+4. 助手新增 connectedDevice 前台服务，只消费领域相关投影做通知边沿去重，键盘 open 可在空草稿时提醒，发送临时切换不重复提醒，页面可见 / 忙 / 关闭 / 断线 / 未知撤提醒；网络回调返回运行时 dispatcher，Wi-Fi 锁仅会话内持有，无持续 CPU 锁或后台轮询。实际正常锁屏、强制 Doze、OEM 省电、进程回收需分别实测，不能从 JVM 测试推断。
+5. 最终助手 `testDebugUnitTest lintDebug assembleDebug assembleDebugAndroidTest` 通过，JVM `470/470`（0 failures / errors / skipped），Lint 0 errors / 36 warnings；桌面同类 JVM / Lint / Debug 构建通过，`89/89`、Lint 0 errors / 36 warnings。相关测试覆盖有界首帧、严格 UTF-8 / 类型 / 帧、loopback 实际 ADB 并发与静默流、发送结果、代次、后台恢复、通知边沿、桌面焦点 / UID / socket 生命周期 / owner。
+6. 显式手机 RMX1901 / Android 11 完成两条无车机写入 smoke：安装来源菜单至单选失败 / 重试通过；输入页自动 IME、真实 IME 上方按钮、换行、灰色解释浮窗、返回及草稿保留通过。首次输入页测试因最高层浮窗带来两个 Compose root 而失败，已改为稳定页面节点 + 实际 IME 几何后独立重跑通过，不将测试选择器问题算作功能通过。smoke 后再次保留数据覆盖安装最终助手 Debug。
+7. 实装助手为 `com.ninepointnine.helper.test` / `1.0.22-test (23)`，`22,277,088` bytes，SHA-256 `0d98f89e0d75223afaa0cf0cbba0b471f80cfe963624d3dc3d4e5f90f2d0bb86`；车机 install-only 实装桌面为 `com.ninepointnine.desktop.test` / `1.0.12-icar03-test (13)`，`6,220,643` bytes，SHA-256 `956332be296679af0995e4e89ad439be4166cca36facdd62d8d6c5adb942c781`。两包 APK 单 signer / v2 通过、Debug 证书摘要 `2990047fddf6d6ec1eb7f83731fcc1398616e5fb83aec97542a4f132c35a1a27`；最终设备回读版本、Launcher 和 APK SHA-256 均与本地一致。未替换正式桌面、未自动启动车机桌面 UI。
+8. 车机只读 `get_capability` 与真实 socket 首帧订阅均返回合法 v1 身份，当前测试桌面未启用自己的无障碍服务，真实状态为 `available=false / keyboard=unknown / sequence=0`。正式桌面的既有无障碍授权未复制给独立 `.test` 身份。下一步用户在系统启用测试桌面服务，再依验证矩阵检查中文 / 空格 / 换行 / emoji 一次提交、同应用焦点变化拒绝、原 IME 恢复、后台 / 锁屏通知和断线 guard；未知结果立即停止重发并检查车机。未运行真实文字提交、输入法切换或锁屏人工场景。
+9. 助手文档 / Skill / 本机环境 / diff 护栏以及桌面 Android 配置 / 项目 / Skill / 安装脚本语法 / diff 护栏通过。03 APP 登记检查仍因共享索引版本停留于助手 `1.0.21/22`、桌面 `1.0.11-icar03/12` 且登记 clean / 实际 dirty 而 fail closed；未改共享登记迎合工作树。两仓保持未提交改动，未提交、推送、打包 staging / Release、清数据、卸载、降级、重启或发布。
+
 # 2026-10-01 03helper 1.0.21 正式 Release 打包
 
 1. `release-version.properties` 已递增为 `1.0.21` / `versionCode 22`；正式 APK 身份为 `com.ninepointnine.helper`，大小 `14,497,692` 字节，SHA-256 为 `23f75f707c40f705d4b62bf77d646ab95e3bf08dfd257dcfa941fe1f79a92821`，production 证书摘要为 `31ca80dd21a5208eaabd5f3e1440a3db2f7dc79122e03eaa6ba01730fb31f18b`，APK Signature Scheme v2 通过。

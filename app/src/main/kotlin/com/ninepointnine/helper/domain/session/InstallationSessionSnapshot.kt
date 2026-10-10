@@ -1,6 +1,7 @@
 package com.ninepointnine.helper.domain.session
 
 import com.ninepointnine.helper.domain.device.ApplicationAutostartState
+import com.ninepointnine.helper.domain.input.RemoteInputSnapshot
 
 import com.ninepointnine.helper.domain.artifact.ArchiveDownloadEvidence
 import com.ninepointnine.helper.domain.artifact.ArchiveVerificationEvidence
@@ -62,6 +63,8 @@ data class InstallationSessionSnapshot(
     val archiveVerifications: Map<String, ArchiveVerificationEvidence> = emptyMap(),
     val apkExtractions: Map<String, ApkExtractionEvidence> = emptyMap(),
     val maintenance: MaintenanceSnapshot = MaintenanceSnapshot(),
+    /** Input draft, target readiness and one-send outcome owned by this session. */
+    val remoteInput: RemoteInputSnapshot = RemoteInputSnapshot(),
     /** True only while discovery was started to restore a disconnected maintenance lease. */
     val maintenanceReconnectPending: Boolean = false,
     /** True only while discovery is restoring an interrupted installation lease. */

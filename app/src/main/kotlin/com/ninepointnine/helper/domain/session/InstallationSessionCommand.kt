@@ -10,6 +10,7 @@ import com.ninepointnine.helper.domain.artifact.SourceSelectionEvidence
 import com.ninepointnine.helper.domain.device.ManagedApplicationAuthorizationStatus
 import com.ninepointnine.helper.domain.device.ApplicationAuthorizationResultValue
 import com.ninepointnine.helper.domain.device.ApplicationAutostartState
+import com.ninepointnine.helper.domain.input.RemoteInputStatus
 
 /** Commands accepted by the single installation-session owner. */
 sealed interface InstallationSessionCommand {
@@ -69,6 +70,32 @@ sealed interface InstallationSessionCommand {
 
     /** The picker was dismissed without changing the maintenance session. */
     data object CancelLocalApkSelection : InstallationSessionCommand
+
+    data class UpdateRemoteInputDraft(val text: String) : InstallationSessionCommand
+    data class SendRemoteInputText(val requestId: String) : InstallationSessionCommand
+    data class RemoteInputConnectionChanged(
+        val generation: Long,
+        val status: RemoteInputStatus,
+        val reason: String? = null,
+    ) : InstallationSessionCommand
+    data class RemoteInputStateReceived(
+        val generation: Long,
+        val sequence: Long,
+        val keyboardOpen: Boolean,
+        val epoch: Long,
+        val targetPackage: String,
+        val targetWindow: Int,
+        val available: Boolean,
+        val vehicleSending: Boolean = false,
+    ) : InstallationSessionCommand
+    data class RemoteInputSendFinished(
+        val generation: Long,
+        val requestId: String,
+        val committed: Boolean?,
+        val restored: Boolean,
+        val reason: String? = null,
+    ) : InstallationSessionCommand
+    data object DismissRemoteInputNotice : InstallationSessionCommand
 
     /** An event emitted by a discovery or installation adapter. */
     data class AdapterEvent(

@@ -24,6 +24,7 @@
 | Cloud 官网视觉、release index、R2、GitHub Releases、公开下载或云端配置 | `docs/architecture/Cloud项目能力接线.md` |
 | Android 助手动态配置协议、apps[]、修订号与目录发布顺序 | `docs/protocols/android-helper-config-contract.md` |
 | V5 唯一分发主链、跨仓库施工和 Windows 交接 | `docs/plans/Android分发V5施工方案.md` |
+| 手机输入、车机键盘事件、输入法切换恢复、后台在线与通知 | `docs/protocols/remote-input-contract.md` |
 | 单测、构建、ADB 安装、运行级 smoke | `docs/testing/验证矩阵.md` |
 | JDK、Android SDK、ADB、共享工具链 | `docs/operations/本地开发环境.md` |
 | 权限、签名、密钥、下载源、发布 | `docs/security/安全与密钥边界.md` |

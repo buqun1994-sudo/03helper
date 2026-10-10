@@ -15,6 +15,10 @@ import java.util.LinkedHashSet
 interface DeviceActionConnectionLease : DeviceConnectionLease {
     val commandGateway: AdbCommandGateway
 
+    /** Input events share this verified lease; pages never own a second connection. */
+    val remoteInputGateway: RemoteInputGateway?
+        get() = null
+
     /** Optional maintenance port exposed by a connection that supports maintenance actions. */
     val maintenanceGateway: MaintenanceCommandGateway?
         get() = commandGateway as? MaintenanceCommandGateway

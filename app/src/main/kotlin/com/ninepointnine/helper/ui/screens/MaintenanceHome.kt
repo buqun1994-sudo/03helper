@@ -74,6 +74,7 @@ import com.ninepointnine.helper.domain.session.MaintenanceInventoryState
 import com.ninepointnine.helper.domain.session.ResultKind
 import com.ninepointnine.helper.domain.session.requiresConnectedDevice
 import com.ninepointnine.helper.domain.session.isApplicationInstallation
+import com.ninepointnine.helper.domain.session.isPureRoute
 import com.ninepointnine.helper.domain.artifact.KnownApplicationPackages
 import com.ninepointnine.helper.ui.state.ResultFailureStage
 import com.ninepointnine.helper.ui.components.AnimatedEntry
@@ -177,6 +178,20 @@ fun MaintenanceHome(
                 )
             } else {
                 when (action) {
+                    MaintenanceActionId.INSTALL_MENU -> MaintenanceInstallationMenuPage(
+                        onRecommended = {
+                            onIntent(InstallUiIntent.MaintenanceAction(MaintenanceActionId.INSTALL_APPLICATIONS))
+                        },
+                        onLocalApk = { onIntent(InstallUiIntent.PickLocalApk) },
+                        onBack = leaveAction,
+                    )
+
+                    MaintenanceActionId.INPUT_TEXT -> RemoteInputPage(
+                        state = state,
+                        onIntent = onIntent,
+                        onBack = leaveAction,
+                    )
+
                     MaintenanceActionId.CHECK_UPDATES -> MaintenanceUpdatesPage(
                         state = state,
                         onUpdate = { componentId ->
@@ -225,6 +240,10 @@ fun MaintenanceHome(
                 }
             }
         }
+        RemoteInputNotice(
+            remoteInput = state.remoteInput,
+            onDismiss = { onIntent(InstallUiIntent.DismissRemoteInputNotice) },
+        )
     }
 }
 
@@ -1852,7 +1871,7 @@ private fun MaintenanceOverview(
                     group = group,
                     columns = columns,
                     connected = state.connected,
-                    busy = state.feedback?.status == MaintenanceActionStatus.RUNNING,
+                    busy = state.busy,
                     onAction = onAction,
                 )
             }
@@ -2174,8 +2193,10 @@ internal fun maintenanceActions(group: MaintenanceGroupId): List<MaintenanceActi
         )
         MaintenanceGroupId.APPS -> listOf(
             MaintenanceActionId.MANAGE_APPS,
-            MaintenanceActionId.INSTALL_APPLICATIONS,
-            MaintenanceActionId.INSTALL_LOCAL_APPLICATION,
+            MaintenanceActionId.INSTALL_MENU,
+        )
+        MaintenanceGroupId.INPUT -> listOf(
+            MaintenanceActionId.INPUT_TEXT,
         )
         MaintenanceGroupId.STORAGE -> listOf(
             MaintenanceActionId.EXPORT_DIAGNOSTICS,
@@ -2191,7 +2212,11 @@ internal fun maintenanceActionEnabled(
     action: MaintenanceActionId,
     connected: Boolean,
     busy: Boolean,
-): Boolean = !busy && (connected || !action.requiresConnectedDevice)
+): Boolean = if (action.isPureRoute) {
+    true
+} else {
+    !busy && (connected || !action.requiresConnectedDevice)
+}
 
 @Composable
 private fun MaintenanceActionCard(
@@ -2232,6 +2257,7 @@ private fun MaintenanceActionCard(
 private fun groupTitle(group: MaintenanceGroupId): Int = when (group) {
     MaintenanceGroupId.COMMON -> R.string.maintenance_common
     MaintenanceGroupId.APPS -> R.string.maintenance_apps
+    MaintenanceGroupId.INPUT -> R.string.maintenance_input
     MaintenanceGroupId.STORAGE -> R.string.maintenance_storage
 }
 
@@ -2240,6 +2266,8 @@ private fun actionTitle(action: MaintenanceActionId): Int = when (action) {
     MaintenanceActionId.REINSTALL -> R.string.maintenance_reinstall
     MaintenanceActionId.REPAIR_CONFIGURATION -> R.string.maintenance_repair
     MaintenanceActionId.MANAGE_APPS -> R.string.maintenance_manage_apps
+    MaintenanceActionId.INSTALL_MENU -> R.string.maintenance_install_menu
+    MaintenanceActionId.INPUT_TEXT -> R.string.maintenance_input_text
     MaintenanceActionId.INSTALL_APPLICATIONS,
     MaintenanceActionId.INSTALL_FILE_MANAGER,
     -> R.string.maintenance_install_file_manager
@@ -2255,6 +2283,8 @@ private fun actionDescription(action: MaintenanceActionId): Int = when (action) 
     MaintenanceActionId.REINSTALL -> R.string.maintenance_reinstall_description
     MaintenanceActionId.REPAIR_CONFIGURATION -> R.string.maintenance_repair_description
     MaintenanceActionId.MANAGE_APPS -> R.string.maintenance_manage_apps_description
+    MaintenanceActionId.INSTALL_MENU -> R.string.maintenance_install_menu_description
+    MaintenanceActionId.INPUT_TEXT -> R.string.maintenance_input_text_description
     MaintenanceActionId.INSTALL_APPLICATIONS,
     MaintenanceActionId.INSTALL_FILE_MANAGER,
     -> R.string.maintenance_install_file_manager_description
@@ -2270,6 +2300,8 @@ private fun actionIcon(action: MaintenanceActionId): String = when (action) {
     MaintenanceActionId.REINSTALL -> "download"
     MaintenanceActionId.REPAIR_CONFIGURATION -> "wrench"
     MaintenanceActionId.MANAGE_APPS -> "layout_grid"
+    MaintenanceActionId.INSTALL_MENU -> "folder_plus"
+    MaintenanceActionId.INPUT_TEXT -> "keyboard"
     MaintenanceActionId.INSTALL_APPLICATIONS,
     MaintenanceActionId.INSTALL_FILE_MANAGER,
     -> "folder_plus"

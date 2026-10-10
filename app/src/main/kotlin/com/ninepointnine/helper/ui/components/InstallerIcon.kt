@@ -128,6 +128,7 @@ internal fun lucideDrawable(name: String): Int = when (name) {
     "file_down" -> LucideR.drawable.lucide_ic_file_down
     "file_plus" -> LucideR.drawable.lucide_ic_file_plus
     "folder_plus" -> LucideR.drawable.lucide_ic_folder_plus
+    "keyboard" -> LucideR.drawable.lucide_ic_keyboard
     "layout_grid" -> LucideR.drawable.lucide_ic_layout_grid
     "loader_circle" -> LucideR.drawable.lucide_ic_loader_circle
     "lock_keyhole" -> LucideR.drawable.lucide_ic_lock_keyhole

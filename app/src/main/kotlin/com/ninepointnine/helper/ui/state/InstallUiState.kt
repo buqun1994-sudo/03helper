@@ -18,6 +18,7 @@ import com.ninepointnine.helper.domain.device.ApplicationAuthorizationRequiremen
 import com.ninepointnine.helper.domain.device.AuthorizationPlanFactory
 import com.ninepointnine.helper.domain.session.InstallationFlow
 import com.ninepointnine.helper.domain.session.InstallationResultFailureStage
+import com.ninepointnine.helper.domain.input.RemoteInputSnapshot
 
 sealed interface InstallUiState {
     val screen: InstallScreen
@@ -87,6 +88,8 @@ sealed interface InstallUiState {
         val deviceName: String?,
         val connected: Boolean,
         val reconnecting: Boolean = false,
+        val busy: Boolean = false,
+        val remoteInput: RemoteInputSnapshot = RemoteInputSnapshot(),
         /** Secondary maintenance page selected by the domain session. */
         val routeAction: MaintenanceActionId? = null,
         val feedback: MaintenanceFeedback? = null,
@@ -103,6 +106,7 @@ sealed interface InstallUiState {
         val groups: List<MaintenanceGroupId> = listOf(
             MaintenanceGroupId.COMMON,
             MaintenanceGroupId.APPS,
+            MaintenanceGroupId.INPUT,
         ),
     ) : InstallUiState {
         override val screen: InstallScreen = InstallScreen.MAINTENANCE
@@ -309,4 +313,7 @@ sealed interface InstallUiIntent {
     data object PickLocalApk : InstallUiIntent
     data class LocalApkSelected(val uri: String) : InstallUiIntent
     data object LocalApkSelectionCancelled : InstallUiIntent
+    data class UpdateRemoteInputDraft(val text: String) : InstallUiIntent
+    data object SendRemoteInputText : InstallUiIntent
+    data object DismissRemoteInputNotice : InstallUiIntent
 }
